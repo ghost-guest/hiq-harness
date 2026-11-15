@@ -62,6 +62,33 @@ pub struct RunOutcome {
 }
 
 /// 跑一次真实的 agent 任务。
+/// 运行过程中的事件。流式输出用。
+///
+/// 全部来自已有的执行流程，不新增逻辑 —— 只是把内部状态外化。
+#[derive(Debug, Clone)]
+pub enum RunEvent {
+    /// 开始了第 n 步
+    StepStarted { step: u32 },
+    /// 模型决定调用工具
+    ToolCalling { name: String, summary: String },
+    /// 工具返回
+    ToolDone {
+        name: String,
+        ok: bool,
+        chars: usize,
+    },
+    /// 守卫介入
+    GuardNote { note: String },
+    /// 模型给出最终文本
+    FinalText { text: String },
+    /// 思考/中间文本。预留给 token 级流式（模型侧逐段返回时用）。
+    #[allow(dead_code)]
+    Thinking { text: String },
+}
+
+/// 事件回调。返回 false 表示中止。
+pub type EventSink<'a> = &'a mut dyn FnMut(RunEvent);
+
 pub fn run_task(
     client: &OpenAiClient,
     tools: &LocalTools,
@@ -70,6 +97,7 @@ pub fn run_task(
     memory: &mut ProjectMemory,
     task: &str,
     cfg: &RunConfig,
+    sink: EventSink<'_>,
 ) -> anyhow::Result<RunOutcome> {
     let mut guards = GuardSet::new();
     let tool_specs = LocalTools::tool_specs();
@@ -129,6 +157,7 @@ pub fn run_task(
 
         guards.begin_turn();
         invocation_in_step = 0u64;
+        sink(RunEvent::StepStarted { step: steps });
 
         // 一次模型调用
         // 关键：不带 reasoning 字段时完全省略，
@@ -175,6 +204,7 @@ pub fn run_task(
 
         match model_resp {
             harness_core::agent_loop::ModelResponse::Text(t) => {
+                sink(RunEvent::FinalText { text: t.clone() });
                 log.append(EventKind::AssistantMessage {
                     text: t.clone(),
                     blocks: vec![],
@@ -257,6 +287,11 @@ pub fn run_task(
                     invocation_in_step += 1;
                     let exec_id = ExecutionId::derive(invocation);
 
+                    sink(RunEvent::ToolCalling {
+                        name: req.name.clone(),
+                        summary: req.input.to_string().chars().take(60).collect(),
+                    });
+
                     log.append(EventKind::ToolCall {
                         id: call_id.0.clone(),
                         name: req.name.clone(),
@@ -295,6 +330,7 @@ pub fn run_task(
                         PostCallVerdict::OK => {}
                         PostCallVerdict::Note { note } => {
                             guard_events.push(format!("[守卫] 提示: {note}"));
+                            sink(RunEvent::GuardNote { note: note.clone() });
                             out_text.push_str("\n\n");
                             out_text.push_str(&note);
                         }
@@ -353,6 +389,12 @@ pub fn run_task(
                         },
                     });
                     log.commit()?;
+
+                    sink(RunEvent::ToolDone {
+                        name: req.name.clone(),
+                        ok: res.success && !replaced,
+                        chars: out_text.chars().count(),
+                    });
 
                     history.push(json!({
                         "role": "tool",

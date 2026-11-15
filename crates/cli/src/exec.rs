@@ -117,6 +117,7 @@ pub fn execute_task(dir: &Path, workdir: &Path, task: &str, cfg: &ExecConfig) ->
         &mut memory,
         task,
         &run_cfg,
+        &mut |_| {},
     ) {
         Ok(outcome) => {
             // 成功的任务写入记忆（跨会话可召回）

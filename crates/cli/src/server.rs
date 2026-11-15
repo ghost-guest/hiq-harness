@@ -497,8 +497,37 @@ fn http_dispatch(
         }
         Route::Pending => handler.pending(),
         Route::Resolve => handler.resolve(&parsed),
+        Route::RunStream => {
+            // SSE 流式：直接写 socket，不走 JSON 返回值
+            let task = parsed
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let workdir = std::env::var("HARNESS_WORKDIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cfg = crate::exec::ExecConfig::from_env();
+
+            let headers = crate::sse::sse_headers();
+            let mut resp = String::from("HTTP/1.1 200 OK\r\n");
+            for (k, v) in headers {
+                resp.push_str(&format!("{k}: {v}\r\n"));
+            }
+            resp.push_str("Connection: close\r\n\r\n");
+            stream.write_all(resp.as_bytes())?;
+            stream.flush()?;
+
+            crate::sse::stream_task(
+                stream,
+                std::path::Path::new(".harness"),
+                &workdir,
+                task,
+                &cfg,
+            )?;
+            return Ok(());
+        }
         Route::Run => {
-            // 真正执行任务（同步返回最终文本）
+            // 非流式：一次性返回 JSON
             let task = parsed
                 .get("task")
                 .and_then(|v| v.as_str())

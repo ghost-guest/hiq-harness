@@ -179,7 +179,16 @@ fn execute_node(
                 system: format!("你是 {role}。完成分配给你的节点任务。"),
                 ..Default::default()
             };
-            let outcome = run_task(client, tools, log, session, memory, &task, &cfg)?;
+            let outcome = run_task(
+                client,
+                tools,
+                log,
+                session,
+                memory,
+                &task,
+                &cfg,
+                &mut |_| {},
+            )?;
             if outcome.steps == 0 {
                 anyhow::bail!("agent 未执行任何步骤");
             }

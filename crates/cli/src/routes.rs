@@ -17,6 +17,8 @@ pub enum Route {
     Pending,
     Resolve,
     Run,
+    /// SSE 流式执行
+    RunStream,
     Sop,
     Ui,
     NotFound,
@@ -36,6 +38,7 @@ impl Route {
             ("GET", "/pending") => Self::Pending,
             ("POST", "/resolve") => Self::Resolve,
             ("POST", "/run") => Self::Run,
+            ("POST", "/run/stream") => Self::RunStream,
             ("POST", "/sop") => Self::Sop,
             ("GET", "/") | ("GET", "/ui") | ("GET", "/index.html") => Self::Ui,
             _ => Self::NotFound,

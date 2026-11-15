@@ -31,6 +31,7 @@ mod routes;
 mod runner;
 mod server;
 mod sop;
+mod sse;
 mod tools;
 
 #[derive(Parser)]
@@ -665,6 +666,7 @@ fn main() -> Result<()> {
                 &mut memory,
                 &task,
                 &cfg,
+                &mut |_| {}, // CLI 同步输出，不需要事件流
             )?;
 
             println!("\n=== 结果 ===");
