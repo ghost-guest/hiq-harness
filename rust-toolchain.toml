@@ -1,0 +1,4 @@
+[toolchain]
+# 跟随本机已安装版本（当前 1.94）。
+# 固定到旧版本会让 rustup 额外下载一套工具链，得不偿失。
+components = ["rustfmt", "clippy"]

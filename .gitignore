@@ -1,0 +1,23 @@
+# Rust
+
+target/
+**/*.rs.bk
+*.pdb
+
+# Go
+plugins/**/*.exe
+plugins/**/harness-plugin
+
+# 运行时数据（所有产出都留在项目里，但不入版本库）
+.harness/
+/tmp/
+
+# 编辑器
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 本地覆盖
+.env
+.env.local
