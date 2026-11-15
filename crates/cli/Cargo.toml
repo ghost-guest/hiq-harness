@@ -12,6 +12,10 @@ path = "src/main.rs"
 harness-core = { path = "../core" }
 harness-guards = { path = "../guards" }
 harness-context = { path = "../context" }
+harness-memory = { path = "../memory" }
+harness-persist = { path = "../persist" }
+harness-orchestrate = { path = "../orchestrate" }
+harness-plugin = { path = "../plugin" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

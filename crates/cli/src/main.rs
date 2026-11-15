@@ -1,13 +1,27 @@
-//! CLI 入口。
+//! CLI 入口。把七层串起来。
 //!
-//! 当前只实现本地可验证的部分：事件日志、守卫自检。
-//! 模型调用与工具执行留了 trait，下一步接 OpenAI 兼容协议。
+//! 当前可运行的部分：日志、循环骨架、守卫、预算、记忆、持久化、编排、插件注册表。
+//! 模型调用与工具执行通过 trait 注入，实际对接留待下一步。
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use harness_core::event::{EventKind, EventLog};
+use harness_context::{validate_summary, BudgetPolicy, SummaryDefect, ToolResultTier};
+use harness_core::event::{EventKind, EventLog, Projection};
 use harness_guards::{GuardSet, PostCallVerdict, PreCallVerdict, Signature};
+use harness_memory::{ArchiveReason, MemoryKind, MemoryStore, SleepRun};
+use harness_orchestrate::{next_batch, Node, RunState, Schedule, Workflow};
+use harness_persist::{
+    resume, CheckpointStore, LeaseManager, MemoryIndex, MemoryRef, ReceiptLedger,
+};
+use harness_plugin::{
+    ApprovalChain, CallContext, Capability, ChainVerdict, PluginManifest, PluginScope, Registry,
+    Verdict,
+};
 use std::path::PathBuf;
+
+mod llm;
+mod runner;
+mod tools;
 
 #[derive(Parser)]
 #[command(name = "harness", version, about = "personal-AgentHarness")]
@@ -18,32 +32,65 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 初始化工作区的日志目录
+    /// 初始化工作区
     Init,
-    /// 往日志里追加一条消息并回放
+    /// 追加一条消息并回放
     Say {
         text: String,
         #[arg(long, default_value = ".harness")]
         dir: PathBuf,
     },
-    /// 回放当前日志投影出的消息
+    /// 回放当前投影
     Replay {
         #[arg(long, default_value = ".harness")]
         dir: PathBuf,
     },
-    /// 守卫自检：用内置场景验证三个守卫的行为
+    /// 守卫自检
     Selftest,
+    /// 全层演示
+    Demo,
+    /// 测试模型连通性
+    Ping {
+        #[arg(long, default_value = "http://127.0.0.1:3425/v1")]
+        base_url: String,
+        #[arg(long, default_value = "magpie")]
+        api_key: String,
+        #[arg(long, default_value = "auto/deepseek-v4.1-flash")]
+        model: String,
+    },
+    /// 真实跑一个任务
+    Run {
+        /// 任务描述
+        task: String,
+        /// 工作区根目录
+        #[arg(long, default_value = ".")]
+        workdir: PathBuf,
+        /// 日志目录
+        #[arg(long, default_value = ".harness")]
+        dir: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:3425/v1")]
+        base_url: String,
+        #[arg(long, default_value = "magpie")]
+        api_key: String,
+        #[arg(long, default_value = "auto/deepseek-v4.1-flash")]
+        model: String,
+        /// 最大步数，0 表示无上限
+        #[arg(long, default_value_t = 12)]
+        max_steps: u32,
+        /// 推理强度：low / high / max
+        #[arg(long, default_value = "high")]
+        effort: String,
+    },
 }
 
 fn log_path(dir: &PathBuf) -> PathBuf {
     dir.join("events.jsonl")
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
 
@@ -61,23 +108,21 @@ async fn main() -> Result<()> {
             log.append(EventKind::UserMessage { text });
             log.commit()?;
             println!("appended. replay:");
-            for m in harness_core::event::Projection::new(&EventLog::read_all(log_path(&dir))?)
-                .messages()
-            {
-                println!("  {:?}: {}", m.role, first_line(&m.text));
+            for m in Projection::new(&EventLog::read_all(log_path(&dir))?).messages() {
+                println!("  {}: {}", role(&m), first_line(&m.text));
             }
         }
 
         Cmd::Replay { dir } => {
             let events = EventLog::read_all(log_path(&dir))?;
-            let proj = harness_core::event::Projection::new(&events);
+            let proj = Projection::new(&events);
             println!(
                 "{} events, {} projected messages",
                 events.len(),
                 proj.messages().len()
             );
             for m in proj.messages() {
-                println!("  {:?}: {}", m.role, first_line(&m.text));
+                println!("  {}: {}", role(&m), first_line(&m.text));
             }
             if proj.has_unresolved_uncertain() {
                 println!("!! 存在未决的 uncertain 副作用，需人工裁决");
@@ -85,8 +130,83 @@ async fn main() -> Result<()> {
         }
 
         Cmd::Selftest => selftest()?,
+        Cmd::Demo => demo()?,
+
+        Cmd::Ping {
+            base_url,
+            api_key,
+            model,
+        } => {
+            let client = llm::OpenAiClient::new(base_url.clone(), api_key, model.clone());
+            println!("请求 {base_url} 模型 {model} …");
+            let (text, usage) = llm::ping(&client, "用一句话回答：你是什么模型？")?;
+            println!("回复: {}", text.trim());
+            println!(
+                "用量: prompt={:?} completion={:?} cached={:?}",
+                usage.prompt_tokens, usage.completion_tokens, usage.cached_tokens
+            );
+        }
+
+        Cmd::Run {
+            task,
+            workdir,
+            dir,
+            base_url,
+            api_key,
+            model,
+            max_steps,
+            effort,
+        } => {
+            let workdir = workdir.canonicalize().unwrap_or(workdir);
+            let mut log = EventLog::open(log_path(&dir))?;
+            let client = llm::OpenAiClient {
+                base_url,
+                api_key,
+                model: model.clone(),
+                effort: Some(effort.clone()),
+            };
+            let tools = tools::LocalTools::new(workdir.clone());
+
+            println!("工作区: {}", workdir.display());
+            println!("模型: {model} (effort={effort})");
+            println!("任务: {task}\n");
+
+            let cfg = runner::RunConfig {
+                max_steps,
+                effort: Some(effort),
+                system: "你是一个编程助手，在给定的工作区内完成任务。\
+                         用工具读写文件、执行命令。不要臆造文件内容 —— 先读再改。\
+                         任务完成后，用一句话总结你做了什么。"
+                    .into(),
+            };
+
+            let outcome = runner::run_task(&client, &tools, &mut log, &task, &cfg)?;
+
+            println!("\n=== 结果 ===");
+            println!("步数: {}", outcome.steps);
+            println!("累计输入 token: {}", outcome.total_input_tokens);
+            if !outcome.guard_events.is_empty() {
+                println!("守卫事件:");
+                for e in &outcome.guard_events {
+                    println!("  {e}");
+                }
+            }
+            println!("最终回复: {}", outcome.final_text.trim());
+
+            // 回放日志，验证持久化
+            let events = EventLog::read_all(log_path(&dir))?;
+            println!("\n日志: {} 条事件", events.len());
+        }
     }
     Ok(())
+}
+
+fn role(m: &harness_core::event::ProjectedMessage) -> &'static str {
+    use harness_core::event::Role;
+    match m.role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+    }
 }
 
 fn first_line(s: &str) -> String {
@@ -98,67 +218,362 @@ fn first_line(s: &str) -> String {
     }
 }
 
-/// 守卫自检：把调研里的关键场景跑一遍，打印结果。
+// ─────────────────────────────────────────────────────────────
+// 守卫自检
+// ─────────────────────────────────────────────────────────────
+
 fn selftest() -> Result<()> {
     println!("=== 守卫自检 ===\n");
 
-    // 场景 1：相同失败连续 3 次 → 熔断
+    // 1. 相同失败连续 3 次 → 熔断
     let mut g = GuardSet::new();
     let s = Signature::new("bash", "pytest", "boom", "");
     for i in 1..=3 {
         let v = g.after_call(&s, false);
-        println!("相同失败第 {i} 次 → {v:?}");
         if i == 3 {
             assert!(
                 matches!(v, PostCallVerdict::Note { .. }),
-                "第 3 次应触发熔断提示"
+                "第 3 次应触发熔断"
             );
         }
     }
+    println!("[L2] 相同失败第 3 次 → 熔断 ok");
 
-    // 场景 2：轮询（结果在变）→ 不熔断
+    // 2. 轮询（结果在变）→ 不熔断
     let mut g = GuardSet::new();
-    let mut blocked = false;
     for i in 0..20 {
         let s = Signature::new("bash", "check", &format!("running {i}%"), "");
         if let PostCallVerdict::Note { note } = g.after_call(&s, false) {
-            if note.contains("连续失败") {
-                blocked = true;
-            }
+            assert!(!note.contains("连续失败"), "轮询不该触发失败熔断");
         }
     }
-    assert!(!blocked, "轮询不应触发失败熔断");
-    println!("\n轮询 20 次（结果每次不同）→ 未触发失败熔断 ok");
+    println!("[L2] 轮询 20 次（结果每次不同）→ 未误杀 ok");
 
-    // 场景 3：只读螺旋
-    // 注意：必须用全新的 GuardSet，且只走 before_call，
-    // 否则前面场景残留的 failure 状态会干扰。
+    // 3. 只读螺旋
     let mut g = GuardSet::new();
-    let mut advisory_at = None;
-    let mut blocked_at = None;
+    let mut adv = None;
+    let mut blk = None;
     for i in 1..=16 {
         match g.before_call("read_file") {
-            PreCallVerdict::ProceedWithNote { .. } if advisory_at.is_none() => {
-                advisory_at = Some(i)
-            }
-            PreCallVerdict::Block { .. } if blocked_at.is_none() => blocked_at = Some(i),
+            PreCallVerdict::ProceedWithNote { .. } if adv.is_none() => adv = Some(i),
+            PreCallVerdict::Block { .. } if blk.is_none() => blk = Some(i),
             _ => {}
         }
     }
-    println!("只读螺旋：第 {advisory_at:?} 次提示，第 {blocked_at:?} 次阻塞");
-    assert_eq!(advisory_at, Some(12), "第 12 次应提示");
-    assert_eq!(blocked_at, Some(15), "第 15 次应阻塞");
+    assert_eq!(adv, Some(12), "第 12 次应提示");
+    assert_eq!(blk, Some(15), "第 15 次应阻塞");
+    println!("[L2] 只读螺旋：第 12 次提示、第 15 次阻塞 ok");
 
-    // 场景 4：写入后重置
+    // 4. 写入后重置
     let mut g = GuardSet::new();
     for _ in 0..11 {
         g.before_call("read_file");
     }
     g.before_call("write_file");
-    let v = g.before_call("read_file");
-    assert!(matches!(v, PreCallVerdict::Proceed), "写入后应重置螺旋计数");
-    println!("写入后只读计数重置 ok");
+    assert!(matches!(
+        g.before_call("read_file"),
+        PreCallVerdict::Proceed
+    ));
+    println!("[L2] 写入后只读计数重置 ok");
 
     println!("\n全部通过。");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────
+// 全层演示
+// ─────────────────────────────────────────────────────────────
+
+fn demo() -> Result<()> {
+    println!("=== 七层演示 ===\n");
+
+    // L0 日志
+    let dir = std::env::temp_dir().join(format!("harness-demo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("events.jsonl");
+
+    let mut log = EventLog::open(&path)?;
+    log.append(EventKind::UserMessage {
+        text: "修好登录 bug".into(),
+    });
+    log.append(EventKind::ToolCall {
+        id: "c1".into(),
+        name: "read_file".into(),
+        input: serde_json::json!({"path": "src/auth.rs"}),
+    });
+    log.append(EventKind::ToolResult {
+        call_id: "c1".into(),
+        outcome: harness_core::event::ToolOutcome::Ok {
+            output: "fn login() {...}".into(),
+        },
+    });
+    log.commit()?;
+    let events = EventLog::read_all(&path)?;
+    println!(
+        "[L0] 日志 {} 条，投影 {} 条消息",
+        events.len(),
+        Projection::new(&events).messages().len()
+    );
+
+    // L0 压缩投影
+    let mut log = EventLog::open(&path)?;
+    log.append(EventKind::Compaction {
+        checkpoint_id: "cp1".into(),
+        summary: "前面读过 auth.rs，发现 login 没校验 token".into(),
+        through_seq: 2,
+        source_digest: "d1".into(),
+    });
+    log.append(EventKind::UserMessage {
+        text: "继续".into(),
+    });
+    log.commit()?;
+    let events = EventLog::read_all(&path)?;
+    let projected = Projection::new(&events).messages();
+    println!(
+        "[L0] 压缩后投影 {} 条（{} 条历史折叠为摘要）",
+        projected.len(),
+        3
+    );
+
+    // L3 预算与摘要校验
+    let mut policy = BudgetPolicy::new(200_000);
+    policy.calibration.observe(120, 100); // 实际是估算的 1.2 倍
+    println!(
+        "[L3] 校准后 100k 估算 → {} tokens；是否该压缩={}",
+        policy.calibration.calibrate(100_000),
+        policy.should_compact(100_000)
+    );
+
+    let good = "## Goal\n修登录\n\n## Progress\n### Done\n- 定位问题\n\
+                ### In Progress\n- 改代码\n\n## Next Steps\n1. 测试\n\n\
+                ## Critical Context\n- src/auth.rs:42, cargo test 失败";
+    let defects = validate_summary(good, 5_000);
+    println!("[L3] 合格摘要缺陷数 = {}", defects.len());
+
+    let echo = harness_context::SUMMARY_TEMPLATE.join("\n");
+    let echo_defects = validate_summary(&echo, 5_000);
+    println!(
+        "[L3] 模板回显被识别 = {}",
+        echo_defects.contains(&SummaryDefect::TemplateEcho)
+    );
+
+    let tier = ToolResultTier::Full {
+        text: "x".repeat(2000),
+    };
+    let degraded = tier.degrade("一行摘要", "/tmp/r1");
+    println!(
+        "[L3] 三段式降级: Full → {:?}",
+        std::mem::discriminant(&degraded)
+    );
+
+    // L4 记忆
+    let mut ms = MemoryStore::with_quota(10);
+    let acc = harness_memory::Access::full("proj");
+    let scope = vec!["proj".to_string()];
+    let m1 = ms.remember(&acc, MemoryKind::Fact, "项目用 postgres", &scope, 0)?;
+    let m2 = ms.remember(&acc, MemoryKind::Preference, "偏好紧凑排版", &scope, 0)?;
+    println!(
+        "[L4] 写入 {} 条，召回『postgres』{} 条",
+        ms.active_count(),
+        ms.recall(&acc, "postgres", 5).len()
+    );
+
+    // 密钥拒写
+    let secret_err = ms.remember(&acc, MemoryKind::Fact, "key=sk-abcdefghij", &scope, 0);
+    println!("[L4] 密钥拒写 = {}", secret_err.is_err());
+
+    // 封口
+    ms.supersede(&acc, &m1, "项目用 mysql", &scope, 1)?;
+    println!("[L4] 取代后活跃 {} 条（旧条封口但保留）", ms.active_count());
+
+    // 睡眠整合
+    let run: SleepRun = ms.sleep(&acc, 10, |m| {
+        if m.content.contains("偏好") {
+            Some(ArchiveReason::Expired)
+        } else {
+            None
+        }
+    })?;
+    println!(
+        "[L4] 睡眠整合：检查 {} 条，归档 {} 条（原因 {:?}）",
+        run.examined,
+        run.total_archived(),
+        run.archived.keys().collect::<Vec<_>>()
+    );
+    let _ = m2;
+
+    // L5 持久化
+    let mut ledger = ReceiptLedger::new();
+    ledger.begin("exec-1", 0);
+    ledger.begin("exec-2", 0);
+    ledger.confirm("exec-2", 1)?;
+    println!("[L5] 未决 uncertain = {:?}", ledger.pending_uncertain());
+    ledger.resolve_uncertain("exec-1", false, 2)?;
+    println!("[L5] 裁决后未决 = {}", ledger.pending_uncertain().len());
+
+    // 检查点 + 记忆失效
+    let mut cps = CheckpointStore::new();
+    let cp_id = cps.save(
+        5,
+        "state-payload",
+        vec![MemoryRef {
+            id: m1.clone(),
+            revision: 1,
+        }],
+        0,
+    );
+    let mut idx = MemoryIndex::new();
+    idx.set(&m1, 1);
+    let r_ok = resume(cps.get(&cp_id).unwrap(), &idx);
+    println!("[L5] 记忆一致时恢复可用 = {}", r_ok.state_usable);
+
+    idx.forget(&m1);
+    let r_bad = resume(cps.get(&cp_id).unwrap(), &idx);
+    println!(
+        "[L5] 记忆被遗忘后恢复可用 = {}，失效项 {:?}，state={:?}",
+        r_bad.state_usable, r_bad.invalidated_memory_ids, r_bad.state
+    );
+    cps.invalidate_by_memory(&m1);
+    println!("[L5] 连带撤销检查点后剩余 = {}", cps.len());
+
+    // 租约围栏
+    let mut lm = LeaseManager::new();
+    let old = lm.acquire("instance-a", 0, 5)?;
+    let new = lm.acquire("instance-b", 10, 100)?;
+    println!(
+        "[L5] 旧实例写被拒 = {}（代次 {} vs {}）",
+        lm.check_writer("instance-a", old.generation).is_err(),
+        old.generation,
+        new.generation
+    );
+
+    // L6 编排
+    let wf = Workflow::new("deliver", "交付流程")
+        .add_node(Node::agent("design", "设计", "architect"))
+        .add_node(Node::script("fast", "快分支", "echo fast"))
+        .add_node(Node::script("slow", "慢分支", "sleep 1"))
+        .add_node(Node::script("test", "测试", "cargo test"))
+        .add_node(Node::human_gate("review", "评审", "检查改动"))
+        .add_edge("design", "fast")
+        .add_edge("design", "slow")
+        .add_edge("fast", "test")
+        .add_edge("slow", "test")
+        .add_edge("test", "review")
+        .add_requirement("git-token", "Git Token", "在设置里配置");
+
+    let mut st = RunState::start(&wf, "run-1")?;
+    println!(
+        "[L6] 初始就绪 = {:?}",
+        match next_batch(&st) {
+            Schedule::Start(ids) => ids,
+            _ => vec![],
+        }
+    );
+    st.succeed_node("design");
+    println!(
+        "[L6] 设计完成后两个分支同时就绪 = {:?}",
+        match next_batch(&st) {
+            Schedule::Start(ids) => ids,
+            _ => vec![],
+        }
+    );
+
+    let missing = harness_orchestrate::check_requirements(&wf, &Default::default());
+    println!(
+        "[L6] 前置能力缺失（运行前暴露）= {:?}",
+        missing.iter().map(|r| r.key.as_str()).collect::<Vec<_>>()
+    );
+
+    // L7 扩展
+    let mut reg = Registry::new();
+    let mut m = PluginManifest {
+        name: "example".into(),
+        version: "0.1.0".into(),
+        entry: "./example".into(),
+        capabilities: vec![Capability::Tools],
+        tools: vec![harness_plugin::ToolSpec {
+            name: "echo".into(),
+            description: "原样返回".into(),
+            read_only: true,
+        }],
+        system_prompt_append: Some("插件提示：回答简洁。".into()),
+    };
+    reg.register(m.clone(), PluginScope::Builtin, "builtin")?;
+    let proj_override = reg.register(m.clone(), PluginScope::Project, "repo");
+    println!("[L7] 项目级覆盖内建被拒 = {}", proj_override.is_err());
+
+    m.name = "user-version".into();
+    reg.register(m, PluginScope::User, "~/.harness")?;
+    println!(
+        "[L7] 注册 {} 个插件，工具 {} 个",
+        reg.len(),
+        reg.tools().len()
+    );
+
+    let mut chain = ApprovalChain::new();
+    // 这条策略只对危险命令表态，其余返回 Ask（不表态）
+    chain.push("danger-guard", |c: &CallContext| {
+        if c.tool == "bash" && c.args.to_string().contains("rm -rf") {
+            Verdict::Deny {
+                reason: "禁止递归删除".into(),
+            }
+        } else {
+            Verdict::Ask
+        }
+    });
+    // 这条只对写文件要求审批，其余不表态
+    chain.push("ask-write", |c: &CallContext| {
+        if c.tool == "write_file" {
+            Verdict::Ask
+        } else {
+            Verdict::Ask
+        }
+    });
+
+    let dangerous = CallContext {
+        tool: "bash".into(),
+        args: serde_json::json!({"cmd": "rm -rf /"}),
+    };
+    match chain.decide(&dangerous, true) {
+        ChainVerdict::Deny { decided_by, reason } => {
+            println!("[L7] 危险命令 → Deny（由 {decided_by}）：{reason}")
+        }
+        other => println!("[L7] 意外：{other:?}"),
+    }
+
+    let ask = CallContext {
+        tool: "write_file".into(),
+        args: serde_json::json!({}),
+    };
+    match chain.decide(&ask, true) {
+        ChainVerdict::AskHuman => println!("[L7] 写文件（有审批通道）→ AskHuman ok"),
+        other => println!("[L7] 意外：{other:?}"),
+    }
+    match chain.decide(&ask, false) {
+        ChainVerdict::Deny { reason, .. } => {
+            println!("[L7] 写文件（无审批通道）→ 诚实拒绝：{reason}")
+        }
+        other => println!("[L7] 意外：{other:?}"),
+    }
+
+    // 演示 allow 压过 ask（单调性）
+    let mut chain2 = ApprovalChain::new();
+    chain2.push("tier", |_: &CallContext| Verdict::Ask);
+    chain2.push("dont-ask-again", |_: &CallContext| Verdict::Allow);
+    println!(
+        "[L7] allow 压过 ask（『不再询问』生效）= {:?}",
+        chain2.decide(&ask, true)
+    );
+
+    let base = "你是助手。";
+    let composed = harness_plugin::compose_system_prompt(base, &reg.system_prompt_appends());
+    println!(
+        "[L7] 系统提示只追加 = {}",
+        composed.starts_with(base) && composed.len() > base.len()
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    println!("\n七层全部演示完成。");
     Ok(())
 }
