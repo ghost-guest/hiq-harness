@@ -218,6 +218,15 @@ impl ProjectMemory {
         n
     }
 
+    /// 列出活跃条目（供 UI 展示）。
+    pub fn entries_view(&self) -> Vec<(String, String)> {
+        self.store
+            .all()
+            .filter(|m| matches!(m.state, MemoryState::Active))
+            .map(|m| (format!("{:?}", m.kind).to_lowercase(), m.content.clone()))
+            .collect()
+    }
+
     pub fn active_count(&self) -> usize {
         self.store.active_count()
     }

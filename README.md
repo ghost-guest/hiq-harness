@@ -5,7 +5,7 @@
 
 核心原则：**日志是事实，其余都是投影。**
 
-## 状态：七层完成并全部接入真实流程
+## 状态：七层完成 + 多端服务 + 桌面界面
 
 | 层 | 内容 | 测试 |
 |---|---|---|
@@ -19,7 +19,28 @@
 | L7 扩展 | 策略链、作用域覆盖规则、系统提示只追加 | 24 |
 | Go 插件 | JSON-RPC over stdio | — |
 
-**169 个测试全部通过，零编译警告。**
+**209 个测试全部通过，零编译警告。**
+
+## 桌面与手机
+
+同一套内核，桌面和手机都是客户端（参考 Cindy 的 host 架构）。
+UI 用 **[assistant-ui](https://github.com/assistant-ui/assistant-ui)**（MIT，13K 星），不自写界面。
+
+```bash
+# 1. 后端
+cargo build --release
+HARNESS_WORKDIR=/path/to/project ./target/release/harness --dir .harness serve --port 7788
+
+# 2. 界面
+cd apps/ui && pnpm install && HARNESS_URL=http://127.0.0.1:7788 pnpm dev
+
+# 3. 手机访问（监听局域网）
+./target/release/harness serve --bind 0.0.0.0 --port 7788
+# 手机浏览器打开 http://<桌面局域网IP>:7788
+```
+
+UI 选型的完整对比见 [`docs/UI-RESEARCH.md`](docs/UI-RESEARCH.md)，
+架构与实测记录见 [`docs/MULTI-DEVICE.md`](docs/MULTI-DEVICE.md)。
 
 ## 已接入真实流程的部分
 
@@ -143,9 +164,21 @@ crates/
   persist/      L5 收据、检查点、租约
   orchestrate/  L6 SOP DAG 编排
   plugin/       L7 扩展宿主与策略链
-  cli/          可执行入口（真实模型客户端 + 工具）
+  cli/          可执行入口
+                  ├─ llm.rs / tools.rs   真实模型与工具
+                  ├─ durable.rs          L5 持久化会话（kiso 六契约）
+                  ├─ memory.rs           L4 项目记忆
+                  ├─ sop.rs              L6 编排执行器
+                  ├─ host.rs             L7 插件宿主
+                  ├─ server.rs           手写 HTTP + WebSocket
+                  ├─ host_service.rs     设备注册与通道鉴权
+                  ├─ rest.rs / routes.rs REST 端点
+                  ├─ exec.rs            任务执行端点（/run 真实执行）
+                  ├─ server.rs           手写 HTTP + WebSocket
+                  └─ wire（在 core）     多端协议（Cindy device-link）
 plugins/        Go 插件（JSON-RPC over stdio）
-docs/           实测报告
+apps/ui/        桌面与手机界面（Next.js + assistant-ui，搬自官方模板）
+docs/           实测报告与架构说明
 ```
 
 ## 设计要点

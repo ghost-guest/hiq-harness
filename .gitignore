@@ -21,3 +21,14 @@ plugins/**/harness-plugin
 # 本地覆盖
 .env
 .env.local
+
+# 前端（apps/ui）
+apps/ui/node_modules/
+apps/ui/.next/
+apps/ui/out/
+apps/ui/dev.log
+apps/ui/.env*.local
+
+# assistant-ui 脚手架自带的 agent skills（不属于本项目）
+apps/ui/.agents/
+apps/ui/.claude/

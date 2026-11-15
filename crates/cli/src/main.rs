@@ -21,10 +21,15 @@ use harness_plugin::{
 use std::path::PathBuf;
 
 mod durable;
+mod exec;
 mod host;
+mod host_service;
 mod llm;
 mod memory;
+mod rest;
+mod routes;
 mod runner;
+mod server;
 mod sop;
 mod tools;
 
@@ -95,6 +100,24 @@ enum Cmd {
     Selftest,
     /// 全层演示
     Demo,
+    /// 启动桌面界面（本地服务 + 自动打开浏览器）
+    Desktop {
+        /// 监听端口
+        #[arg(long, default_value_t = 7788)]
+        port: u16,
+        /// 允许局域网访问（手机连接需要）
+        #[arg(long, default_value_t = false)]
+        lan: bool,
+    },
+    /// 启动 host 服务（供桌面与手机连接）
+    Serve {
+        /// 监听端口
+        #[arg(long, default_value_t = 7788)]
+        port: u16,
+        /// 绑定地址。默认只绑回环；手机同局域网可改 0.0.0.0
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+    },
     /// 加载并探测插件
     Plugin {
         #[command(subcommand)]
@@ -226,6 +249,110 @@ fn main() -> Result<()> {
             }
             if proj.has_unresolved_uncertain() {
                 println!("!! 存在未决的 uncertain 副作用，需人工裁决");
+            }
+        }
+
+        Cmd::Desktop { port, lan } => {
+            use harness_core::wire::EnvelopeKind;
+
+            // 桌面模式：绑 0.0.0.0 让手机可连，否则只绑回环
+            let bind = if lan {
+                "0.0.0.0".to_string()
+            } else {
+                "127.0.0.1".into()
+            };
+            let state = host_service::shared();
+            let cfg = server::ServeConfig {
+                bind: bind.clone(),
+                port,
+            };
+            let st = state.clone();
+
+            let url = format!("http://127.0.0.1:{port}/");
+            println!("hiq-harness 桌面版");
+            println!("  界面: {url}");
+            if lan {
+                // 打印局域网地址，方便手机输入
+                if let Ok(ip) = local_ip() {
+                    println!("  手机访问: http://{ip}:{port}/");
+                }
+            } else {
+                println!("  手机连接请加 --lan（监听局域网）");
+            }
+            println!();
+
+            let srv = server::Server::serve(cfg, st, move |env, from| {
+                let mut g = state.lock().unwrap();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let env = env.stamp_src(from);
+                let is_hello = env.kind == EnvelopeKind::Hello;
+                let reply = host_service::handle(env, from, &mut g.registry, now);
+                if is_hello {
+                    if let Some(r) = &reply {
+                        if let Some(p) = &r.payload {
+                            if let Some(id) = p.get("device_id").and_then(|v| v.as_str()) {
+                                g.registry.touch(id, now);
+                            }
+                        }
+                    }
+                }
+                reply
+            })?;
+
+            println!("已就绪：{}", srv.addr());
+            open_browser(&url);
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+
+        Cmd::Serve { port, bind } => {
+            use harness_core::wire::EnvelopeKind;
+            let state = host_service::shared();
+            let cfg = server::ServeConfig {
+                bind: bind.clone(),
+                port,
+            };
+            let st = state.clone();
+
+            println!("host 服务启动中…");
+            println!("  绑定: {bind}:{port}");
+            println!("  HTTP: http://{bind}:{port}/health");
+            println!("  WS:   ws://{bind}:{port}/ws");
+            if bind == "127.0.0.1" {
+                println!("  注意：只绑回环，手机无法直连。同局域网请用 --bind 0.0.0.0");
+            }
+            println!("\n按 Ctrl+C 停止。\n");
+
+            let srv = server::Server::serve(cfg, st, move |env, from| {
+                let mut g = state.lock().unwrap();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                // 服务端重写 src，防伪造
+                let env = env.stamp_src(from);
+                let is_hello = env.kind == EnvelopeKind::Hello;
+                let reply = host_service::handle(env, from, &mut g.registry, now);
+                if is_hello {
+                    if let Some(r) = &reply {
+                        if let Some(p) = &r.payload {
+                            if let Some(id) = p.get("device_id").and_then(|v| v.as_str()) {
+                                g.registry.touch(id, now);
+                            }
+                        }
+                    }
+                }
+                reply
+            })?;
+
+            println!("已就绪：{}", srv.addr());
+            // 阻塞等 Ctrl+C
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
             }
         }
 
@@ -969,4 +1096,24 @@ fn demo() -> Result<()> {
     let _ = std::fs::remove_dir_all(&dir);
     println!("\n七层全部演示完成。");
     Ok(())
+}
+
+/// 取本机局域网 IP（用于提示手机访问地址）。
+fn local_ip() -> anyhow::Result<String> {
+    let out = std::process::Command::new("bash")
+        .args([
+            "-c",
+            "ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null",
+        ])
+        .output()?;
+    let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if ip.is_empty() {
+        anyhow::bail!("未找到局域网地址");
+    }
+    Ok(ip)
+}
+
+/// 用系统默认浏览器打开界面。
+fn open_browser(url: &str) {
+    let _ = std::process::Command::new("open").arg(url).spawn();
 }
