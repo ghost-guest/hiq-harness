@@ -20,15 +20,60 @@ use harness_plugin::{
 };
 use std::path::PathBuf;
 
+mod durable;
+mod host;
 mod llm;
+mod memory;
 mod runner;
+mod sop;
 mod tools;
 
 #[derive(Parser)]
 #[command(name = "harness", version, about = "personal-AgentHarness")]
 struct Cli {
+    /// 数据目录（日志、会话、记忆都放这里）
+    #[arg(long, global = true, default_value = ".harness")]
+    dir: PathBuf,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum PluginCmd {
+    /// 从目录发现插件并列出
+    List {
+        /// 插件目录
+        #[arg(default_value = "plugins")]
+        path: PathBuf,
+    },
+    /// 启动插件并调用它的工具
+    Call {
+        /// 插件目录
+        #[arg(default_value = "plugins")]
+        path: PathBuf,
+        /// 工具名
+        tool: String,
+        /// 输入
+        #[arg(default_value = "")]
+        input: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemCmd {
+    /// 查看记忆统计
+    Stats,
+    /// 手动记住一条
+    Add {
+        content: String,
+        /// fact / decision / constraint / preference / lesson
+        #[arg(long, default_value = "fact")]
+        kind: String,
+    },
+    /// 搜索记忆
+    Search { query: String },
+    /// 遗忘一条（按内容精确匹配）
+    Forget { content: String },
 }
 
 #[derive(Subcommand)]
@@ -50,6 +95,50 @@ enum Cmd {
     Selftest,
     /// 全层演示
     Demo,
+    /// 加载并探测插件
+    Plugin {
+        #[command(subcommand)]
+        action: PluginCmd,
+    },
+    /// 运行一个 SOP（演示内置流程）
+    Sop {
+        /// 流程名：build-test / fix-bug
+        #[arg(default_value = "build-test")]
+        name: String,
+        #[arg(long, default_value = ".")]
+        workdir: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:3425/v1")]
+        base_url: String,
+        #[arg(long, default_value = "magpie")]
+        api_key: String,
+        #[arg(long, default_value = "auto/deepseek-v4.1-flash")]
+        model: String,
+    },
+    /// 管理项目记忆
+    Mem {
+        #[command(subcommand)]
+        action: MemCmd,
+    },
+    /// 查看检查点并尝试恢复
+    Resume {
+        #[arg(long, default_value = ".harness")]
+        dir: PathBuf,
+    },
+    /// 查看未决副作用
+    Pending {
+        #[arg(long, default_value = ".harness")]
+        dir: PathBuf,
+    },
+    /// 裁决未决副作用（kiso 的 rerun / abandon）
+    Resolve {
+        /// 执行 id，或用 "all" 处理全部
+        exec_id: String,
+        /// rerun（允许重跑）或 abandon（不再重跑）
+        #[arg(long, default_value = "abandon")]
+        verdict: String,
+        #[arg(long, default_value = ".harness")]
+        dir: PathBuf,
+    },
     /// 测试模型连通性
     Ping {
         #[arg(long, default_value = "http://127.0.0.1:3425/v1")]
@@ -103,7 +192,9 @@ fn main() -> Result<()> {
         )
         .init();
 
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    let dir = cli.dir;
+    match cli.cmd {
         Cmd::Init => {
             let dir = PathBuf::from(".harness");
             std::fs::create_dir_all(&dir)?;
@@ -138,8 +229,217 @@ fn main() -> Result<()> {
             }
         }
 
+        Cmd::Plugin { action } => {
+            use harness_plugin::{PluginScope, Registry};
+            match action {
+                PluginCmd::List { path } => {
+                    let mut reg = Registry::new();
+                    let n = host::discover_and_register(&mut reg, &path, PluginScope::User)?;
+                    println!("发现 {n} 个插件（目录 {}）", path.display());
+                    for p in reg.ordered() {
+                        println!(
+                            "  {} v{} [{}] 能力={:?}",
+                            p.manifest.name,
+                            p.manifest.version,
+                            format!("{:?}", p.scope).to_lowercase(),
+                            p.manifest.capabilities
+                        );
+                        for t in &p.manifest.tools {
+                            println!("    工具: {}（{}）", t.name, t.description);
+                        }
+                    }
+                    // 启动它们，验证「加载必须大声」
+                    let procs = host::load_plugins(&reg, &path)?;
+                    println!("\n成功启动 {} 个插件进程。", procs.len());
+                }
+                PluginCmd::Call { path, tool, input } => {
+                    let mut reg = Registry::new();
+                    host::discover_and_register(&mut reg, &path, PluginScope::User)?;
+                    let mut procs = host::load_plugins(&reg, &path)?;
+                    let Some(proc) = procs.first_mut() else {
+                        anyhow::bail!("没有可用的插件");
+                    };
+                    let info = proc.describe()?;
+                    println!("插件: {info}");
+                    let out = proc.call(
+                        "tool.call",
+                        serde_json::json!({"name": tool, "input": input}),
+                    )?;
+                    println!("调用 {tool} → {out}");
+                }
+            }
+        }
+
+        Cmd::Sop {
+            name,
+            workdir,
+            base_url,
+            api_key,
+            model,
+        } => {
+            use harness_orchestrate::{Node, Workflow};
+            let wf = match name.as_str() {
+                "build-test" => Workflow::new("build-test", "构建并测试")
+                    .add_node(Node::script("build", "构建", "cargo build 2>&1 | tail -3"))
+                    .add_node(Node::script("test", "测试", "cargo test 2>&1 | tail -5"))
+                    .add_edge("build", "test"),
+                "fix-bug" => Workflow::new("fix-bug", "修复并验证")
+                    .add_node(Node::agent("locate", "定位", "debugger"))
+                    .add_node(Node::agent("fix", "修复", "coder"))
+                    .add_node(Node::script("verify", "验证", "echo verified"))
+                    .add_edge("locate", "fix")
+                    .add_edge("fix", "verify"),
+                other => anyhow::bail!("未知流程 {other}（可用 build-test / fix-bug）"),
+            };
+
+            let workdir = workdir.canonicalize().unwrap_or(workdir);
+            let mut log = EventLog::open(log_path(&dir))?;
+            let mut session = durable::DurableSession::open(&dir)?;
+            let mut memory = memory::ProjectMemory::open(&dir)?;
+            let client = llm::OpenAiClient {
+                base_url,
+                api_key,
+                model,
+                effort: None,
+            };
+            let tools = tools::LocalTools::new(workdir.clone());
+
+            println!("流程: {}（{} 个节点）", wf.name, wf.nodes.len());
+            println!("工作区: {}\n", workdir.display());
+
+            let available: std::collections::HashSet<String> = Default::default();
+            let outcome = sop::run_sop(
+                &wf,
+                &available,
+                &client,
+                &tools,
+                &mut log,
+                &mut session,
+                &mut memory,
+                &workdir,
+            )?;
+
+            for line in &outcome.log {
+                println!("{line}");
+            }
+            println!(
+                "\n结果: 运行 {} ｜ 成功 {} / 失败 {} / 返工 {}",
+                outcome.run_id, outcome.succeeded, outcome.failed, outcome.reworks
+            );
+        }
+
+        Cmd::Mem { action } => {
+            let mut m = memory::ProjectMemory::open(&dir)?;
+            match action {
+                MemCmd::Stats => {
+                    let (active, archived) = m.stats();
+                    println!(
+                        "活跃记忆 {active} 条（active_count={}），归档 {archived} 条",
+                        m.active_count()
+                    );
+                    println!("位置: {}", dir.join("memory.json").display());
+                }
+                MemCmd::Add { content, kind } => {
+                    let k = match kind.as_str() {
+                        "fact" => harness_memory::MemoryKind::Fact,
+                        "decision" => harness_memory::MemoryKind::Decision,
+                        "constraint" => harness_memory::MemoryKind::Constraint,
+                        "preference" => harness_memory::MemoryKind::Preference,
+                        "lesson" => harness_memory::MemoryKind::Lesson,
+                        other => anyhow::bail!("未知类型 {other}"),
+                    };
+                    if m.remember(k, &content, &["project".to_string()]) {
+                        println!("已记住。");
+                    } else {
+                        println!("被拒绝（可能含敏感信息，或未说明可迁移范围）。");
+                    }
+                }
+                MemCmd::Search { query } => match m.recall_block(&query, 5) {
+                    Some(block) => println!("{block}"),
+                    None => println!("没有相关记忆。"),
+                },
+                MemCmd::Forget { content } => {
+                    let n = m.forget(&content, harness_memory::ArchiveReason::Llm);
+                    println!("遗忘 {n} 条（已进归档，可追溯）。");
+                    // 连带撤销引用它的检查点（Codewhale protocol.rs:278）：
+                    // 记忆不成立，基于它的检查点也不能再用。
+                    let mut session = durable::DurableSession::open(&dir)?;
+                    let revoked = session.on_memory_forgotten(&content)?;
+                    if revoked > 0 {
+                        println!("连带撤销 {revoked} 个引用它的检查点。");
+                    }
+                }
+            }
+        }
+
         Cmd::Selftest => selftest()?,
         Cmd::Demo => demo()?,
+
+        Cmd::Resume { dir } => {
+            let session = durable::DurableSession::open(&dir)?;
+            match session.latest_checkpoint() {
+                None => println!("没有检查点。"),
+                Some(cp) => {
+                    println!("最近检查点: {}", cp.id);
+                    println!("  覆盖到 seq {}", cp.through_seq);
+                    println!("  依赖 {} 条记忆", cp.memory_refs.len());
+                    println!("  内容: {}", cp.payload);
+
+                    // 尝试恢复：记忆失效会拒绝交出 state
+                    let idx = harness_persist::MemoryIndex::new();
+                    match session.resume(&idx) {
+                        Some(r) if r.state_usable => {
+                            println!("\n✓ 可恢复：state = {:?}", r.state);
+                            println!("  restores_permissions = {}", r.restores_permissions);
+                        }
+                        Some(r) => {
+                            println!("\n✗ 拒绝恢复：依赖的记忆已失效");
+                            for m in &r.invalidated_memory_ids {
+                                println!("    失效: {m}");
+                            }
+                        }
+                        None => println!("无法恢复"),
+                    }
+                }
+            }
+        }
+
+        Cmd::Pending { dir } => {
+            let session = durable::DurableSession::open(&dir)?;
+            let pending = session.pending_uncertain();
+            if pending.is_empty() {
+                println!("没有未决副作用。");
+            } else {
+                println!("{} 个未决副作用：", pending.len());
+                for p in pending {
+                    let retryable = session.can_retry(&p);
+                    println!("  {p}（{}）", if retryable { "可重跑" } else { "需裁决" });
+                }
+                println!("\n用 harness resolve <id> --verdict rerun|abandon 裁决");
+            }
+        }
+
+        Cmd::Resolve {
+            exec_id,
+            verdict,
+            dir,
+        } => {
+            let mut session = durable::DurableSession::open(&dir)?;
+            let v = match verdict.as_str() {
+                "rerun" => durable::Verdict::Rerun,
+                "abandon" => durable::Verdict::Abandon,
+                other => anyhow::bail!("未知裁决 {other}，用 rerun 或 abandon"),
+            };
+            let targets: Vec<String> = if exec_id == "all" {
+                session.pending_uncertain()
+            } else {
+                vec![exec_id]
+            };
+            for t in &targets {
+                session.resolve(t, v)?;
+                println!("已裁决 {t} → {verdict}");
+            }
+        }
 
         Cmd::Ping {
             base_url,
@@ -215,7 +515,30 @@ fn main() -> Result<()> {
                 spill_dir: dir.join("tool-results"),
             };
 
-            let outcome = runner::run_task(&client, &tools, &mut log, &task, &cfg)?;
+            let mut session = durable::DurableSession::open(&dir)?;
+            let mut memory = memory::ProjectMemory::open(&dir)?;
+            let generation = session.acquire_lease("cli")?;
+            session.check_writer("cli", generation)?;
+
+            // 恢复提示：有未决副作用就先报出来
+            let pending = session.pending_uncertain();
+            if !pending.is_empty() {
+                println!("⚠ 上次运行留下 {} 个未决副作用：", pending.len());
+                for p in &pending {
+                    println!("    {p}");
+                }
+                println!("  需人工裁决后才能继续。\n");
+            }
+
+            let outcome = runner::run_task(
+                &client,
+                &tools,
+                &mut log,
+                &mut session,
+                &mut memory,
+                &task,
+                &cfg,
+            )?;
 
             println!("\n=== 结果 ===");
             if let Some(plan) = &outcome.effort {
@@ -231,6 +554,29 @@ fn main() -> Result<()> {
                 );
             }
             println!("步数: {}", outcome.steps);
+            // 任务成功 → 写入一条项目记忆（决策类）。
+            // 准入在 remember 内部做：含密钥会被拒，未说明可迁移也会被拒。
+            if !outcome.final_text.trim().is_empty() && outcome.steps > 0 {
+                let record = format!(
+                    "任务「{}」已完成（{} 步）：{}",
+                    task.chars().take(60).collect::<String>(),
+                    outcome.steps,
+                    outcome
+                        .final_text
+                        .trim()
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                );
+                if memory.remember(
+                    harness_memory::MemoryKind::Lesson,
+                    &record,
+                    &["project".to_string()],
+                ) {
+                    println!("已写入项目记忆（跨会话可召回）。");
+                }
+            }
+
             print!("{}", outcome.cache.report());
             if !outcome.guard_events.is_empty() {
                 println!("守卫事件:");

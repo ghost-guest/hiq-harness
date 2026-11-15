@@ -527,6 +527,15 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// 从持久化数据恢复一条归档记录。
+    ///
+    /// 用于启动时重建：归档必须能完整往返，
+    /// 否则「为什么被归档、被谁合并」的审计链就断了（Alma 的 merged_into 语义）。
+    pub fn restore_archive(&mut self, record: ArchivedMemory) {
+        self.tombstones.insert(content_digest(&record.content));
+        self.archive.push(record);
+    }
+
     /// 睡眠整合：按五类原因归档。
     ///
     /// `should_archive` 由调用方提供判断（可以用模型，也可以用规则）。

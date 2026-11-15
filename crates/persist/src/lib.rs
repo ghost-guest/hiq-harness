@@ -115,6 +115,11 @@ impl ReceiptLedger {
         self.receipts.get(exec_id)
     }
 
+    /// 全部收据，用于持久化。
+    pub fn all(&self) -> impl Iterator<Item = (&ExecutionId, &Receipt)> {
+        self.receipts.iter()
+    }
+
     /// 所有未决的 uncertain。恢复时必须先处理这些。
     pub fn pending_uncertain(&self) -> Vec<ExecutionId> {
         self.receipts
@@ -346,6 +351,15 @@ impl LeaseManager {
         self.lease.as_ref()
     }
 
+    /// 从磁盘恢复一个未过期的租约。
+    ///
+    /// 不递增代次 —— 原实例可能还活着，递增会让它立即失效。
+    /// 只有确认过期才该走 `acquire` 接管（LoopForge 的做法）。
+    pub fn restore(&mut self, lease: Lease) {
+        self.next_generation = self.next_generation.max(lease.generation);
+        self.lease = Some(lease);
+    }
+
     pub fn release(&mut self) {
         self.lease = None;
     }
@@ -398,6 +412,11 @@ impl CheckpointStore {
 
     pub fn len(&self) -> usize {
         self.checkpoints.len()
+    }
+
+    /// 全部检查点，用于持久化。
+    pub fn all(&self) -> impl Iterator<Item = &Checkpoint> {
+        self.checkpoints.values()
     }
 
     pub fn is_empty(&self) -> bool {

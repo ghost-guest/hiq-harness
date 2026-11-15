@@ -5,7 +5,7 @@
 
 核心原则：**日志是事实，其余都是投影。**
 
-## 状态：七层完成 + 真实模型验证 + 缓存实测
+## 状态：七层完成并全部接入真实流程
 
 | 层 | 内容 | 测试 |
 |---|---|---|
@@ -19,7 +19,21 @@
 | L7 扩展 | 策略链、作用域覆盖规则、系统提示只追加 | 24 |
 | Go 插件 | JSON-RPC over stdio | — |
 
-**143 个测试全部通过，零编译警告。**
+**169 个测试全部通过，零编译警告。**
+
+## 已接入真实流程的部分
+
+不只是库，`run` / `sop` / `plugin` 命令都真的用上了：
+
+| 层 | 在 run 流程里做什么 |
+|---|---|
+| L0 日志 | 每次工具调用与结果都落盘，可 replay |
+| L2 守卫 | 只读螺旋、失败熔断、三级阶梯实时生效 |
+| L3 上下文 | token 校准、三段式降级、缓存 miss 归因 |
+| **L4 记忆** | 开场按任务召回并注入，完成后写回（跨会话可召回） |
+| **L5 持久化** | 收据先落盘再执行；uncertain 阻塞；每轮存检查点 |
+| **L6 编排** | `harness sop` 跑真实 DAG，Script 节点不调模型 |
+| **L7 扩展** | `harness plugin call` 通过 JSON-RPC 调用 Go 子进程 |
 
 ## 快速开始
 
@@ -42,8 +56,27 @@ cargo test
 ./target/release/harness run "任务" --effort medium
 ./target/release/harness run "任务" --effort xhigh
 
-# 激进裁剪（压小缓存 miss）
+# 更早降级工具结果（压小缓存 miss）
 ./target/release/harness run "任务" --clip-aggressive
+
+# SOP 编排
+./target/release/harness sop build-test --workdir /path
+./target/release/harness sop fix-bug --workdir /path
+
+# 记忆
+./target/release/harness mem stats
+./target/release/harness mem add "项目用 rust + go" --kind decision
+./target/release/harness mem search "数据库"
+./target/release/harness mem forget "某条记忆"
+
+# 持久化
+./target/release/harness pending          # 查看未决副作用
+./target/release/harness resolve <id> --verdict rerun|abandon
+./target/release/harness resume           # 查看检查点
+
+# 插件
+./target/release/harness plugin list plugins
+./target/release/harness plugin call plugins echo "hello"
 
 # 诊断缓存
 HARNESS_TRACE_CACHE=1 ./target/release/harness run "任务"

@@ -163,6 +163,11 @@ impl EventLog {
         &self.path
     }
 
+    /// 下一条事件将使用的 seq。用于检查点记录覆盖边界。
+    pub fn next_seq_hint(&self) -> u64 {
+        self.next_seq
+    }
+
     /// 读回全部事件。坏行（崩溃留下的半行）跳过，不猜测。
     pub fn read_all(path: impl AsRef<Path>) -> anyhow::Result<Vec<Event>> {
         let path = path.as_ref();

@@ -3,7 +3,9 @@
 //! 这是 L1 循环的实际形态。与 `harness_core::agent_loop` 的区别是
 //! 它保留结构化的工具调用链（API 需要），而不是纯文本投影。
 
+use crate::durable::{CallId, DurableSession, EffectOutcome, ExecutionId, InvocationSeq};
 use crate::llm::{parse_model_response, OpenAiClient};
+use crate::memory::ProjectMemory;
 use crate::tools::LocalTools;
 use harness_context::cache::{CacheStats, HeaderFingerprint};
 use harness_context::effort::{plan_effort, Effort, EffortPlan};
@@ -64,17 +66,22 @@ pub fn run_task(
     client: &OpenAiClient,
     tools: &LocalTools,
     log: &mut EventLog,
+    session: &mut DurableSession,
+    memory: &mut ProjectMemory,
     task: &str,
     cfg: &RunConfig,
 ) -> anyhow::Result<RunOutcome> {
     let mut guards = GuardSet::new();
     let tool_specs = LocalTools::tool_specs();
 
-    // 结构化历史：必须保留 tool_calls 与 tool 结果，否则 API 会拒绝
-    let mut history: Vec<Value> = vec![
-        json!({"role": "system", "content": cfg.system}),
-        json!({"role": "user", "content": task}),
-    ];
+    // 开场召回相关记忆并注入。
+    // 放在 system 之后、user 之前 —— 这样前缀仍然只增不改。
+    let recalled = memory.recall_block(task, 5);
+    let mut history: Vec<Value> = vec![json!({"role": "system", "content": cfg.system})];
+    if let Some(block) = &recalled {
+        history.push(json!({"role": "system", "content": block}));
+    }
+    history.push(json!({"role": "user", "content": task}));
 
     log.append(EventKind::UserMessage {
         text: task.to_string(),
@@ -82,6 +89,9 @@ pub fn run_task(
     log.commit()?;
 
     let mut steps = 0u32;
+    // 序号从会话已有的最大值继续（kiso 的 ex-<seq> 不跨运行重置）
+    let invocation_base = session.next_invocation_seq();
+    let mut invocation_in_step;
     let mut guard_events = Vec::new();
     let mut cache_stats = CacheStats::new();
 
@@ -91,13 +101,17 @@ pub fn run_task(
     let effective_effort = effort_plan.as_ref().map(|p| p.effective);
 
     loop {
-        // 未决的 uncertain 副作用 → 必须停
+        // 未决的 uncertain 副作用 → 必须停。
+        // 用持久化账本判断，崩溃恢复后也能拦住。
         let events = EventLog::read_all(log.path())?;
-        if harness_core::event::Projection::new(&events).has_unresolved_uncertain() {
+        let pending = session.pending_uncertain();
+        if !pending.is_empty()
+            || harness_core::event::Projection::new(&events).has_unresolved_uncertain()
+        {
             return Ok(RunOutcome {
                 steps,
                 guard_events,
-                final_text: "存在未决的副作用，需人工裁决".into(),
+                final_text: format!("存在未决的副作用，需人工裁决：{}", pending.join(", ")),
                 cache: cache_stats.clone(),
                 effort: effort_plan.clone(),
             });
@@ -114,6 +128,7 @@ pub fn run_task(
         }
 
         guards.begin_turn();
+        invocation_in_step = 0u64;
 
         // 一次模型调用
         // 关键：不带 reasoning 字段时完全省略，
@@ -234,13 +249,38 @@ pub fn run_task(
                         PreCallVerdict::Proceed => {}
                     }
 
+                    // kiso 的 Stable Intent Identity：
+                    // CallId 只对应 tool_call/tool_result，ExecutionId 用于副作用去重。
+                    let call_id = CallId(req.id.clone());
+                    let invocation =
+                        InvocationSeq(invocation_base + steps as u64 * 1000 + invocation_in_step);
+                    invocation_in_step += 1;
+                    let exec_id = ExecutionId::derive(invocation);
+
                     log.append(EventKind::ToolCall {
-                        id: req.id.clone(),
+                        id: call_id.0.clone(),
                         name: req.name.clone(),
                         input: req.input.clone(),
                     });
 
-                    let res = tools.execute_sync(&req)?;
+                    // 按 kiso 契约执行：先落盘 STARTED 收据，再跑工具。
+                    // 崩溃在中间 → 收据停在 Uncertain，恢复时必须人裁决。
+
+                    let res = match session.run_effect(
+                        &exec_id,
+                        true,
+                        || tools.execute_sync(&req).map_err(|e| e.to_string()),
+                        || None,
+                    ) {
+                        EffectOutcome::Completed(r) => r,
+                        EffectOutcome::Replayed(r) => r,
+                        EffectOutcome::FailedRetryable(e) | EffectOutcome::Failed(e) => {
+                            anyhow::bail!("工具执行失败: {e}")
+                        }
+                        EffectOutcome::Blocked { reason } => {
+                            anyhow::bail!("被持久化契约拦住: {reason}")
+                        }
+                    };
                     let sig = Signature::new(
                         &req.name,
                         &serde_json::to_string(&req.input).unwrap_or_default(),
@@ -320,7 +360,14 @@ pub fn run_task(
                         "content": out_text,
                     }));
                 }
+                // 每轮结束保存检查点：崩溃后可从最近检查点续跑。
+                // 检查点带上当前记忆版本，恢复时若记忆失效会拒绝交出 state。
                 steps += 1;
+                let _ = session.save_checkpoint(
+                    log.next_seq_hint(),
+                    &format!("step {steps} 完成，历史 {} 条消息", history.len()),
+                    Vec::new(),
+                );
             }
         }
     }
