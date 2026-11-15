@@ -2,6 +2,38 @@
 
 本项目的开发约定。任何改动前先读这里。
 
+## 第一原则：不许自发明
+
+**这是硬性约束，每次改动都要遵守。**
+
+任何设计决策必须先找到满足要求的开源项目，读它的实现，再提取精华落地。**不允许凭直觉发明机制、拍脑袋定阈值。**
+
+具体流程：
+
+1. **先找项目** —— 在已调研的 69 个 harness 里找做过这件事的
+2. **读实现** —— 看它的代码、常量、注释里的理由
+3. **提取精华** —— 照它的结构做，数字可以按场景调，但结构不改
+4. **记下来源** —— 代码注释里写明「来自哪个项目、哪个文件」
+
+做不到以上四步，就说明还没调研够，继续找，不要开始写。
+
+**反例（我犯过的）**：
+
+| 自发明的东西 | 应该参考的 |
+|---|---|
+| `ClipPolicy`（首尾保留截断） | Deva 的三段式 `ToolResultTier`：Full / Summary / DiskRef |
+| 8k/2k 字符阈值 | Deva 的实测：802 个结果里 21% 降到 DiskRef |
+| 只统计命中率 | Codewhale 的「miss 必须可归因」（`/cache stats`） |
+| `looks_degraded` 阈值 0.5 | 应当引用具体项目的判据 |
+
+**正例**：
+
+- 只读螺旋 12/15 —— 来自天枢 `exploration-stall.ts:36`，照抄
+- 三级阶梯 8/12/3 —— 来自 Raven `no_progress.py`，照抄
+- 只对相同失败熔断 3 次 —— 来自 maka `tool-runtime.ts:369`，照抄
+- 组提交 —— 来自 pi `group-commit.md`，实测 26.8→250 runs/s
+- 记忆失效拒绝交出状态 —— 来自 Codewhale `protocol.rs:278`
+
 ## 项目定位
 
 自研 agent harness，个人使用。Rust 核心 + Go 插件层，桌面端后续用 Tauri。
@@ -51,16 +83,17 @@ cd plugins && go vet ./... && go build ./...
 
 改任何一层前先读这条：
 
-| 层 | 不可违反的纪律 |
-|---|---|
-| L0 日志 | 消息是日志的**纯函数**；不要每条 fsync（用组提交）；uncertain 必须阻塞 |
-| L1 循环 | 不设硬上限；末轮禁工具但**保留工具定义**（保前缀缓存） |
-| L2 守卫 | 只对**相同的失败**熔断；成功即重置；指纹必须含 `blocks` |
-| L3 压缩 | 压缩只改投影不改日志；缓存快到期才动手 |
-| L4 记忆 | 存项目内不存家目录；记忆内容不可改只能新版本 |
-| L5 持久 | 记忆失效则**拒绝交出 state**；恢复状态不恢复权限 |
-| L6 编排 | 节点就绪要求所有上游 `succeeded`；运行前冻结工作流快照 |
-| L7 扩展 | 项目扩展**不能**覆盖内建；坏了启动即失败 |
+| 层 | 不可违反的纪律 | 来源 |
+|---|---|---|
+| L0 日志 | 消息是日志的**纯函数**；不要每条 fsync（用组提交）；uncertain 必须阻塞 | kiso `durability.md` / pi `group-commit.md` |
+| L1 循环 | 不设硬上限；末轮禁工具但**保留工具定义**（保前缀缓存） | Codewhale `turn_budget.rs` / opencode `llm.ts:279` |
+| L2 守卫 | 只对**相同的失败**熔断；成功即重置；指纹必须含 `blocks` | maka `tool-runtime.ts:369` / Raven `no_progress.py` / 天枢 `exploration-stall.ts:36` |
+| L3 压缩 | 压缩只改投影不改日志；缓存快到期才动手；**miss 必须可归因** | maka 投影文档 / opencode `compaction.ts` / Codewhale `CACHE.md` |
+| L3 降级 | 工具结果三段式：Full → Summary → DiskRef | Deva 实测（`~/.deva/data/chats/*.json`） |
+| L4 记忆 | 存项目内不存家目录；记忆内容不可改只能新版本；配额只降不升 | ownmem `memory-audit.mjs` / Codewhale `auth.rs` |
+| L5 持久 | 记忆失效则**拒绝交出 state**；恢复状态不恢复权限 | Codewhale `protocol.rs:278` |
+| L6 编排 | 节点就绪要求所有上游 `succeeded`；运行前冻结工作流快照 | LoopForge `workflow_graph.go` |
+| L7 扩展 | 项目扩展**不能**覆盖内建；坏了启动即失败；策略链单调 | kiso `extensions.md` |
 
 ## 测试要求
 

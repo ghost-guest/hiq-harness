@@ -5,6 +5,9 @@
 
 use crate::llm::{parse_model_response, OpenAiClient};
 use crate::tools::LocalTools;
+use harness_context::cache::{CacheStats, HeaderFingerprint};
+use harness_context::effort::{plan_effort, Effort, EffortPlan};
+use harness_context::ToolResultTier;
 use harness_core::event::{EventKind, EventLog, ToolOutcome};
 use harness_guards::{GuardSet, PostCallVerdict, PreCallVerdict, Signature};
 use serde_json::{json, Value};
@@ -12,20 +15,36 @@ use serde_json::{json, Value};
 pub struct RunConfig {
     /// 最大步数，0 表示无上限
     pub max_steps: u32,
-    /// 推理强度
-    pub effort: Option<String>,
+    /// 请求的推理强度。会按 provider 能力映射后再发。
+    pub effort: Option<Effort>,
+    /// provider 实际支持的档位。空表示未知，原样透传。
+    pub supported_efforts: Vec<Effort>,
     /// 系统提示
     pub system: String,
+    /// 工具结果降到「摘要」档的阈值（字符数）。
+    /// 来自 Deva 的三段式：Full → Summary → DiskRef。
+    pub summary_threshold: usize,
+    /// 工具结果降到「磁盘引用」档的阈值（字符数）。
+    pub disk_threshold: usize,
+    /// 落盘目录。降级到 DiskRef 时原文存这里，模型可再读回来。
+    pub spill_dir: std::path::PathBuf,
 }
 
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
             max_steps: 0,
-            effort: Some("high".into()),
+            effort: Some(Effort::High),
+            supported_efforts: Vec::new(),
             system: "你是一个编程助手。用工具完成用户的任务，不要臆造文件内容。\
                      完成后用一句话说明你做了什么。"
                 .into(),
+            // Deva 实测：802 个工具结果里 21% 降到第三档。
+            // 阈值按「一行摘要约 100 字符、磁盘引用约 150 字符」倒推，
+            // 取能让大文件读取（数千字符）降级、小结果保留全文的值。
+            summary_threshold: 2_000,
+            disk_threshold: 6_000,
+            spill_dir: std::path::PathBuf::from(".harness/tool-results"),
         }
     }
 }
@@ -34,7 +53,10 @@ pub struct RunOutcome {
     pub steps: u32,
     pub guard_events: Vec<String>,
     pub final_text: String,
-    pub total_input_tokens: u64,
+    /// 缓存统计（含逐轮命中率、稳态命中率）
+    pub cache: CacheStats,
+    /// 档位映射结果，便于确认「请求了什么、实际发了什么」
+    pub effort: Option<harness_context::effort::EffortPlan>,
 }
 
 /// 跑一次真实的 agent 任务。
@@ -61,7 +83,12 @@ pub fn run_task(
 
     let mut steps = 0u32;
     let mut guard_events = Vec::new();
-    let mut total_input = 0u64;
+    let mut cache_stats = CacheStats::new();
+
+    // 档位映射只算一次：请求了什么、实际发什么，都要可观测
+    let effort_plan: Option<EffortPlan> =
+        cfg.effort.map(|e| plan_effort(e, &cfg.supported_efforts));
+    let effective_effort = effort_plan.as_ref().map(|p| p.effective);
 
     loop {
         // 未决的 uncertain 副作用 → 必须停
@@ -71,7 +98,8 @@ pub fn run_task(
                 steps,
                 guard_events,
                 final_text: "存在未决的副作用，需人工裁决".into(),
-                total_input_tokens: total_input,
+                cache: cache_stats.clone(),
+                effort: effort_plan.clone(),
             });
         }
 
@@ -80,23 +108,52 @@ pub fn run_task(
                 steps,
                 guard_events,
                 final_text: "已达步数上限".into(),
-                total_input_tokens: total_input,
+                cache: cache_stats.clone(),
+                effort: effort_plan.clone(),
             });
         }
 
         guards.begin_turn();
 
         // 一次模型调用
-        let body = json!({
+        // 关键：不带 reasoning 字段时完全省略，
+        // 不要发出 "reasoning": null —— 多余的字段会改变请求字节。
+        let mut body = json!({
             "model": client.model,
             "messages": history,
             "tools": tool_specs,
             "max_tokens": 8192,
-            "reasoning": cfg.effort.as_ref().map(|e| json!({"effort": e})),
         });
+        if let Some(e) = effective_effort {
+            body["reasoning"] = json!({"effort": e.as_str()});
+        }
         let (resp, usage) = client.post_public(&body)?;
-        if let Some(p) = usage.prompt_tokens {
-            total_input += p;
+        let p_tok = usage.prompt_tokens.unwrap_or(0);
+        let c_tok = usage.cached_tokens.unwrap_or(0);
+
+        // 记录 header 指纹，用于归因 miss。
+        // Codewhale 铁律：miss 必须能说出理由。
+        let header_fp = HeaderFingerprint::new(
+            &cfg.system,
+            &serde_json::to_string(&tool_specs).unwrap_or_default(),
+            effective_effort.map(|e| e.as_str()),
+        );
+        let miss = cache_stats.record(steps, p_tok, c_tok, header_fp);
+
+        if std::env::var("HARNESS_TRACE_CACHE").is_ok() {
+            let rate = if p_tok > 0 {
+                c_tok as f64 / p_tok as f64 * 100.0
+            } else {
+                0.0
+            };
+            let why = miss
+                .as_ref()
+                .map(|m| format!("  ← {}", m.describe()))
+                .unwrap_or_default();
+            eprintln!(
+                "[cache] step={} prompt={} cached={} 命中={:.1}%{}",
+                steps, p_tok, c_tok, rate, why
+            );
         }
 
         let model_resp = parse_model_response(&resp)?;
@@ -112,7 +169,8 @@ pub fn run_task(
                     steps,
                     guard_events,
                     final_text: t,
-                    total_input_tokens: total_input,
+                    cache: cache_stats.clone(),
+                    effort: effort_plan.clone(),
                 });
             }
             harness_core::agent_loop::ModelResponse::Length(t) => {
@@ -218,9 +276,28 @@ pub fn run_task(
                                 steps,
                                 guard_events,
                                 final_text: reason,
-                                total_input_tokens: total_input,
+                                cache: cache_stats.clone(),
+                                effort: effort_plan.clone(),
                             });
                         }
+                    }
+
+                    // 三段式降级（Deva）：Full → Summary → DiskRef。
+                    // 超过 disk_threshold 的落盘，超过 summary_threshold 的降成一行摘要。
+                    let orig_chars = out_text.chars().count();
+                    if orig_chars > cfg.disk_threshold {
+                        let path = spill_to_disk(&cfg.spill_dir, &out_text)?;
+                        let tier = ToolResultTier::DiskRef {
+                            path,
+                            bytes: orig_chars,
+                        };
+                        let _ = &tier;
+                        out_text = tier.text_for_model();
+                    } else if orig_chars > cfg.summary_threshold {
+                        let tier = ToolResultTier::Summary {
+                            text: first_line_summary(&out_text),
+                        };
+                        out_text = tier.text_for_model();
                     }
 
                     log.append(EventKind::ToolResult {
@@ -246,5 +323,48 @@ pub fn run_task(
                 steps += 1;
             }
         }
+    }
+}
+
+/// 把工具结果原文落盘，返回路径。
+///
+/// 用**内容哈希**命名而不是 call_id —— 同一个文件被读多次时
+/// 只存一份。这是 Deva 的做法（`checkpoints/<sid>/` 下的文件
+/// 以内容哈希命名，同一产出物只存一份）。
+fn spill_to_disk(dir: &std::path::Path, text: &str) -> anyhow::Result<String> {
+    std::fs::create_dir_all(dir)?;
+    let digest = content_digest(text);
+    let path = dir.join(format!("{digest}.txt"));
+    // 已存在就不重复写
+    if !path.exists() {
+        std::fs::write(&path, text)?;
+    }
+    Ok(path.display().to_string())
+}
+
+/// FNV-1a 内容指纹。
+fn content_digest(text: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+/// 一行摘要。取首行并截断。
+///
+/// Deva 的 summaries 就是这种形态：要么是内容首行，
+/// 要么是「N 字符」这样的占位。
+fn first_line_summary(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return format!("{} 字符", text.chars().count());
+    }
+    if line.chars().count() > 100 {
+        let t: String = line.chars().take(100).collect();
+        format!("{t}…")
+    } else {
+        line.to_string()
     }
 }

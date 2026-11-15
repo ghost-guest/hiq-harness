@@ -6,6 +6,9 @@
 //! - Deva：工具结果三段式降级
 //! - Codewhale：缓存铁律（header 冻结、历史只增）
 
+pub mod cache;
+pub mod effort;
+
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────
@@ -66,7 +69,12 @@ impl ToolResultTier {
             Self::Full { text } => text.clone(),
             Self::Summary { text } => format!("[摘要] {text}"),
             Self::DiskRef { path, bytes } => {
-                format!("[较早的工具结果已清理以节省上下文] 约 {bytes} 字符，原文保留在 {path}")
+                // 文案对齐 Deva 实测格式：必须给出「怎么取回来」的指引，
+                // 否则模型不知道该用 read_file 去读，会重复调工具。
+                format!(
+                    "[较早的工具结果已清理以节省上下文] 原结果 {bytes} 字符，已保存到：{path}。\
+                     需要时用 read_file 查看；文件、搜索类结果也可以重新调用工具获取最新内容。"
+                )
             }
         }
     }

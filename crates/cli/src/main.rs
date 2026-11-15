@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use harness_context::effort::Effort;
 use harness_context::{validate_summary, BudgetPolicy, SummaryDefect, ToolResultTier};
 use harness_core::event::{EventKind, EventLog, Projection};
 use harness_guards::{GuardSet, PostCallVerdict, PreCallVerdict, Signature};
@@ -77,9 +78,17 @@ enum Cmd {
         /// 最大步数，0 表示无上限
         #[arg(long, default_value_t = 12)]
         max_steps: u32,
-        /// 推理强度：low / high / max
+        /// 请求的推理强度：none/minimal/low/medium/high/xhigh/max
         #[arg(long, default_value = "high")]
         effort: String,
+        /// provider 实际支持的档位（逗号分隔）。留空表示未知、原样透传。
+        /// 例：--supported low,high,max
+        #[arg(long, default_value = "low,high,max")]
+        supported: String,
+        /// 更早降级工具结果（摘要 500 / 磁盘 1500 字符），
+        /// 减少进入上下文的新 token，从而减少缓存 miss 的规模
+        #[arg(long, default_value_t = false)]
+        clip_aggressive: bool,
     },
 }
 
@@ -156,6 +165,8 @@ fn main() -> Result<()> {
             model,
             max_steps,
             effort,
+            supported,
+            clip_aggressive,
         } => {
             let workdir = workdir.canonicalize().unwrap_or(workdir);
             let mut log = EventLog::open(log_path(&dir))?;
@@ -163,7 +174,7 @@ fn main() -> Result<()> {
                 base_url,
                 api_key,
                 model: model.clone(),
-                effort: Some(effort.clone()),
+                effort: None, // 档位改由 runner 按 provider 能力映射
             };
             let tools = tools::LocalTools::new(workdir.clone());
 
@@ -171,20 +182,56 @@ fn main() -> Result<()> {
             println!("模型: {model} (effort={effort})");
             println!("任务: {task}\n");
 
+            let requested = Effort::parse(&effort)?;
+            let supported: Vec<Effort> = supported
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| Effort::parse(s).ok())
+                .collect();
+
+            let plan = harness_context::effort::plan_effort(requested, &supported);
+            println!(
+                "推理档位: 请求 {} → 实际 {}",
+                plan.requested.as_str(),
+                plan.effective.as_str()
+            );
+            if let Some(note) = &plan.note {
+                println!("  ({note})");
+            }
+            println!();
+
             let cfg = runner::RunConfig {
                 max_steps,
-                effort: Some(effort),
+                effort: Some(requested),
+                supported_efforts: supported,
                 system: "你是一个编程助手，在给定的工作区内完成任务。\
                          用工具读写文件、执行命令。不要臆造文件内容 —— 先读再改。\
                          任务完成后，用一句话总结你做了什么。"
                     .into(),
+                // 三段式阈值（Deva）：更早降到摘要/磁盘，减少进入上下文的新 token
+                summary_threshold: if clip_aggressive { 500 } else { 2_000 },
+                disk_threshold: if clip_aggressive { 1_500 } else { 6_000 },
+                spill_dir: dir.join("tool-results"),
             };
 
             let outcome = runner::run_task(&client, &tools, &mut log, &task, &cfg)?;
 
             println!("\n=== 结果 ===");
+            if let Some(plan) = &outcome.effort {
+                println!(
+                    "推理档位: 请求 {} → 实际 {}{}",
+                    plan.requested.as_str(),
+                    plan.effective.as_str(),
+                    if plan.downgraded {
+                        "（已映射）"
+                    } else {
+                        ""
+                    }
+                );
+            }
             println!("步数: {}", outcome.steps);
-            println!("累计输入 token: {}", outcome.total_input_tokens);
+            print!("{}", outcome.cache.report());
             if !outcome.guard_events.is_empty() {
                 println!("守卫事件:");
                 for e in &outcome.guard_events {
