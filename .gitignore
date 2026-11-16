@@ -36,3 +36,8 @@ apps/ui/.claude/
 # GPUI 是 vendored 的（参考 orbit 的做法），只忽略其构建产物
 vendor/gpui/target/
 dist/
+
+# orbit 的构建产物
+apps/orbit/target/
+# orbit 的营销站（Next.js），不属于桌面应用本体
+apps/orbit/marketing/

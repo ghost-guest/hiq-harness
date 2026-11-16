@@ -1,0 +1,19 @@
+[package]
+name = "orbit-rpc"
+version = "0.2.19"
+description = "Rust client for the pi CLI RPC protocol (pi --mode rpc)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# 本项目改造：运行时换成 harness 内核（进程内调用，不再 spawn pi）。
+harness-cli = { path = "../../../../crates/cli" }
+
+[target.'cfg(windows)'.dependencies]
+# Reads the user's current PATH, which a running process does not see change.
+# Already in the dependency graph through gpui.
+windows-registry = "0.5"

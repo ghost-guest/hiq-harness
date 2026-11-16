@@ -1,0 +1,5426 @@
+//! The Usage page's rendering: header, filters, and every panel.
+//!
+//! The view is deliberately dumb. It reads a [`UsageSnapshot`] that was
+//! computed elsewhere and formats it; the only logic allowed here is layout,
+//! interaction, and choosing which register a number is shown in.
+//!
+//! # Direction contract — Usage, one page
+//!
+//! **THESIS.** The page is a reading surface, not an instrument rack: the
+//! headline metrics are the one board, and every other measure sits behind a
+//! hairline. Chrome is spent only where it earns its weight.
+//!
+//! **OWN-WORLD.** Orbit's instrument panel, inherited whole: canvas ground,
+//! one raised card per section, one accent on the active series,
+//! hairlines inside the cards, tabular mono figures.
+//!
+//! **STORY.** One continuous read, top to bottom: the operator reads the four
+//! headline figures (Cost, Tokens, Requests, Cache hit rate) — pointing at a
+//! card's line reads any day in the range across the whole row — reads the
+//! trend, audits where the usage went (Breakdown) and the records behind it
+//! (Records), and ends on the year calendar for the long view. Every figure is
+//! pi's own session measurement; nothing is invented.
+//!
+//! **FIRST VIEWPORT.** One toolbar (filters leading; freshness, Export and
+//! Refresh trailing), then the Summary board and the trend. There are no page-level tabs —
+//! the sections share one scroll, and each section's own selector (chart
+//! metric, breakdown dimension, records table) lives inside its card.
+//!
+//! **FORM.** Established world. A stack of raised cards: title on a hairline
+//! header, content padded inside. Nested cards are forbidden: tables keep
+//! only a hairline frame.
+//!
+//! Sections: Summary · Usage over time · Breakdown · Records · Daily activity.
+
+use std::rc::Rc;
+use std::sync::Arc;
+
+use gpui::{
+    anchored, deferred, div, prelude::*, px, relative, Animation, AnimationExt, AnyElement, App,
+    Context, Corner, ElementId, Entity, Font, FontFeatures, FontWeight, Hsla, IntoElement,
+    MouseButton, Pixels, Render, SharedString, Stateful, Window,
+};
+
+use super::aggregate::{
+    Breakdown, BucketRow, ChartMetric, GroupRow, LatencyMetric, LatencyStats, SessionRow, ToolRow,
+    UsageSnapshot,
+};
+use super::chart;
+use super::filters::{self, FilterOption};
+use super::format;
+use super::heatmap;
+use super::model::{
+    next_bucket, CacheFilter, Granularity, RangePreset, TimeFocus, UsageFilter, UsageIndex,
+};
+use super::page::{
+    BreakdownQueryResult, BreakdownSort, BreakdownTab, BucketQueryResult, BucketSort, DetailTab,
+    FailureQueryResult, MenuKind, SessionQueryResult, SessionSort, ToolQueryResult, UsagePage,
+};
+use super::sparkline;
+use super::table::{
+    cell_shell, data_table, empty_cell, status_badge, text_cell, two_line_cell, Column,
+    FailureSort, SortState, TableHandlers, TableKind, FILL_SLACK, HEADER_H, ROW_H,
+};
+use super::tooltip::Tooltip;
+use crate::app::{
+    button_frame, context_menu_separator, helpers::empty_state_glyph, icon, icon_button_frame,
+    icon_dyn, picker_entry, picker_search_frame, picker_surface, press, provider_mark_color,
+    ControlExt, TipExt, BUTTON_GROUP,
+};
+use crate::composer::ComposerInput;
+use crate::model_selector::{leading_tile, provider_icon};
+use crate::theme::tokens::RaisedExt;
+use crate::theme::tokens::{
+    button, context_menu, input, panel, picker, popover, ButtonSize, DynamicSpacing, IconSize,
+    Motion, Radius, StyledExt, TextSize,
+};
+use crate::theme::{self, Theme};
+use crate::transcript_view::activity_icon;
+
+/// Inner column width for a data surface (§58): wide enough for a full table,
+/// narrow enough that the eye does not have to travel a metre.
+pub(super) const CONTENT_MAX_W: f32 = 1180.;
+/// The page column's horizontal padding (both sides), which the tables sit inside.
+pub(super) const PAGE_PAD: f32 = 40.;
+/// Inner padding of a section card (each side), at the default density —
+/// [`DynamicSpacing::Base12`]. Tables budget against this so their last
+/// column is not squeezed into a scrollbar.
+pub(super) const SECTION_PAD: f32 = 12.;
+const FOUR_KPI_MIN: f32 = 880.;
+
+/// Ranked bars the Breakdown chart shows; the table below carries the rest.
+const CHART_ROWS: usize = 8;
+
+impl Render for UsagePage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *theme::get(cx);
+        // Layout is driven by the main area's width (handed over by the shell)
+        // — never by the window, which also holds the sidebar and side pane.
+        let available = px(self.main_width());
+        let column_w = available.min(px(CONTENT_MAX_W));
+        let kpi_cols = if column_w >= px(FOUR_KPI_MIN) {
+            4
+        } else if column_w >= px(560.) {
+            2
+        } else {
+            1
+        };
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme.background)
+            .text_color(theme.text_primary)
+            .font_family(theme::ui_font_family())
+            .text_size(TextSize::Default.px(&theme))
+            .child(self.filter_bar(theme, cx))
+            .child(
+                div()
+                    .id("usage-body")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .track_scroll(self.scroll())
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(column_w)
+                            .mx_auto()
+                            .pb(DynamicSpacing::Base48.px(&theme))
+                            .flex()
+                            .flex_col()
+                            .children(self.active_filter_bar(theme, cx))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .px(DynamicSpacing::Base20.px(&theme))
+                                    .pt(DynamicSpacing::Base20.px(&theme))
+                                    .flex()
+                                    .flex_col()
+                                    .child(self.body(theme, kpi_cols, window, cx)),
+                            ),
+                    ),
+            )
+    }
+}
+
+impl UsagePage {
+    // ── header ─────────────────────────────────────────────────────────────
+
+    /// The Usage card's title controls, hosted by the shell's top bar: the Back
+    /// button and the "Usage" title, replacing the session title while the page
+    /// is open. Keeping them in the shared top bar means the card itself starts
+    /// at its filter row, mirroring the Git page.
+    pub fn top_bar_leading(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(DynamicSpacing::Base08.px(&theme))
+            .child(
+                press(
+                    button_frame(div().id("usage-top-back"), &theme, ButtonSize::Medium)
+                        .group(BUTTON_GROUP)
+                        .cursor_pointer()
+                        .hover_state(&theme),
+                )
+                .on_mouse_down(MouseButton::Left, {
+                    let entity = cx.entity();
+                    move |_, window, cx| {
+                        entity.update(cx, |page, cx| page.close_page(window, cx));
+                    }
+                })
+                .child(icon(
+                    "icons/arrow-left.svg",
+                    ButtonSize::Medium.icon_size().px(&theme),
+                    theme.text_secondary,
+                ))
+                .child(
+                    div()
+                        .text_color(theme.text_secondary)
+                        .child(tr!("view.back")),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(DynamicSpacing::Base06.px(&theme))
+                    .child(icon(
+                        "icons/chart-analysis.svg",
+                        IconSize::Medium.px(&theme),
+                        theme.text_secondary,
+                    ))
+                    .child(
+                        div()
+                            .text_size(TextSize::Large.px(&theme))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_primary)
+                            .child(tr!("view.usage")),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The page's own actions at the trailing end of the filter toolbar:
+    /// freshness, Export and Refresh. The Back affordance and title live in the
+    /// shared top bar (see [`UsagePage::top_bar_leading`]), so the page spends
+    /// one row of chrome before its data, not two.
+    fn toolbar_actions(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let refresh_label = tr!("usage.refreshing");
+        let refresh_idle_label = tr!("common.refresh");
+        let status = if self.is_refreshing() {
+            Some(refresh_label.clone())
+        } else {
+            self.status().map(str::to_string).or_else(|| {
+                self.last_updated_ms()
+                    .map(|at| format::age_label(super::collect::now_ms() - at))
+            })
+        };
+        let has_data = self.snapshot().is_some_and(|snapshot| !snapshot.is_empty());
+
+        div()
+            .flex_none()
+            // Pushed to the trailing edge, and still there when a narrow
+            // window wraps the toolbar onto a second line.
+            .ml_auto()
+            .flex()
+            .items_center()
+            .gap(DynamicSpacing::Base04.px(&theme))
+            .children(status.map(|status| {
+                div()
+                    .pr(DynamicSpacing::Base04.px(&theme))
+                    .text_size(TextSize::Small.px(&theme))
+                    .text_color(theme.text_muted)
+                    .child(status)
+            }))
+            .child(self.export_control(theme, has_data, cx))
+            // The label never changes: only the glyph turns, so the button
+            // keeps its width and the toolbar never shifts. The freshness
+            // label beside it says "Refreshing…" in words.
+            .child(filters::text_button(
+                "usage-refresh",
+                &refresh_idle_label,
+                Some("icons/refresh.svg"),
+                self.is_refreshing(),
+                true,
+                theme,
+                {
+                    let entity = cx.entity();
+                    move |_, _, cx| {
+                        entity.update(cx, |page, cx| page.refresh(cx));
+                    }
+                },
+            ))
+            .into_any_element()
+    }
+
+    fn export_control(&self, theme: Theme, enabled: bool, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.menu() == Some(MenuKind::Export);
+        let entity = cx.entity();
+        let button = filters::text_button(
+            "usage-export",
+            &tr!("usage.export"),
+            Some("icons/upload.svg"),
+            false,
+            enabled,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::Export, window, cx)
+                });
+            },
+        );
+        if !open {
+            return div().child(button).into_any_element();
+        }
+        let panel = filters::export_menu(cx, theme);
+        filters::chip_with_menu(
+            "usage-export-anchor",
+            button,
+            true,
+            Corner::TopRight,
+            theme,
+            move || panel,
+        )
+    }
+
+    // ── filters ────────────────────────────────────────────────────────────
+
+    /// The page toolbar: filter chips leading, the page's actions trailing.
+    /// Every chip writes to the same filter the whole page reads (§10), so no
+    /// panel can drift.
+    fn filter_bar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let filter = self.filter();
+        let range = filter.range.clone();
+        let index = self.index();
+
+        // The chips are their own row with their own spacing, so the gap
+        // between them never depends on how the toolbar around them wraps.
+        let mut bar = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(DynamicSpacing::Base08.px(&theme));
+
+        let entity = cx.entity();
+        let range_open = self.menu() == Some(MenuKind::Range);
+        let range_chip = filters::chip(
+            "usage-range-chip",
+            range.label(),
+            Some("icons/clock.svg"),
+            range.preset != RangePreset::Last7,
+            false,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| page.toggle_menu(MenuKind::Range, window, cx));
+            },
+        );
+        let range_panel = range_open.then(|| filters::range_menu(self, cx, theme));
+        bar = bar.child(filters::chip_with_menu(
+            "usage-range-anchor",
+            range_chip,
+            range_open,
+            Corner::TopLeft,
+            theme,
+            move || range_panel.unwrap_or_else(|| div().into_any_element()),
+        ));
+
+        if let Some(index) = index {
+            let ranked_workspaces = filters::workspace_options(index);
+            let ranked_models = filters::model_options(index);
+            let all_workspaces: Vec<FilterOption> = index
+                .workspaces
+                .iter()
+                .enumerate()
+                .map(|(ix, entry)| FilterOption {
+                    id: ix as u16,
+                    label: entry.label.clone(),
+                    sub: None,
+                })
+                .collect();
+            let all_providers: Vec<FilterOption> = index
+                .providers
+                .iter()
+                .enumerate()
+                .map(|(ix, entry)| FilterOption {
+                    id: ix as u16,
+                    label: entry.label.clone(),
+                    sub: None,
+                })
+                .collect();
+            let all_models: Vec<FilterOption> = ranked_models
+                .iter()
+                .map(|option| FilterOption {
+                    id: option.id,
+                    label: option.label.clone(),
+                    sub: None,
+                })
+                .collect();
+
+            bar = bar
+                .child(self.multi_chip(
+                    MenuKind::Workspace,
+                    "usage-workspace",
+                    &tr!("usage.all_workspaces"),
+                    &ranked_workspaces,
+                    &all_workspaces,
+                    &filter.workspaces,
+                    theme,
+                    cx,
+                ))
+                // One chip for both: its menu groups the models under their
+                // providers, and a provider row selects all of its models.
+                .child(self.model_chip(&ranked_models, &all_models, &all_providers, theme, cx));
+        }
+        bar = bar.child(self.more_filters_chip(theme, cx));
+
+        // Active narrowings are shown once, as removable chips, under the
+        // filter row (§45); the filter row itself stays a set of controls.
+        div()
+            .w_full()
+            .flex_none()
+            .px(DynamicSpacing::Base20.px(&theme))
+            .py(DynamicSpacing::Base08.px(&theme))
+            .border_b_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_x(DynamicSpacing::Base12.px(&theme))
+            .gap_y(DynamicSpacing::Base06.px(&theme))
+            .child(bar)
+            .child(self.toolbar_actions(theme, cx))
+            .into_any_element()
+    }
+
+    /// The merged Provider & Model chip. Its label names what is chosen across
+    /// both — a provider, a model, or a count — and its menu is the model
+    /// menu grouped by provider.
+    fn model_chip(
+        &self,
+        ranked: &[FilterOption],
+        all: &[FilterOption],
+        providers: &[FilterOption],
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let filter = self.filter();
+        let kind = MenuKind::Model;
+        let open = self.menu() == Some(kind);
+        let chosen: Vec<String> = filter
+            .providers
+            .iter()
+            .filter_map(|id| providers.iter().find(|option| option.id == *id))
+            .chain(
+                filter
+                    .models
+                    .iter()
+                    .filter_map(|id| all.iter().find(|option| option.id == *id)),
+            )
+            .map(|option| option.label.clone())
+            .collect();
+        let label = match chosen.as_slice() {
+            [] => tr!("usage.all_models"),
+            [one] => one.clone(),
+            many => tr!("usage.n_selected", count = many.len()),
+        };
+        let entity = cx.entity();
+        let chip = filters::chip(
+            "usage-model",
+            label,
+            Some("icons/filter.svg"),
+            !chosen.is_empty(),
+            false,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| page.toggle_menu(kind, window, cx));
+            },
+        );
+        if !open {
+            return filters::chip_with_menu(
+                "usage-model",
+                chip,
+                false,
+                Corner::TopLeft,
+                theme,
+                || div().into_any_element(),
+            );
+        }
+        let panel = filters::multi_menu(self, kind, ranked, all, &filter.models, cx, theme);
+        filters::chip_with_menu(
+            "usage-model",
+            chip,
+            true,
+            Corner::TopLeft,
+            theme,
+            move || panel,
+        )
+    }
+
+    /// The "+ Filter" chip: outcome and cache, the request dimensions without a
+    /// chip of their own. It shows how many of them are narrowing.
+    fn more_filters_chip(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let filter = self.filter();
+        let active = filter.outcomes.len() + usize::from(filter.cache != CacheFilter::Any);
+        let label = if active == 0 {
+            tr!("usage.more_filters")
+        } else {
+            tr!("usage.more_filters_count", count = active)
+        };
+        let open = self.menu() == Some(MenuKind::MoreFilters);
+        let entity = cx.entity();
+        let chip = filters::chip(
+            "usage-more-filters",
+            label,
+            Some("icons/plus.svg"),
+            active > 0,
+            false,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::MoreFilters, window, cx)
+                });
+            },
+        );
+        let panel = open.then(|| filters::more_filters_menu(self, cx, theme));
+        filters::chip_with_menu(
+            "usage-more-filters-anchor",
+            chip,
+            open,
+            Corner::TopLeft,
+            theme,
+            move || panel.unwrap_or_else(|| div().into_any_element()),
+        )
+    }
+
+    /// One multi-select chip with its popover. `ranked` is what the menu shows
+    /// (busiest first); `all` is the full set "Select all" applies.
+    #[allow(clippy::too_many_arguments)]
+    fn multi_chip(
+        &self,
+        kind: MenuKind,
+        id: &'static str,
+        all_label: &str,
+        ranked: &[FilterOption],
+        all: &[FilterOption],
+        selected: &[u16],
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.menu() == Some(kind);
+        let label = filters::selection_label(all_label, selected, |value| {
+            ranked
+                .iter()
+                .chain(all.iter())
+                .find(|option| option.id == value)
+                .map(|option| option.label.clone())
+        });
+        let entity = cx.entity();
+        let chip = filters::chip(
+            id,
+            label,
+            Some("icons/filter.svg"),
+            !selected.is_empty(),
+            false,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| page.toggle_menu(kind, window, cx));
+            },
+        );
+        if !open {
+            return filters::chip_with_menu(id, chip, false, Corner::TopLeft, theme, || {
+                div().into_any_element()
+            });
+        }
+        let panel = filters::multi_menu(self, kind, ranked, all, selected, cx, theme);
+        filters::chip_with_menu(id, chip, true, Corner::TopLeft, theme, move || panel)
+    }
+
+    /// The active-filter bar (§45): every narrowing filter as a removable
+    /// chip, so the user always knows why the numbers changed. Only shown when
+    /// something beyond the date range is applied.
+    fn active_filter_bar(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let filter = self.filter();
+        let index = self.index()?;
+        if !filter.has_narrowing() {
+            return None;
+        }
+        let mut chips: Vec<AnyElement> = Vec::new();
+
+        if let Some(focus) = filter.focus {
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                "usage-chip-focus".to_string(),
+                focus.label(),
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.set_focus(None, cx));
+                },
+            ));
+        }
+        if let Some(session) = filter.session {
+            if let Some(entry) = index.try_session(session) {
+                let label = tr!("usage.chip_session", name = session_title(entry));
+                let entity = cx.entity();
+                chips.push(filters::toggle_chip(
+                    "usage-chip-session".to_string(),
+                    label,
+                    theme,
+                    move |_, _, cx| {
+                        entity.update(cx, |page, cx| page.set_session_scope(None, cx));
+                    },
+                ));
+            }
+        }
+        for id in filter.workspaces.iter().copied() {
+            let Some(entry) = index.workspaces.get(id as usize) else {
+                continue;
+            };
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                format!("usage-chip-workspace-{id}"),
+                tr!("usage.chip_workspace", name = entry.label),
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| {
+                        page.toggle_filter_value(MenuKind::Workspace, id, cx)
+                    });
+                },
+            ));
+        }
+        for id in filter.providers.iter().copied() {
+            let Some(entry) = index.providers.get(id as usize) else {
+                continue;
+            };
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                format!("usage-chip-provider-{id}"),
+                tr!("usage.chip_provider", name = entry.label),
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| {
+                        page.toggle_filter_value(MenuKind::Provider, id, cx)
+                    });
+                },
+            ));
+        }
+        for id in filter.models.iter().copied() {
+            let Some(entry) = index.models.get(id as usize) else {
+                continue;
+            };
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                format!("usage-chip-model-{id}"),
+                tr!("usage.chip_model", name = entry.label),
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| {
+                        page.toggle_filter_value(MenuKind::Model, id, cx)
+                    });
+                },
+            ));
+        }
+        if filter.errors_only() {
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                "usage-chip-errors".to_string(),
+                tr!("usage.chip_failed_requests"),
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.set_errors_only(false, cx));
+                },
+            ));
+        } else {
+            for outcome in filter.outcomes.iter().copied() {
+                let entity = cx.entity();
+                chips.push(filters::toggle_chip(
+                    format!("usage-chip-outcome-{}", outcome.as_str()),
+                    tr!("usage.chip_outcome", name = outcome.label()),
+                    theme,
+                    move |_, _, cx| {
+                        entity.update(cx, |page, cx| page.toggle_outcome(outcome, cx));
+                    },
+                ));
+            }
+        }
+        if filter.cache != CacheFilter::Any {
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                "usage-chip-cache".to_string(),
+                tr!("usage.chip_cache", name = filter.cache.label()),
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.set_cache_filter(CacheFilter::Any, cx));
+                },
+            ));
+        }
+
+        let entity = cx.entity();
+        let clear_all = filters::text_button(
+            "usage-chips-clear",
+            &tr!("usage.clear_all"),
+            None,
+            false,
+            true,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.clear_filters(cx));
+            },
+        );
+
+        Some(
+            div()
+                .id("usage-active-filters")
+                .w_full()
+                .px(DynamicSpacing::Base20.px(&theme))
+                .pt(DynamicSpacing::Base12.px(&theme))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(DynamicSpacing::Base06.px(&theme))
+                .child(
+                    div()
+                        .pr(DynamicSpacing::Base02.px(&theme))
+                        .text_size(TextSize::Small.px(&theme))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .child(tr!("view.filters")),
+                )
+                .children(chips)
+                .child(clear_all)
+                .into_any_element(),
+        )
+    }
+
+    // ── page states ────────────────────────────────────────────────────────
+
+    fn body(
+        &mut self,
+        theme: Theme,
+        kpi_cols: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.is_loading() {
+            return self.skeleton(theme);
+        }
+        if self.index().is_none() {
+            // The store could not be read at all: say so, and offer the retry.
+            if let Some(error) = self.error().map(str::to_string) {
+                let entity = cx.entity();
+                let action = press(
+                    button_frame(div().id("usage-retry"), &theme, ButtonSize::Medium)
+                        .group(BUTTON_GROUP)
+                        .mt(DynamicSpacing::Base02.px(&theme))
+                        .border_1()
+                        .border_color(theme.border)
+                        .raised(theme.surface_elevated, &theme)
+                        .cursor_pointer()
+                        .hover_state(&theme),
+                )
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.refresh(cx));
+                })
+                .child(tr!("view.try_again"))
+                .into_any_element();
+                return self.message_state(
+                    theme,
+                    "icons/info.svg",
+                    &tr!("usage.unable_to_load"),
+                    &error,
+                    Some(action),
+                );
+            }
+            return self.skeleton(theme);
+        }
+        let Some(index) = self.index() else {
+            return self.skeleton(theme);
+        };
+        if index.is_empty() && index.unreadable_files > 0 {
+            return self.message_state(
+                theme,
+                "icons/info.svg",
+                &tr!("usage.unable_to_read"),
+                &tr!(
+                    "usage.unreadable_files_hint",
+                    count = format::count(index.unreadable_files as u64),
+                    store = self.store_hint()
+                ),
+                None,
+            );
+        }
+        if index.is_empty() {
+            return self.empty_store_state(theme, index.unreadable_files);
+        }
+        let Some(snapshot) = self.snapshot().cloned() else {
+            return self.skeleton(theme);
+        };
+        let snapshot = snapshot.as_ref();
+        if snapshot.filtered_out() {
+            let action = self.clear_filters_button(theme, cx);
+            return self.message_state(
+                theme,
+                "icons/filter.svg",
+                &tr!("usage.no_matches"),
+                &tr!("usage.no_matches_hint"),
+                action,
+            );
+        }
+        if snapshot.is_empty() {
+            return self.empty_store_state(theme, index.unreadable_files);
+        }
+
+        // One continuous read: the board, the trend, the audit, then the long
+        // view — the section selectors inside each card do the narrowing the
+        // old page tabs used to. The year calendar closes the page: it reads a
+        // fixed twelve months, so it would contradict the range chip if it led.
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base20.px(&theme))
+            .child(self.summary_card(snapshot, theme, kpi_cols, cx))
+            .child(self.activity_section(snapshot, theme, cx))
+            .child(self.breakdown_section(snapshot, theme, cx))
+            .child(self.details_section(snapshot, theme, window, cx))
+            .child(self.daily_section(snapshot, theme, cx))
+            .into_any_element()
+    }
+
+    /// The contribution-graph calendar as its own card, closing the page: the
+    /// trailing year of days shaded by the active metric. Clicking a day
+    /// scopes every section to it; clicking it again restores the range.
+    fn daily_section(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let daily_meta = tr!(
+            "usage.per_day_last_year",
+            metric = self.metric().label().to_lowercase()
+        );
+        section(
+            "usage-daily",
+            &tr!("usage.daily_activity"),
+            None,
+            Some(daily_meta),
+            None,
+            self.heatmap_body(snapshot, theme, cx),
+            theme,
+        )
+    }
+
+    /// The daily activity calendar: one cell per day, shaded by the active
+    /// metric. A second reading of the same activity — the trend shows the shape
+    /// across adaptive buckets, the calendar shows the day-of-week rhythm, the
+    /// streaks, and the quiet stretches at a glance. It is always a trailing
+    /// year (like a contribution graph), so it stays readable whatever the date
+    /// range is; the workspace / model / provider scope still applies to every
+    /// cell. Clicking a day scopes the whole page to it.
+    fn heatmap_body(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let metric = self.metric();
+        let calendar = &snapshot.calendar;
+
+        let hover = self.hover_day();
+        // The day the page is scoped to, when the range sits inside one day (a
+        // calendar click, or the Today preset). The calendar does not read the
+        // range for its window, so this is only the selection ring.
+        let range = &self.filter().range;
+        let selected = calendar.days.iter().position(|day| {
+            day.in_range
+                && range.start_ms >= day.start_ms
+                && range.end_ms > range.start_ms
+                && range.end_ms <= next_bucket(day.start_ms, Granularity::Day)
+        });
+
+        // Pre-compute each in-range day's start so the click handler (which
+        // must be `'static`) can scope the page without touching the snapshot.
+        let day_starts: Vec<Option<i64>> = calendar
+            .days
+            .iter()
+            .map(|day| day.in_range.then_some(day.start_ms))
+            .collect();
+
+        let entity = cx.entity();
+        let on_hover = move |day: Option<usize>, _: &mut Window, cx: &mut App| {
+            entity.update(cx, |page, cx| page.set_hover_day(day, cx));
+        };
+        let select_entity = cx.entity();
+        let on_select = move |ix: usize, _: &mut Window, cx: &mut App| {
+            let Some(Some(day_ms)) = day_starts.get(ix).copied() else {
+                return;
+            };
+            select_entity.update(cx, |page, cx| page.scope_to_day(day_ms, cx));
+        };
+
+        // Empty-day cells paint `background`; on the raised section card they
+        // recess without a second frame. Nested cards are forbidden.
+        let width = self.table_width().max(240.);
+        heatmap::calendar(
+            "usage-calendar",
+            calendar,
+            metric,
+            hover,
+            selected,
+            theme,
+            width,
+            on_hover,
+            on_select,
+        )
+        .into_any_element()
+    }
+
+    /// Usage over time as one card: the trend chart and its data table.
+    fn activity_section(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let metric = self.metric();
+        let latency_metric = self.latency_metric();
+        let by = snapshot.series.granularity.label();
+        let meta = match metric {
+            ChartMetric::Cost => tr!(
+                "usage.total_by",
+                value = format::cost(metric.total(&snapshot.summary.totals)),
+                by = by
+            ),
+            ChartMetric::Latency => tr!(
+                "usage.per_bucket",
+                value = latency_metric.label().to_lowercase(),
+                by = by
+            ),
+            _ => tr!(
+                "usage.total_by",
+                value = format::compact(metric.total(&snapshot.summary.totals) as u64),
+                by = by
+            ),
+        };
+
+        section(
+            "usage-activity",
+            &tr!("usage.over_time"),
+            None,
+            Some(meta),
+            None,
+            self.trend_body(snapshot, theme, cx),
+            theme,
+        )
+    }
+
+    fn clear_filters_button(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.filter().has_narrowing() {
+            return None;
+        }
+        let entity = cx.entity();
+        Some(
+            press(
+                button_frame(div().id("usage-state-clear"), &theme, ButtonSize::Medium)
+                    .group(BUTTON_GROUP)
+                    .mt(DynamicSpacing::Base02.px(&theme))
+                    .border_1()
+                    .border_color(theme.border)
+                    .raised(theme.surface_elevated, &theme)
+                    .cursor_pointer()
+                    .hover_state(&theme),
+            )
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                entity.update(cx, |page, cx| page.clear_filters(cx));
+            })
+            .child(tr!("view.clear_filters"))
+            .into_any_element(),
+        )
+    }
+
+    /// Lightweight skeleton: the page's shape, without a spinner (§45).
+    fn skeleton(&self, theme: Theme) -> AnyElement {
+        // A placeholder bar, drawn in the trough so it reads against a card.
+        let bar = |width: f32, height: f32| {
+            div()
+                .w(px(width))
+                .h(px(height))
+                .rounded(Radius::Small.px(&theme))
+                .bg(theme.surface_secondary)
+                .into_any_element()
+        };
+        // One card shell, so the load→loaded swap keeps the same shape: a
+        // header strip over a body.
+        let shell = |body: AnyElement| {
+            div()
+                .w_full()
+                .flex_none()
+                .rounded(panel::RADIUS.px(&theme))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.surface_elevated)
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(42.))
+                        .px(DynamicSpacing::Base12.px(&theme))
+                        .flex()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(bar(96., 10.)),
+                )
+                .child(body)
+                .into_any_element()
+        };
+
+        // Summary: a metric grid divided by hairlines.
+        let mut grid = div()
+            .w_full()
+            .flex()
+            .flex_wrap()
+            .gap(DynamicSpacing::Base01.px(&theme))
+            .bg(theme.border);
+        for _ in 0..4 {
+            grid = grid.child(
+                div()
+                    .flex_1()
+                    .min_w(px(150.))
+                    .p(DynamicSpacing::Base12.px(&theme))
+                    .bg(theme.surface_elevated)
+                    .flex()
+                    .flex_col()
+                    .gap(DynamicSpacing::Base08.px(&theme))
+                    .child(bar(56., 10.))
+                    .child(bar(88., 18.))
+                    .child(bar(112., 10.)),
+            );
+        }
+
+        // Activity: the switcher row, the plot, then the always-open bands.
+        let activity = div()
+            .p(DynamicSpacing::Base12.px(&theme))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base12.px(&theme))
+            .child(bar(320., 26.))
+            .child(
+                div()
+                    .h(px(168.))
+                    .w_full()
+                    .rounded(panel::RADIUS.px(&theme))
+                    .bg(theme.surface_secondary),
+            )
+            .child(
+                div()
+                    .h(px(96.))
+                    .w_full()
+                    .rounded(panel::RADIUS.px(&theme))
+                    .bg(theme.surface_secondary),
+            )
+            .child(
+                div()
+                    .h(px(72.))
+                    .w_full()
+                    .rounded(panel::RADIUS.px(&theme))
+                    .bg(theme.surface_secondary),
+            );
+
+        // Records: a header rule and a handful of rows.
+        let mut records = div()
+            .w_full()
+            .pt(DynamicSpacing::Base12.px(&theme))
+            .flex()
+            .flex_col();
+        for ix in 0..6 {
+            records = records.child(
+                div()
+                    .h(px(26.))
+                    .w_full()
+                    .px(DynamicSpacing::Base12.px(&theme))
+                    .flex()
+                    .items_center()
+                    .gap(DynamicSpacing::Base12.px(&theme))
+                    .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
+                    .child(bar(140., 10.))
+                    .child(div().flex_1())
+                    .child(bar(72., 10.)),
+            );
+        }
+
+        // Secondary bands are sections, not cards: a quiet rule over the
+        // placeholder body.
+        let section_shell = |body: AnyElement| {
+            div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .w_full()
+                        .pb(DynamicSpacing::Base12.px(&theme))
+                        .flex()
+                        .flex_col()
+                        .gap(DynamicSpacing::Base04.px(&theme))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(bar(120., 12.))
+                        .child(bar(220., 10.)),
+                )
+                .child(div().pt(DynamicSpacing::Base12.px(&theme)).child(body))
+                .into_any_element()
+        };
+
+        let breakdown = div()
+            .p(DynamicSpacing::Base12.px(&theme))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base12.px(&theme))
+            .child(bar(220., 26.))
+            .child(
+                div()
+                    .h(px(96.))
+                    .w_full()
+                    .rounded(panel::RADIUS.px(&theme))
+                    .bg(theme.surface_secondary),
+            );
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base20.px(&theme))
+            .child(shell(grid.into_any_element()))
+            .child(section_shell(activity.into_any_element()))
+            .child(section_shell(breakdown.into_any_element()))
+            .child(section_shell(records.into_any_element()))
+            .into_any_element()
+    }
+
+    /// The store has no usage at all (§43).
+    fn empty_store_state(&self, theme: Theme, unreadable: usize) -> AnyElement {
+        let note = (unreadable > 0).then(|| {
+            tr!(
+                "usage.unreadable_files_period",
+                count = format::count(unreadable as u64)
+            )
+        });
+        let mut state = self.message_state(
+            theme,
+            "icons/usage-total.svg",
+            &tr!("usage.no_data_yet"),
+            &tr!("usage.no_data_hint", store = self.store_hint()),
+            None,
+        );
+        if let Some(note) = note {
+            state = div()
+                .flex()
+                .flex_col()
+                .child(state)
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .text_size(TextSize::Small.px(&theme))
+                        .text_color(theme.text_muted)
+                        .child(note),
+                )
+                .into_any_element();
+        }
+        state
+    }
+
+    /// The store the page reads, for the states that have to name it.
+    fn store_hint(&self) -> String {
+        self.store_path()
+            .map(|path| format::short_path(&path))
+            .unwrap_or_else(|| tr!("usage.the_session_store"))
+    }
+
+    /// A centered message with an optional action.
+    fn message_state(
+        &self,
+        theme: Theme,
+        icon_path: &'static str,
+        title: &str,
+        body: &str,
+        action: Option<AnyElement>,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .h(px(400.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(DynamicSpacing::Base08.px(&theme))
+            .child(empty_state_glyph(theme, icon_path))
+            .child(
+                div()
+                    .text_size(TextSize::Large.px(&theme))
+                    .line_height(theme.ui_px(20.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(title.to_string()),
+            )
+            .child(
+                div()
+                    .max_w(px(440.))
+                    .text_align(gpui::TextAlign::Center)
+                    .text_size(TextSize::Small.px(&theme))
+                    .text_color(theme.text_muted)
+                    .child(body.to_string()),
+            )
+            .children(action)
+            .into_any_element()
+    }
+
+    // ── summary card ───────────────────────────────────────────────────────
+
+    /// The Summary card: the metric board first, as full-bleed cells divided
+    /// by hairlines (a measurement board, not a grid of floating cards), then
+    /// the quieter secondary figures on the strip beneath.
+    ///
+    /// Each cell is the bklit KPI card (bklit.com/recipes#kpi-sparklines): the
+    /// label with the scope it reads, the figure and its change, then the
+    /// range's 40px line. Pointing at any line points the whole row at that
+    /// bucket, so all four numbers, dates, and changes read the same day, and
+    /// only that point is highlighted; the pointer leaving the board snaps them
+    /// back to the range ([`sparkline`]).
+    ///
+    /// The grid is built as explicit rows of `flex_1` cells rather than one
+    /// wrapping container of percentage-width cells: percentage widths inside a
+    /// wrapping flex row are resolved against the row's own (content-derived)
+    /// width, which let the board grow past the window.
+    fn summary_card(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cols: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let series = sparkline::kpi_values(&snapshot.series);
+        let cells = self.kpi_cells(snapshot, &series);
+        let previous = self.kpi_previous();
+        let reduced_motion = theme::reduce_motion(cx);
+        let on_hover: sparkline::HoverFn = {
+            let entity = cx.entity();
+            Rc::new(move |bucket, _, cx| {
+                entity.update(cx, |page, cx| page.set_kpi_hover(bucket, cx));
+            })
+        };
+        let mut grid = div().w_full().flex().flex_col();
+
+        for (row_ix, chunk) in cells.chunks(cols).enumerate() {
+            let mut row = div().w_full().flex();
+            for (col_ix, cell) in chunk.iter().enumerate() {
+                let entity = cx.entity();
+                // The cell whose metric the trend below is plotting is the
+                // board's one accent (§19): its figure and its line, so the
+                // click-through to the chart reads before it is made.
+                let active = cell.click == Some(self.metric());
+                let tint = match (cell.tone, active) {
+                    (CellTone::Normal, true) => theme.accent,
+                    (CellTone::Normal, false) => theme.text_primary,
+                    (CellTone::Muted, _) => theme.text_muted,
+                };
+                let line = if active {
+                    theme.accent
+                } else {
+                    theme.text_secondary
+                };
+                let change = cell.change.map(|pct| {
+                    let color = if pct.abs() < 0.05 {
+                        theme.text_muted
+                    } else if cell.metric == sparkline::KpiMetric::Cost {
+                        // Spending more is not "good": the sign carries the
+                        // direction, the ink stays neutral.
+                        theme.text_secondary
+                    } else if pct > 0.0 {
+                        theme.success
+                    } else {
+                        theme.error
+                    };
+                    (format::delta(Some(pct)), color)
+                });
+                let values = series
+                    .get(cell.metric.index())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let earlier = previous
+                    .and_then(|previous| previous.get(cell.metric.index()))
+                    .map(Vec::as_slice);
+                let spark = sparkline::sparkline(
+                    sparkline::Spark {
+                        id: cell.metric.id(),
+                        values,
+                        previous: earlier,
+                        hover: self.kpi_hover(),
+                        morph_serial: self.kpi_serial(),
+                        color: line,
+                        reduced_motion,
+                        theme,
+                    },
+                    on_hover.clone(),
+                );
+                let mut element = div()
+                    .id(SharedString::from(format!("usage-kpi-{row_ix}-{col_ix}")))
+                    .flex_1()
+                    .min_w(px(150.))
+                    .px(DynamicSpacing::Base12.px(&theme))
+                    .py(DynamicSpacing::Base12.px(&theme))
+                    .flex()
+                    .flex_col()
+                    .gap(DynamicSpacing::Base06.px(&theme))
+                    .when(row_ix > 0, |cell| {
+                        cell.border_t_1().border_color(theme.border)
+                    })
+                    .when(col_ix + 1 < chunk.len(), |cell| {
+                        cell.border_r_1().border_color(theme.border)
+                    })
+                    .when(cell.click.is_some(), |cell| {
+                        cell.cursor_pointer().hover_state(&theme)
+                    })
+                    // The label and the scope it reads: the range at rest, the
+                    // bucket under the pointer.
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(DynamicSpacing::Base08.px(&theme))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(TextSize::Small.px(&theme))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text_muted)
+                                    .child(cell.label.clone()),
+                            )
+                            .children(cell.scope.clone().map(|scope| {
+                                div()
+                                    .flex_none()
+                                    .font(num_font())
+                                    .text_size(TextSize::Small.px(&theme))
+                                    .text_color(theme.text_muted)
+                                    .child(scope)
+                            })),
+                    )
+                    // The figure the board is named for, and the change it
+                    // carries. The sign and the colour agree, so direction is
+                    // never colour-only (§62).
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_baseline()
+                            .gap(DynamicSpacing::Base06.px(&theme))
+                            .child(
+                                div()
+                                    .font(num_font())
+                                    .text_size(theme.ui_px(24.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(tint)
+                                    .child(cell.value.clone()),
+                            )
+                            .children(change.map(|(text, color)| {
+                                div()
+                                    .font(num_font())
+                                    .text_size(TextSize::Small.px(&theme))
+                                    .text_color(color)
+                                    .child(text)
+                            })),
+                    )
+                    // The board's active metric keeps its tick as well as the
+                    // accent line: a shape, not a hue alone (§19/§62).
+                    .child(
+                        div()
+                            .h(px(2.))
+                            .w(px(20.))
+                            .rounded(px(1.))
+                            .when(active, |tick| tick.bg(theme.accent)),
+                    )
+                    .child(div().mt(px(2.)).child(spark))
+                    .child(ellipsis_line(
+                        cell.sub.clone(),
+                        TextSize::XSmall.px(&theme),
+                        theme.text_muted,
+                    ));
+                if let Some(metric) = cell.click {
+                    element = element.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        // Point the main chart at the metric the card names (§79).
+                        entity.update(cx, |page, cx| page.set_metric(metric, cx));
+                    });
+                }
+                row = row.child(element);
+            }
+            // Pad a short final row so its cells keep the grid's column widths.
+            for _ in chunk.len()..cols {
+                row = row.child(div().flex_1().min_w(px(150.)).when(row_ix > 0, |cell| {
+                    cell.border_t_1().border_color(theme.border)
+                }));
+            }
+            grid = grid.child(row);
+        }
+
+        let body = div().w_full().flex().flex_col().child(grid).child(
+            div()
+                .w_full()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(self.summary_strip(snapshot, theme, cols < 4, cx)),
+        );
+
+        card(
+            "usage-summary",
+            &tr!("usage.summary"),
+            None,
+            Some(summary_meta(snapshot)),
+            None,
+            body.into_any_element(),
+            theme,
+            true,
+        )
+    }
+
+    /// One cell per headline metric. A metric whose data does not exist says
+    /// "Unavailable" and why — never a fabricated zero (§6/§44).
+    ///
+    /// Every figure on a cell describes the same scope: at rest the range (the
+    /// period-over-period change and the range's secondary line), under the
+    /// pointer the bucket (its change from the bucket before it and its own
+    /// secondary line). Mixing the two would make the change describe a number
+    /// the card is not showing.
+    fn kpi_cells(&self, snapshot: &UsageSnapshot, series: &[Vec<f64>]) -> Vec<KpiCell> {
+        let totals = &snapshot.summary.totals;
+        let points = &snapshot.series.points;
+        let hovered = self.kpi_hover().filter(|ix| *ix < points.len());
+        let point = hovered.and_then(|ix| points.get(ix));
+
+        sparkline::KpiMetric::ALL
+            .into_iter()
+            .map(|metric| {
+                let values = series.get(metric.index()).map(Vec::as_slice).unwrap_or(&[]);
+                let available = match metric {
+                    sparkline::KpiMetric::Requests | sparkline::KpiMetric::Tokens => true,
+                    sparkline::KpiMetric::CacheRate => snapshot.cache.hit_rate.is_some(),
+                    sparkline::KpiMetric::Cost => totals.priced_requests > 0,
+                };
+                let (value, tone) = match metric {
+                    sparkline::KpiMetric::Requests => (
+                        format::count(point.map_or(totals.requests, |point| point.totals.requests)),
+                        CellTone::Normal,
+                    ),
+                    sparkline::KpiMetric::Tokens => (
+                        format::compact(
+                            point.map_or(totals.tokens.total, |point| point.totals.tokens.total),
+                        ),
+                        CellTone::Normal,
+                    ),
+                    sparkline::KpiMetric::CacheRate => {
+                        let rate = point.map_or(snapshot.cache.hit_rate, |point| {
+                            point.totals.cache_hit_rate()
+                        });
+                        match (rate, point) {
+                            (Some(rate), _) => (format::percent(rate), CellTone::Normal),
+                            // A bucket with no cache traffic has no rate; the
+                            // range as a whole may still have one.
+                            (None, Some(_)) => ("—".to_string(), CellTone::Muted),
+                            (None, None) => (tr!("usage.unavailable"), CellTone::Muted),
+                        }
+                    }
+                    sparkline::KpiMetric::Cost => {
+                        let scoped = point.map_or(totals, |point| &point.totals);
+                        // A bucket with no priced request has an unknown cost,
+                        // not a free one.
+                        match (scoped.priced_requests > 0, point) {
+                            (true, _) => (format::cost(scoped.cost_usd), CellTone::Normal),
+                            (false, Some(_)) => ("—".to_string(), CellTone::Muted),
+                            (false, None) => (tr!("usage.unavailable"), CellTone::Muted),
+                        }
+                    }
+                };
+                let change = match hovered {
+                    Some(ix) => sparkline::point_delta(values, ix),
+                    None => range_delta(snapshot, metric),
+                };
+                let sub = match metric {
+                    sparkline::KpiMetric::Requests => match point {
+                        Some(point) => tr!(
+                            "usage.sub_in_bucket",
+                            value = format::count(point.totals.requests)
+                        ),
+                        None => tr!("usage.sub_requests_in_range"),
+                    },
+                    sparkline::KpiMetric::Tokens => {
+                        let per_request = point.map_or_else(
+                            || totals.tokens_per_request(),
+                            |point| point.totals.tokens_per_request(),
+                        );
+                        match per_request {
+                            Some(avg) => tr!(
+                                "usage.sub_avg_per_request",
+                                value = format::compact(avg as u64)
+                            ),
+                            None => tr!("usage.sub_no_requests"),
+                        }
+                    }
+                    sparkline::KpiMetric::CacheRate => {
+                        let (read, written) = point.map_or(
+                            (snapshot.cache.cache_read, snapshot.cache.cache_write),
+                            |point| {
+                                (
+                                    point.totals.tokens.cache_read,
+                                    point.totals.tokens.cache_write,
+                                )
+                            },
+                        );
+                        if read + written == 0 {
+                            tr!("usage.sub_no_cache_tokens")
+                        } else {
+                            tr!(
+                                "usage.sub_read_written",
+                                read = format::compact(read),
+                                written = format::compact(written)
+                            )
+                        }
+                    }
+                    sparkline::KpiMetric::Cost => {
+                        let scoped = point.map_or(totals, |point| &point.totals);
+                        match scoped.cost_per_request() {
+                            Some(per) => {
+                                tr!("usage.sub_avg_per_request", value = format::cost(per))
+                            }
+                            None => tr!("usage.reason_needs_price_table"),
+                        }
+                    }
+                };
+                KpiCell {
+                    metric,
+                    label: metric_label(metric),
+                    // The range is already on the filter chip; a card names
+                    // its scope only when the pointer moves it to a bucket.
+                    scope: point.map(|point| point.label.clone()),
+                    value,
+                    change,
+                    sub,
+                    tone,
+                    click: available.then(|| metric.chart_metric()),
+                }
+            })
+            .collect()
+    }
+
+    /// Secondary readout under the board: three panels, Tokens, Activity and
+    /// Reliability, cut by the board's own hairlines (§88/§101). Each panel
+    /// opens with the one figure that gives the rest context — where the tokens
+    /// went, how many sessions, how often a request succeeded — then a small
+    /// grid of value-over-label tiles. Every figure stays visible; nothing is
+    /// behind a disclosure. A narrow page stacks the panels.
+    fn summary_strip(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        stacked: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let totals = &snapshot.summary.totals;
+        let summary = &snapshot.summary;
+        let reduced_motion = theme::reduce_motion(cx);
+
+        // ── Tokens: the split, then the prompt and price figures.
+        let cache = totals.tokens.cache_read + totals.tokens.cache_write;
+        // Shares of the three parts' own sum, so they always add to 100% even
+        // when a provider's reported total differs from the parts.
+        let parts = (totals.tokens.input + totals.tokens.output + cache).max(1) as f64;
+        let shares = div()
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base08.px(&theme))
+            .children(
+                [
+                    ("input", tr!("usage.metric_input"), totals.tokens.input),
+                    ("output", tr!("usage.metric_output"), totals.tokens.output),
+                    ("cache", tr!("usage.metric_cache"), cache),
+                ]
+                .into_iter()
+                .map(|(key, label, value)| {
+                    share_row(
+                        key,
+                        label,
+                        value,
+                        value as f64 / parts,
+                        theme,
+                        reduced_motion,
+                    )
+                }),
+            );
+        let mut token_tiles: Vec<(String, String)> = Vec::new();
+        if let Some(avg) = totals.avg_prompt() {
+            token_tiles.push((tr!("usage.stat_avg_prompt"), format::compact(avg as u64)));
+        }
+        if totals.peak_prompt > 0 {
+            token_tiles.push((
+                tr!("usage.stat_peak_prompt"),
+                format::compact(totals.peak_prompt),
+            ));
+        }
+        if totals.reasoning_reported > 0 {
+            token_tiles.push((
+                tr!("usage.stat_reasoning"),
+                format::compact(totals.reasoning),
+            ));
+        }
+        if let Some(per_mtok) = totals.cost_per_mtok() {
+            token_tiles.push((tr!("usage.stat_cost_per_mtok"), format::cost(per_mtok)));
+        }
+        let tokens = strip_panel(
+            "icons/usage-total.svg",
+            tr!("usage.metric_tokens"),
+            shares.into_any_element(),
+            token_tiles,
+            None,
+            theme,
+        );
+
+        // ── Activity: sessions, and how much work each one held.
+        let per_session = if summary.sessions > 0 {
+            summary.turns as f64 / summary.sessions as f64
+        } else {
+            0.0
+        };
+        let mut activity_tiles = vec![
+            (tr!("usage.stat_turns"), format::count(summary.turns)),
+            (
+                tr!("usage.stat_tool_calls"),
+                format::count(summary.tool_runs),
+            ),
+            (
+                tr!("usage.stat_bash_commands"),
+                format::count(summary.bash_runs),
+            ),
+        ];
+        if totals.duration_samples > 0 {
+            activity_tiles.push((
+                tr!("usage.stat_generation_time"),
+                format::span_ms(totals.duration_ms as i64),
+            ));
+        }
+        let activity = strip_panel(
+            "icons/clock.svg",
+            tr!("usage.group_activity"),
+            strip_hero(
+                format::count(summary.sessions),
+                tr!("usage.hero_sessions", value = format!("{per_session:.1}")),
+                theme,
+            ),
+            activity_tiles,
+            None,
+            theme,
+        );
+
+        // ── Reliability: the success rate, then speed and tool health.
+        let hero = if totals.requests == 0 {
+            strip_hero("—".to_string(), tr!("usage.sub_no_requests"), theme)
+        } else {
+            let success = (totals.requests - totals.errors) as f64 / totals.requests as f64 * 100.0;
+            let caption = if totals.errors == 0 {
+                tr!("usage.hero_success_clean")
+            } else {
+                tr!(
+                    "usage.hero_success",
+                    failed = format::count(totals.errors),
+                    total = format::count(totals.requests)
+                )
+            };
+            strip_hero(format::percent(success), caption, theme)
+        };
+        let mut reliability_tiles: Vec<(String, String)> = Vec::new();
+        if let Some(avg) = totals.avg_duration_ms() {
+            reliability_tiles.push((tr!("usage.metric_avg_response"), format::duration_ms(avg)));
+        }
+        if snapshot.latency.has_percentiles() {
+            reliability_tiles.push((
+                tr!("usage.stat_p95_response"),
+                format::duration_ms(snapshot.latency.p95_ms as f64),
+            ));
+        }
+        reliability_tiles.push((
+            tr!("usage.stat_tool_failures"),
+            if summary.tool_errors > 0 {
+                format::count(summary.tool_errors)
+            } else {
+                tr!("usage.none")
+            },
+        ));
+        reliability_tiles.push((
+            tr!("usage.stat_aborted"),
+            if totals.aborted > 0 {
+                format::count(totals.aborted)
+            } else {
+                tr!("usage.none")
+            },
+        ));
+        // The failed-request drill-down sits under the rate it explains.
+        let failures_link = (totals.errors > 0).then(|| {
+            let fail_entity = cx.entity();
+            let link = press(
+                button_frame(
+                    div().id("usage-summary-failures"),
+                    &theme,
+                    ButtonSize::Compact,
+                )
+                .text_color(theme.error)
+                .cursor_pointer()
+                .hover_ink(&theme),
+            )
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                fail_entity.update(cx, |page, cx| page.set_errors_only(true, cx));
+            })
+            .child(tr!("view.view_failures"));
+            // Wrapped so the panel's stretch does not widen the button.
+            div().flex().child(link).into_any_element()
+        });
+        let reliability = strip_panel(
+            "icons/circle-check.svg",
+            tr!("usage.group_reliability"),
+            hero,
+            reliability_tiles,
+            failures_link,
+            theme,
+        );
+
+        let panels = [tokens, activity, reliability];
+        let mut strip = div().w_full().flex();
+        strip = if stacked {
+            strip.flex_col()
+        } else {
+            strip.flex_row()
+        };
+        let last = panels.len() - 1;
+        strip
+            .children(panels.into_iter().enumerate().map(|(ix, panel)| {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .when(ix < last && !stacked, |cell| {
+                        cell.border_r_1().border_color(theme.border)
+                    })
+                    .when(ix > 0 && stacked, |cell| {
+                        cell.border_t_1().border_color(theme.border)
+                    })
+                    .child(panel)
+            }))
+            .into_any_element()
+    }
+
+    // ── trend ──────────────────────────────────────────────────────────────
+
+    /// The trend: one area chart across several measures, with the metric
+    /// switcher and the chart's data table in its own body. The Usage over
+    /// time card supplies the frame.
+    fn trend_body(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let metric = self.metric();
+        let latency_metric = self.latency_metric();
+
+        // Metric switcher: one visualization, several measures (§19). A metric
+        // with no source data stays visible but disabled, and the line under
+        // the chart says why.
+        let unavailable: Vec<&str> = ChartMetric::ALL
+            .iter()
+            .filter(|option| !option.available(&snapshot.summary))
+            .map(|option| option.as_str())
+            .collect();
+        let tabs = segmented(
+            "usage-metric",
+            &ChartMetric::ALL,
+            metric,
+            |option| option.label(),
+            |option| option.as_str(),
+            |option| option.available(&snapshot.summary),
+            true,
+            theme,
+            {
+                let entity = cx.entity();
+                move |option, _, cx| {
+                    entity.update(cx, |page, cx| page.set_metric(option, cx));
+                }
+            },
+        );
+
+        // Latency register selector (§20): only offered when the window has
+        // enough observations for percentiles to be meaningful.
+        let latency_selector = (metric == ChartMetric::Latency).then(|| {
+            segmented(
+                "usage-latency",
+                &LatencyMetric::ALL,
+                latency_metric,
+                |choice| choice.label(),
+                |choice| choice.as_str(),
+                |choice| choice.available(&snapshot.latency),
+                true,
+                theme,
+                {
+                    let entity = cx.entity();
+                    move |choice, _, cx| {
+                        entity.update(cx, |page, cx| page.set_latency_metric(choice, cx));
+                    }
+                },
+            )
+        });
+
+        // The metric switcher sits in the body, above the plot: a row of
+        // selectors under a heading reads as controls, and no eight-way
+        // switcher can overflow a 42px header on a narrow column.
+        let selectors = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(DynamicSpacing::Base08.px(&theme))
+            .flex_wrap()
+            .child(tabs)
+            .children(latency_selector)
+            .child(
+                // Trailing group: the two ways to read the line against
+                // something — one slice against the total, or the window
+                // before.
+                div()
+                    .ml_auto()
+                    .flex()
+                    .items_center()
+                    .gap(DynamicSpacing::Base08.px(&theme))
+                    .children(self.compare_control(snapshot, theme, cx))
+                    .children(self.highlight_control(snapshot, theme, cx)),
+            );
+
+        let hover = self.hover_bucket();
+        let entity = cx.entity();
+        let on_hover = move |bucket: Option<usize>, _: &mut Window, cx: &mut App| {
+            entity.update(cx, |page, cx| page.set_hover_bucket(bucket, cx));
+        };
+
+        // Pre-compute each bucket's width so the click handler (which must be
+        // `'static`) can scope the page without touching the snapshot.
+        let granularity = snapshot.series.granularity;
+        let focus_points: Vec<TimeFocus> = snapshot
+            .series
+            .points
+            .iter()
+            .map(|point| TimeFocus {
+                start_ms: point.start_ms,
+                end_ms: next_bucket(point.start_ms, granularity),
+                granularity,
+            })
+            .collect();
+        let selected = self.filter().focus.and_then(|focus| {
+            snapshot
+                .series
+                .points
+                .iter()
+                .position(|p| p.start_ms == focus.start_ms)
+        });
+        let select_entity = cx.entity();
+        let on_select = move |ix: usize, _: &mut Window, cx: &mut App| {
+            let Some(focus) = focus_points.get(ix).copied() else {
+                return;
+            };
+            select_entity.update(cx, |page, cx| {
+                // Clicking the selected bucket again clears the scope (§73).
+                let next = if page.filter().focus == Some(focus) {
+                    None
+                } else {
+                    Some(focus)
+                };
+                page.set_focus(next, cx);
+            });
+        };
+
+        let mut content = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base12.px(&theme))
+            .child(selectors)
+            .children(self.chart_legend(snapshot, theme))
+            .child(chart::timeline(
+                "usage-timeline",
+                &snapshot.series,
+                self.trend_highlight()
+                    .zip(self.trend_highlight_series())
+                    .zip(self.index())
+                    .and_then(|((highlight, series), index)| {
+                        Some(chart::ChartHighlight {
+                            series,
+                            label: highlight.label(index)?,
+                        })
+                    }),
+                self.previous_series(),
+                metric,
+                latency_metric,
+                hover,
+                selected,
+                theme,
+                crate::theme::reduce_motion(cx),
+                on_hover,
+                on_select,
+            ));
+        if snapshot.latency.samples > 0 {
+            content = content.child(self.latency_line(snapshot, theme));
+        }
+        let reason = unavailable_reason(&unavailable);
+        if !reason.is_empty() {
+            content = content.child(
+                div()
+                    .text_size(TextSize::Small.px(&theme))
+                    .text_color(theme.text_muted)
+                    .child(reason),
+            );
+        }
+
+        content.into_any_element()
+    }
+
+    /// The trend's "highlight one against the total" chip and its picker.
+    /// Absent when no dimension has two slices to tell apart.
+    fn highlight_control(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let comparable = [&snapshot.models, &snapshot.providers, &snapshot.workspaces]
+            .iter()
+            .any(|breakdown| breakdown.rows.len() > 1);
+        if !comparable {
+            return None;
+        }
+        let current = self
+            .trend_highlight()
+            .zip(self.index())
+            .and_then(|(highlight, index)| highlight.label(index));
+        let open = self.menu() == Some(MenuKind::TrendHighlight);
+        let entity = cx.entity();
+        let chip = filters::chip(
+            "usage-highlight-chip",
+            current.clone().unwrap_or_else(|| tr!("usage.highlight")),
+            Some("icons/chart-analysis.svg"),
+            current.is_some(),
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::TrendHighlight, window, cx)
+                });
+            },
+        );
+        let panel = open.then(|| filters::highlight_menu(self, snapshot, cx, theme));
+        // Trailing edge of the selector row, opening back over the chart.
+        Some(filters::chip_with_menu(
+            "usage-highlight-anchor",
+            chip,
+            open,
+            Corner::TopRight,
+            theme,
+            move || panel.unwrap_or_else(|| div().into_any_element()),
+        ))
+    }
+
+    /// The "Compare" toggle: draws the window before the range as a dashed
+    /// line. Absent where there is no window before ("All time") or while one
+    /// bucket is selected.
+    fn compare_control(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let filter = &snapshot.filter;
+        if filter.range.previous().is_none() || filter.focus.is_some() {
+            return None;
+        }
+        let on = self.compare_previous();
+        let entity = cx.entity();
+        Some(filters::toggle_button(
+            "usage-compare-toggle",
+            tr!("usage.compare"),
+            on,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.set_compare_previous(!on, cx));
+            },
+        ))
+    }
+
+    /// The chart's key, drawn only when the line is being read against
+    /// something: a highlighted slice (accent, with its share of the range)
+    /// over the total (quiet ink), and/or the previous window (dashed).
+    fn chart_legend(&self, snapshot: &UsageSnapshot, theme: Theme) -> Option<AnyElement> {
+        let highlighted = self.trend_highlight().and_then(|highlight| {
+            let label = highlight.label(self.index()?)?;
+            let series = self.trend_highlight_series()?;
+            Some((label, series))
+        });
+        let comparing = self.previous_series().is_some();
+        if highlighted.is_none() && !comparing {
+            return None;
+        }
+        let metric = self.metric();
+        let swatch = |color: Hsla, dashed: bool| {
+            let mut mark = div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .w(px(12.));
+            mark = if dashed {
+                mark.child(div().w(px(5.)).h(px(2.)).bg(color))
+                    .child(div().w(px(5.)).h(px(2.)).bg(color))
+            } else {
+                mark.child(
+                    div()
+                        .w_full()
+                        .h(px(3.))
+                        .rounded(Radius::Full.px(&theme))
+                        .bg(color),
+                )
+            };
+            mark
+        };
+        let item = |mark: gpui::Div, text: String, ink: Hsla| {
+            div()
+                .flex()
+                .items_center()
+                .gap(DynamicSpacing::Base06.px(&theme))
+                .child(mark)
+                .child(div().text_color(ink).child(text))
+                .into_any_element()
+        };
+        let mut items: Vec<AnyElement> = Vec::new();
+        match highlighted {
+            Some((label, series)) => {
+                let mut slice = super::aggregate::Totals::default();
+                for point in &series.points {
+                    slice.add(&point.totals);
+                }
+                // An average has no share of the total; every summed measure does.
+                let share = (metric != ChartMetric::Latency)
+                    .then(|| {
+                        let total = metric.total(&snapshot.summary.totals);
+                        (total > 0.0).then(|| metric.total(&slice) / total)
+                    })
+                    .flatten();
+                let text = match share {
+                    Some(share) => tr!(
+                        "usage.highlight_share",
+                        name = label,
+                        share = format::share(share)
+                    ),
+                    None => label,
+                };
+                items.push(item(swatch(theme.accent, false), text, theme.text_primary));
+                items.push(item(
+                    swatch(theme.text_muted, false),
+                    tr!("usage.total"),
+                    theme.text_muted,
+                ));
+            }
+            None => items.push(item(
+                swatch(theme.accent, false),
+                tr!("usage.this_period"),
+                theme.text_primary,
+            )),
+        }
+        if comparing {
+            items.push(item(
+                swatch(theme.text_muted, true),
+                tr!("usage.previous_period"),
+                theme.text_muted,
+            ));
+        }
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_x(DynamicSpacing::Base16.px(&theme))
+                .gap_y(DynamicSpacing::Base04.px(&theme))
+                .text_size(TextSize::Small.px(&theme))
+                .children(items)
+                .into_any_element(),
+        )
+    }
+
+    fn bucket_columns_control(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.menu() == Some(MenuKind::BucketColumns);
+        let entity = cx.entity();
+        let chip = filters::chip(
+            "usage-bucket-columns-chip",
+            tr!("usage.columns"),
+            None,
+            !self.bucket_hidden_columns().is_empty(),
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::BucketColumns, window, cx)
+                });
+            },
+        );
+        if !open {
+            return filters::chip_with_menu(
+                "usage-bucket-columns-anchor",
+                chip,
+                false,
+                Corner::TopRight,
+                theme,
+                || div().into_any_element(),
+            );
+        }
+        let panel = filters::bucket_columns_menu(self, cx, theme);
+        filters::chip_with_menu(
+            "usage-bucket-columns-anchor",
+            chip,
+            true,
+            Corner::TopRight,
+            theme,
+            move || panel,
+        )
+    }
+
+    fn bucket_totals(&self, result: &BucketQueryResult, theme: Theme) -> AnyElement {
+        let page_requests: u64 = result.rows.iter().map(|row| row.totals.requests).sum();
+        let page_tokens: u64 = result.rows.iter().map(|row| row.totals.tokens.total).sum();
+        let mut filtered = tr!(
+            "usage.filtered_totals_requests",
+            requests = format::count(result.totals.requests),
+            tokens = format::compact(result.totals.tokens.total)
+        );
+        if result.totals.cost_coverage() > 0.0 {
+            filtered.push_str(&format!(" · {}", format::cost(result.totals.cost_usd)));
+        }
+        let page = tr!(
+            "usage.page_requests",
+            requests = format::count(page_requests),
+            tokens = format::compact(page_tokens)
+        );
+        totals_row(&filtered, &page, theme)
+    }
+
+    fn bucket_pagination_footer(
+        &self,
+        result: &BucketQueryResult,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pages = result.page_count();
+        let current = result.page;
+        let summary = if result.total == 0 {
+            tr!("usage.no_buckets_match").to_string()
+        } else {
+            tr!(
+                "usage.showing_range",
+                first = format::count(result.first_row() as u64),
+                last = format::count(result.last_row() as u64),
+                total = format::count(result.total as u64)
+            )
+        };
+        let size_open = self.menu() == Some(MenuKind::BucketPageSize);
+        let entity = cx.entity();
+        let size_chip = filters::chip(
+            "usage-bucket-page-size-chip",
+            result.page_size.to_string(),
+            None,
+            false,
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::BucketPageSize, window, cx)
+                });
+            },
+        );
+        let size_panel = size_open.then(|| filters::bucket_page_size_menu(self, cx, theme));
+        let size_control = filters::chip_with_menu(
+            "usage-bucket-page-size-anchor",
+            size_chip,
+            size_open,
+            Corner::TopRight,
+            theme,
+            move || size_panel.unwrap_or_else(|| div().into_any_element()),
+        );
+        let entity = cx.entity();
+        let on_page: PageFn = Rc::new(move |target, _, cx| {
+            entity.update(cx, |page, cx| page.set_bucket_page(target, cx));
+        });
+        table_pager(
+            "usage-bucket-page",
+            summary,
+            size_control,
+            current,
+            pages,
+            on_page,
+            theme,
+        )
+    }
+
+    fn failure_columns_control(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.menu() == Some(MenuKind::FailureColumns);
+        let entity = cx.entity();
+        let chip = filters::chip(
+            "usage-failure-columns-chip",
+            tr!("usage.columns"),
+            None,
+            !self.failure_hidden_columns().is_empty(),
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::FailureColumns, window, cx)
+                });
+            },
+        );
+        if !open {
+            return filters::chip_with_menu(
+                "usage-failure-columns-anchor",
+                chip,
+                false,
+                Corner::TopRight,
+                theme,
+                || div().into_any_element(),
+            );
+        }
+        let panel = filters::failure_columns_menu(self, cx, theme);
+        filters::chip_with_menu(
+            "usage-failure-columns-anchor",
+            chip,
+            true,
+            Corner::TopRight,
+            theme,
+            move || panel,
+        )
+    }
+
+    fn failure_totals(&self, result: &FailureQueryResult, theme: Theme) -> AnyElement {
+        let page_n = result.rows.len();
+        let filtered = tr!(
+            "usage.filtered_totals_events",
+            events = format::count(result.total as u64)
+        );
+        let page = tr!("usage.page_events", events = format::count(page_n as u64));
+        totals_row(&filtered, &page, theme)
+    }
+
+    fn failure_pagination_footer(
+        &self,
+        result: &FailureQueryResult,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pages = result.page_count();
+        let current = result.page;
+        let summary = if result.total == 0 {
+            tr!("usage.no_failures_match").to_string()
+        } else {
+            tr!(
+                "usage.showing_range",
+                first = format::count(result.first_row() as u64),
+                last = format::count(result.last_row() as u64),
+                total = format::count(result.total as u64)
+            )
+        };
+        let size_open = self.menu() == Some(MenuKind::FailurePageSize);
+        let entity = cx.entity();
+        let size_chip = filters::chip(
+            "usage-failure-page-size-chip",
+            result.page_size.to_string(),
+            None,
+            false,
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::FailurePageSize, window, cx)
+                });
+            },
+        );
+        let size_panel = size_open.then(|| filters::failure_page_size_menu(self, cx, theme));
+        let size_control = filters::chip_with_menu(
+            "usage-failure-page-size-anchor",
+            size_chip,
+            size_open,
+            Corner::TopRight,
+            theme,
+            move || size_panel.unwrap_or_else(|| div().into_any_element()),
+        );
+        let entity = cx.entity();
+        let on_page: PageFn = Rc::new(move |target, _, cx| {
+            entity.update(cx, |page, cx| page.set_failure_page(target, cx));
+        });
+        table_pager(
+            "usage-failure-page",
+            summary,
+            size_control,
+            current,
+            pages,
+            on_page,
+            theme,
+        )
+    }
+
+    /// Response-time readout (§36): average, then percentiles once there are
+    /// enough observations for them to mean something.
+    fn latency_line(&self, snapshot: &UsageSnapshot, theme: Theme) -> AnyElement {
+        let latency = &snapshot.latency;
+        let mut items: Vec<(&str, String)> = vec![
+            ("avg", format::duration_ms(latency.avg_ms)),
+            ("max", format::duration_ms(latency.max_ms as f64)),
+        ];
+        if latency.has_percentiles() {
+            items.insert(1, ("p50", format::duration_ms(latency.p50_ms as f64)));
+            items.insert(2, ("p95", format::duration_ms(latency.p95_ms as f64)));
+            items.insert(3, ("p99", format::duration_ms(latency.p99_ms as f64)));
+        }
+        div()
+            .pt(DynamicSpacing::Base08.px(&theme))
+            .flex()
+            .items_center()
+            .gap(DynamicSpacing::Base12.px(&theme))
+            .flex_wrap()
+            .text_size(TextSize::Small.px(&theme))
+            .child(
+                div()
+                    .text_color(theme.text_muted)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(tr!("view.response_time")),
+            )
+            .children(items.into_iter().map(|(label, value)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(DynamicSpacing::Base04.px(&theme))
+                    .child(div().text_color(theme.text_muted).child(label))
+                    .child(
+                        div()
+                            .font(num_font())
+                            .text_color(theme.text_secondary)
+                            .child(value),
+                    )
+                    .into_any_element()
+            }))
+            .child(
+                div()
+                    .text_size(TextSize::XSmall.px(&theme))
+                    .text_color(theme.text_muted)
+                    .child(if latency.has_percentiles() {
+                        tr!("usage.sub_measured", count = format::count(latency.samples))
+                    } else {
+                        tr!(
+                            "usage.sub_measured_needs_min",
+                            count = format::count(latency.samples),
+                            min = LatencyStats::MIN_SAMPLES
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    // ── breakdown panels ───────────────────────────────────────────────────
+
+    /// The Breakdown card: one dimension at a time, each shown as a ranked bar
+    /// chart over a sortable data table. The chart reads the aggregate's own
+    /// token ranking; the table sorts independently, so an operator can rank by
+    /// requests or cache without disturbing the overview.
+    fn breakdown_section(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tab = self.breakdown_tab();
+        let tabs = segmented(
+            "usage-breakdown-tab",
+            &BreakdownTab::ALL,
+            tab,
+            |choice| choice.label(),
+            |choice| choice.as_str(),
+            |_| true,
+            true,
+            theme,
+            {
+                let entity = cx.entity();
+                move |choice, _, cx| {
+                    entity.update(cx, |page, cx| page.set_breakdown_tab(choice, cx));
+                }
+            },
+        );
+
+        // The shape first (a ranked bar chart), then the same treatment as the
+        // Sessions table: search, a column picker, the table, totals, pagination.
+        let (meta, chart, table, totals, footer) = match tab {
+            BreakdownTab::Models => {
+                let chart_rows = self.breakdown_top(&snapshot.models, CHART_ROWS, cx);
+                let result = self.breakdown_result(&snapshot.models, cx);
+                (
+                    model_meta(&snapshot.models),
+                    self.breakdown_chart(
+                        &chart_rows,
+                        result.totals.tokens.total,
+                        "models",
+                        theme,
+                        cx,
+                    ),
+                    self.breakdown_table(&result, "models", theme, cx),
+                    self.breakdown_totals(&result, theme),
+                    self.breakdown_footer(result.page, result.page_size, result.total, theme, cx),
+                )
+            }
+            BreakdownTab::Workspaces => {
+                let chart_rows = self.breakdown_top(&snapshot.workspaces, CHART_ROWS, cx);
+                let result = self.breakdown_result(&snapshot.workspaces, cx);
+                (
+                    workspace_meta(&snapshot.workspaces),
+                    self.breakdown_chart(
+                        &chart_rows,
+                        result.totals.tokens.total,
+                        "workspaces",
+                        theme,
+                        cx,
+                    ),
+                    self.breakdown_table(&result, "workspaces", theme, cx),
+                    self.breakdown_totals(&result, theme),
+                    self.breakdown_footer(result.page, result.page_size, result.total, theme, cx),
+                )
+            }
+            BreakdownTab::Providers => {
+                let chart_rows = self.breakdown_top(&snapshot.providers, CHART_ROWS, cx);
+                let result = self.breakdown_result(&snapshot.providers, cx);
+                (
+                    provider_meta(&snapshot.providers),
+                    self.breakdown_chart(
+                        &chart_rows,
+                        result.totals.tokens.total,
+                        "providers",
+                        theme,
+                        cx,
+                    ),
+                    self.breakdown_table(&result, "providers", theme, cx),
+                    self.breakdown_totals(&result, theme),
+                    self.breakdown_footer(result.page, result.page_size, result.total, theme, cx),
+                )
+            }
+            BreakdownTab::Tools => {
+                let chart_rows = self.tools_top(snapshot, CHART_ROWS, cx);
+                let result = self.tools_result(snapshot, cx);
+                (
+                    tools_meta(snapshot),
+                    self.tools_chart(&chart_rows, result.calls, theme, theme::reduce_motion(cx)),
+                    self.tools_table(&result, theme, cx),
+                    self.tools_totals(&result, theme),
+                    self.breakdown_footer(result.page, result.page_size, result.total, theme, cx),
+                )
+            }
+        };
+
+        let search = search_box(self.breakdown_search(), theme);
+        let toolbar = table_toolbar(search, self.breakdown_columns_control(theme, cx), theme);
+
+        let body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base12.px(&theme))
+            .child(tabs)
+            .child(chart)
+            .child(toolbar)
+            .child(table)
+            .child(totals)
+            .child(footer);
+
+        section(
+            "usage-breakdowns",
+            &tr!("usage.breakdown"),
+            None,
+            Some(meta),
+            None,
+            body.into_any_element(),
+            theme,
+        )
+    }
+
+    /// The Breakdown column-visibility control, mirroring the Sessions one.
+    fn breakdown_columns_control(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.menu() == Some(MenuKind::BreakdownColumns);
+        let entity = cx.entity();
+        let chip = filters::chip(
+            "usage-breakdown-columns-chip",
+            tr!("usage.columns"),
+            None,
+            !self.breakdown_hidden_columns().is_empty(),
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::BreakdownColumns, window, cx)
+                });
+            },
+        );
+        if !open {
+            return filters::chip_with_menu(
+                "usage-breakdown-columns-anchor",
+                chip,
+                false,
+                Corner::TopRight,
+                theme,
+                || div().into_any_element(),
+            );
+        }
+        let panel = filters::breakdown_columns_menu(self, cx, theme);
+        filters::chip_with_menu(
+            "usage-breakdown-columns-anchor",
+            chip,
+            true,
+            Corner::TopRight,
+            theme,
+            move || panel,
+        )
+    }
+
+    /// The totals line under a token-dimension table.
+    fn breakdown_totals(&self, result: &BreakdownQueryResult, theme: Theme) -> AnyElement {
+        let page_requests: u64 = result.rows.iter().map(|row| row.totals.requests).sum();
+        let page_tokens: u64 = result.rows.iter().map(|row| row.totals.tokens.total).sum();
+        let mut filtered = tr!(
+            "usage.filtered_totals_requests",
+            requests = format::count(result.totals.requests),
+            tokens = format::compact(result.totals.tokens.total)
+        );
+        if result.totals.cost_coverage() > 0.0 {
+            filtered.push_str(&format!(" · {}", format::cost(result.totals.cost_usd)));
+        }
+        let page = tr!(
+            "usage.page_requests",
+            requests = format::count(page_requests),
+            tokens = format::compact(page_tokens)
+        );
+        totals_row(&filtered, &page, theme)
+    }
+
+    /// The totals line under the Tools table.
+    fn tools_totals(&self, result: &ToolQueryResult, theme: Theme) -> AnyElement {
+        let page_calls: u64 = result.rows.iter().map(|row| row.calls).sum();
+        let page_errors: u64 = result.rows.iter().map(|row| row.errors).sum();
+        let filtered = tr!(
+            "usage.filtered_totals_calls",
+            calls = format::count(result.calls),
+            failed = format::count(result.errors)
+        );
+        let page = tr!(
+            "usage.page_calls",
+            calls = format::count(page_calls),
+            failed = format::count(page_errors)
+        );
+        totals_row(&filtered, &page, theme)
+    }
+
+    /// The breakdown footer: range, rows-per-page, and page stepping — the same
+    /// shape as the Sessions footer, driven by the open dimension's state.
+    fn breakdown_footer(
+        &self,
+        page: usize,
+        page_size: usize,
+        total: usize,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pages = total.div_ceil(page_size.max(1)).max(1);
+        let current = page.clamp(1, pages);
+        let start = (current - 1) * page_size;
+        let shown = page_size.min(total.saturating_sub(start));
+        let summary = if total == 0 {
+            tr!("usage.no_rows").to_string()
+        } else {
+            tr!(
+                "usage.showing_range",
+                first = format::count((start + 1) as u64),
+                last = format::count((start + shown) as u64),
+                total = format::count(total as u64)
+            )
+        };
+
+        let size_open = self.menu() == Some(MenuKind::BreakdownPageSize);
+        let entity = cx.entity();
+        let size_chip = filters::chip(
+            "usage-breakdown-page-size-chip",
+            page_size.to_string(),
+            None,
+            false,
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::BreakdownPageSize, window, cx)
+                });
+            },
+        );
+        let size_panel = size_open.then(|| filters::breakdown_page_size_menu(self, cx, theme));
+        let size_control = filters::chip_with_menu(
+            "usage-breakdown-page-size-anchor",
+            size_chip,
+            size_open,
+            Corner::TopRight,
+            theme,
+            move || size_panel.unwrap_or_else(|| div().into_any_element()),
+        );
+
+        let entity = cx.entity();
+        let on_page: PageFn = Rc::new(move |target, _, cx| {
+            entity.update(cx, |page, cx| page.set_breakdown_page(target, cx));
+        });
+        table_pager(
+            "usage-breakdown-page",
+            summary,
+            size_control,
+            current,
+            pages,
+            on_page,
+            theme,
+        )
+    }
+
+    /// One page of a token dimension as a standard data table — the same
+    /// component and column shape as the Sessions table. Rows are clickable to
+    /// scope the page to that model / workspace / provider.
+    fn breakdown_table(
+        &self,
+        result: &BreakdownQueryResult,
+        kind: &'static str,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rows = &result.rows;
+        let (columns, keys) = self.breakdown_columns();
+        let total_w: f32 = columns.iter().map(|column| column.width).sum();
+        let total_tokens = result.totals.tokens.total;
+        let entity = cx.entity();
+        let mut elements = Vec::with_capacity(rows.len());
+        for (ix, row) in rows.iter().enumerate() {
+            let last = ix + 1 == rows.len();
+            let target = row.id;
+            let mut line = div()
+                .id(SharedString::from(format!(
+                    "usage-breakdown-{kind}-{}",
+                    row.label
+                )))
+                .h(px(ROW_H))
+                .w_full()
+                .min_w(px(total_w))
+                .flex()
+                .items_center()
+                .when(!last, |row| {
+                    row.border_b_1().border_color(theme.border_subtle)
+                })
+                .cursor_pointer()
+                .hover_state(&theme);
+            for column in &columns {
+                let cell = match column.id {
+                    "name" => breakdown_name_cell(
+                        column,
+                        row,
+                        self.breakdown_glyph(kind, row.id, theme),
+                        theme,
+                    ),
+                    "requests" => text_cell(
+                        column,
+                        format::count(row.totals.requests),
+                        theme.text_secondary,
+                        theme,
+                    ),
+                    "input" => text_cell(
+                        column,
+                        format::compact(row.totals.tokens.input),
+                        theme.text_muted,
+                        theme,
+                    ),
+                    "output" => text_cell(
+                        column,
+                        format::compact(row.totals.tokens.output),
+                        theme.text_muted,
+                        theme,
+                    ),
+                    "cache" => text_cell(
+                        column,
+                        format::compact(row.totals.tokens.cache_read),
+                        theme.text_muted,
+                        theme,
+                    ),
+                    "share" => {
+                        let share = if total_tokens > 0 {
+                            row.totals.tokens.total as f64 / total_tokens as f64
+                        } else {
+                            row.share
+                        };
+                        text_cell(column, format::share(share), theme.text_muted, theme)
+                    }
+                    // A model with no price table has an unknown cost, never $0.
+                    "cost" => {
+                        if row.totals.priced_requests > 0 {
+                            text_cell(
+                                column,
+                                format::cost(row.totals.cost_usd),
+                                theme.text_secondary,
+                                theme,
+                            )
+                        } else {
+                            text_cell(column, "—".to_string(), theme.text_muted, theme)
+                        }
+                    }
+                    "avg_response" => text_cell(
+                        column,
+                        row.totals
+                            .avg_duration_ms()
+                            .map_or_else(|| "—".to_string(), format::duration_ms),
+                        theme.text_muted,
+                        theme,
+                    ),
+                    // The column header names the measure; the error ink only
+                    // reinforces a non-zero rate, it never carries it alone.
+                    "error_rate" => match row.totals.error_rate() {
+                        Some(rate) if row.totals.errors > 0 => {
+                            text_cell(column, format::percent(rate), theme.error, theme)
+                        }
+                        Some(_) => text_cell(column, "0%".to_string(), theme.text_muted, theme),
+                        None => text_cell(column, "—".to_string(), theme.text_muted, theme),
+                    },
+                    _ => text_cell(
+                        column,
+                        format::compact(row.totals.tokens.total),
+                        theme.text_primary,
+                        theme,
+                    ),
+                };
+                line = line.child(cell);
+            }
+            let click_entity = entity.clone();
+            line = line.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                click_entity.update(cx, |page, cx| {
+                    let mut filter = page.filter().clone();
+                    match kind {
+                        "workspaces" => toggle(&mut filter.workspaces, target),
+                        "providers" => toggle(&mut filter.providers, target),
+                        _ => toggle(&mut filter.models, target),
+                    }
+                    page.set_filter(filter, cx);
+                });
+            });
+            elements.push(line.into_any_element());
+        }
+        // The table grows with its page: choosing 100 rows shows 100, not a
+        // ten-row viewport. The page scrolls; the table never does.
+        let visible = if result.rows.is_empty() {
+            3
+        } else {
+            result.rows.len()
+        } as f32;
+        let height = HEADER_H + ROW_H * visible;
+        self.table_element(
+            TableKind::Breakdown,
+            "usage-breakdown-table",
+            columns,
+            elements,
+            height,
+            empty_cell(&tr!("usage.no_rows_match_search"), theme),
+            theme,
+            Rc::new(move |page, ix, sort, cx| {
+                let Some(Some(key)) = keys.get(ix).copied() else {
+                    return;
+                };
+                match sort {
+                    SortState::Ascending => page.set_breakdown_sort(key, false, cx),
+                    SortState::Descending => page.set_breakdown_sort(key, true, cx),
+                    SortState::Default => page.set_breakdown_sort(BreakdownSort::Tokens, true, cx),
+                }
+            }),
+            cx,
+        )
+    }
+
+    /// The leading glyph of a breakdown row: the brand mark of a model's or a
+    /// provider's company, the folder of a workspace, or the tool's own glyph.
+    /// These are the marks the model picker and the transcript already draw, and
+    /// a model carries its provider's mark, as it does in the picker. `kind` is
+    /// the breakdown's own key.
+    fn breakdown_glyph(&self, kind: &str, id: u16, theme: Theme) -> (SharedString, Hsla) {
+        let brand = |provider: &str| {
+            (
+                provider_icon(provider),
+                provider_mark_color(provider, &theme, theme.text_secondary),
+            )
+        };
+        let cloud = || {
+            (
+                SharedString::new_static("icons/cloud.svg"),
+                theme.text_secondary,
+            )
+        };
+        let Some(index) = self.index() else {
+            return (
+                SharedString::new_static("icons/folder.svg"),
+                theme.text_secondary,
+            );
+        };
+        match kind {
+            "models" => index
+                .models
+                .get(id as usize)
+                .and_then(|model| index.providers.get(model.provider as usize))
+                .map_or_else(cloud, |provider| brand(provider.id.as_str())),
+            "providers" => index
+                .providers
+                .get(id as usize)
+                .map_or_else(cloud, |provider| brand(provider.id.as_str())),
+            "tools" => index.tools.get(id as usize).map_or_else(
+                || {
+                    (
+                        SharedString::new_static("icons/tools/tool.svg"),
+                        theme.text_secondary,
+                    )
+                },
+                |tool| {
+                    (
+                        SharedString::new_static(activity_icon(tool.id.as_str())),
+                        theme.text_secondary,
+                    )
+                },
+            ),
+            _ => (
+                SharedString::new_static("icons/folder.svg"),
+                theme.text_secondary,
+            ),
+        }
+    }
+
+    /// The ranked legend above a token dimension's table: the top rows as the
+    /// shared legend (glyph, name, figure and share, a track), so the shape reads
+    /// before the figures. Rows are clickable to scope the page exactly like the
+    /// table's rows, and a row already in scope reads as selected.
+    fn breakdown_chart(
+        &self,
+        rows: &[GroupRow],
+        total: u64,
+        kind: &'static str,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let reduced_motion = theme::reduce_motion(cx);
+        let scope = self.filter();
+        let mut chart = div()
+            .w_full()
+            .pb(DynamicSpacing::Base12.px(&theme))
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base02.px(&theme));
+        if rows.is_empty() {
+            chart = chart.child(empty_line(&tr!("usage.no_usage_in_range"), theme));
+        }
+        for row in rows {
+            let fraction = if total > 0 {
+                row.totals.tokens.total as f64 / total as f64
+            } else {
+                row.share
+            };
+            let target = row.id;
+            let selected = match kind {
+                "workspaces" => scope.workspaces.contains(&target),
+                "providers" => scope.providers.contains(&target),
+                _ => scope.models.contains(&target),
+            };
+            let entity = cx.entity();
+            chart = chart.child(
+                legend_row(
+                    SharedString::from(format!("usage-breakdown-chart-{kind}-{target}")),
+                    LegendRow {
+                        glyph: self.breakdown_glyph(kind, target, theme),
+                        label: row.label.clone(),
+                        sub: row.sub.clone(),
+                        value: format::compact(row.totals.tokens.total),
+                        fraction,
+                        selected,
+                    },
+                    theme,
+                    reduced_motion,
+                )
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    entity.update(cx, |page, cx| {
+                        let mut filter = page.filter().clone();
+                        match kind {
+                            "workspaces" => toggle(&mut filter.workspaces, target),
+                            "providers" => toggle(&mut filter.providers, target),
+                            _ => toggle(&mut filter.models, target),
+                        }
+                        page.set_filter(filter, cx);
+                    });
+                }),
+            );
+        }
+        chart.into_any_element()
+    }
+
+    /// The ranked legend above the Tools table: the busiest tools, each with its
+    /// own glyph, its family, and its share of the calls.
+    fn tools_chart(
+        &self,
+        rows: &[ToolRow],
+        total: u64,
+        theme: Theme,
+        reduced_motion: bool,
+    ) -> AnyElement {
+        let mut chart = div()
+            .w_full()
+            .pb(DynamicSpacing::Base12.px(&theme))
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base02.px(&theme));
+        if rows.is_empty() {
+            chart = chart.child(empty_line(&tr!("usage.no_tool_calls_in_range"), theme));
+        }
+        for row in rows {
+            let fraction = if total > 0 {
+                row.calls as f64 / total as f64
+            } else {
+                0.0
+            };
+            let tooltip = tr!(
+                "usage.tool_chart_tooltip",
+                name = row.label,
+                calls = format::count(row.calls),
+                errors = format::count(row.errors),
+                avg = row
+                    .avg_duration_ms()
+                    .map(format::duration_ms)
+                    .unwrap_or_else(|| "—".into())
+            );
+            chart = chart.child(
+                legend_row(
+                    SharedString::from(format!("usage-tools-chart-{}", row.tool)),
+                    LegendRow {
+                        glyph: self.breakdown_glyph("tools", row.tool, theme),
+                        label: row.label.clone(),
+                        sub: Some(row.class.label()),
+                        value: format::count(row.calls),
+                        fraction,
+                        selected: false,
+                    },
+                    theme,
+                    reduced_motion,
+                )
+                .tooltip(move |_, cx| cx.new(|_| Tooltip::new(tooltip.clone())).into()),
+            );
+        }
+        chart.into_any_element()
+    }
+
+    /// The tools data table: every tool with its family, calls, failures, and
+    /// duration. Ordered busiest first, the aggregate's own ranking.
+    fn tools_table(
+        &self,
+        result: &ToolQueryResult,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let columns = self.tool_columns();
+        let total_w: f32 = columns.iter().map(|column| column.width).sum();
+        let mut elements = Vec::with_capacity(result.rows.len());
+        for (ix, row) in result.rows.iter().enumerate() {
+            let last = ix + 1 == result.rows.len();
+            let mut line = div()
+                .h(px(ROW_H))
+                .w_full()
+                .min_w(px(total_w))
+                .flex()
+                .items_center()
+                .when(!last, |row| {
+                    row.border_b_1().border_color(theme.border_subtle)
+                })
+                .hover_state(&theme);
+            for column in &columns {
+                let cell = match column.id {
+                    "tool" => cell_shell(column)
+                        .gap(DynamicSpacing::Base08.px(&theme))
+                        .child({
+                            let (path, color) = self.breakdown_glyph("tools", row.tool, theme);
+                            icon_dyn(path, IconSize::Small.px(&theme), color)
+                        })
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(px(column.width - 120.))
+                                .truncate()
+                                .text_size(TextSize::Default.px(&theme))
+                                .text_color(theme.text_primary)
+                                .child(row.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(TextSize::XSmall.px(&theme))
+                                .text_color(theme.text_muted)
+                                .child(row.class.label()),
+                        )
+                        .into_any_element(),
+                    "calls" => text_cell(
+                        column,
+                        format::count(row.calls),
+                        theme.text_secondary,
+                        theme,
+                    ),
+                    "errors" => text_cell(
+                        column,
+                        if row.errors > 0 {
+                            format::count(row.errors)
+                        } else {
+                            "—".into()
+                        },
+                        if row.errors > 0 {
+                            theme.error
+                        } else {
+                            theme.text_muted
+                        },
+                        theme,
+                    ),
+                    "avg" => text_cell(
+                        column,
+                        row.avg_duration_ms()
+                            .map(format::duration_ms)
+                            .unwrap_or_else(|| "—".into()),
+                        theme.text_muted,
+                        theme,
+                    ),
+                    _ => text_cell(
+                        column,
+                        if row.max_ms > 0 {
+                            format::duration_ms(row.max_ms as f64)
+                        } else {
+                            "—".into()
+                        },
+                        theme.text_muted,
+                        theme,
+                    ),
+                };
+                line = line.child(cell);
+            }
+            elements.push(line.into_any_element());
+        }
+        let visible = if result.rows.is_empty() {
+            3
+        } else {
+            result.rows.len()
+        } as f32;
+        let height = HEADER_H + ROW_H * visible;
+        self.table_element(
+            TableKind::Breakdown,
+            "usage-tools-table",
+            columns,
+            elements,
+            height,
+            empty_cell(&tr!("usage.no_tools_match_search"), theme),
+            theme,
+            Rc::new(|_: &mut UsagePage, _: usize, _: SortState, _: &mut Context<UsagePage>| {}),
+            cx,
+        )
+    }
+
+    // ── records ────────────────────────────────────────────────────────────
+
+    /// One records section, three tables behind a selector: the searchable
+    /// session list, the day/week/month rollup, and the failure log. Keeps the
+    /// page from ending in three stacked, mostly-empty table sections.
+    fn details_section(
+        &mut self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tab = self.detail_tab();
+        // Each tab says how many rows it holds, so the choice is informed
+        // before it is made.
+        let counts = [
+            snapshot.sessions.len(),
+            snapshot.buckets.rows.len(),
+            snapshot.errors.rows.len(),
+        ];
+        let tabs = segmented(
+            "usage-detail-tab",
+            &DetailTab::ALL,
+            tab,
+            |choice| {
+                let count = match choice {
+                    DetailTab::Sessions => counts[0],
+                    DetailTab::Daily => counts[1],
+                    DetailTab::Failures => counts[2],
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(DynamicSpacing::Base06.px(&theme))
+                    .child(choice.label())
+                    .child(
+                        div()
+                            .font(num_font())
+                            .text_size(TextSize::Small.px(&theme))
+                            .text_color(theme.text_muted)
+                            .child(format::count(count as u64)),
+                    )
+            },
+            |choice| choice.as_str(),
+            |_| true,
+            true,
+            theme,
+            {
+                let entity = cx.entity();
+                move |choice, _, cx| {
+                    entity.update(cx, |page, cx| page.set_detail_tab(choice, cx));
+                }
+            },
+        );
+        // Tabs lead and the table's own controls trail, on one row — the
+        // reference layout for a filterable list.
+        let tabs_row = |search: AnyElement, columns: AnyElement| {
+            div()
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(DynamicSpacing::Base08.px(&theme))
+                .child(tabs)
+                .child(
+                    div()
+                        .ml_auto()
+                        .flex()
+                        .items_center()
+                        .gap(DynamicSpacing::Base08.px(&theme))
+                        .child(div().w(px(240.)).flex().child(search))
+                        .child(columns),
+                )
+        };
+
+        let (meta, content) = match tab {
+            DetailTab::Sessions => {
+                let result = self.session_page(cx);
+                let all = snapshot.sessions.len();
+                let meta = if result.total == all {
+                    tr!("usage.n_sessions", count = format::count(all as u64))
+                } else {
+                    tr!(
+                        "usage.n_of_n_sessions",
+                        count = format::count(result.total as u64),
+                        total = format::count(all as u64)
+                    )
+                };
+                let table = self.sessions_content(&result, theme, cx);
+                let controls = tabs_row(
+                    self.session_search_box(theme),
+                    self.columns_control(theme, cx),
+                );
+                (
+                    meta,
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(DynamicSpacing::Base12.px(&theme))
+                        .child(controls)
+                        .child(table)
+                        .into_any_element(),
+                )
+            }
+            DetailTab::Daily => {
+                let granularity = snapshot.buckets.granularity;
+                let result = self.bucket_result(snapshot, cx);
+                let all = snapshot.buckets.rows.len();
+                let meta = if result.total == all {
+                    tr!(
+                        "usage.n_buckets_by",
+                        buckets = format::count(all as u64),
+                        by = granularity.label()
+                    )
+                } else {
+                    tr!(
+                        "usage.n_of_n_buckets_by",
+                        buckets = format::count(result.total as u64),
+                        total = format::count(all as u64),
+                        by = granularity.label()
+                    )
+                };
+                let table = self.buckets_content(&result, granularity, theme, cx);
+                let controls = tabs_row(
+                    search_box(self.bucket_search(), theme),
+                    self.bucket_columns_control(theme, cx),
+                );
+                (
+                    meta,
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(DynamicSpacing::Base12.px(&theme))
+                        .child(controls)
+                        .child(table)
+                        .into_any_element(),
+                )
+            }
+            DetailTab::Failures => {
+                let errors = &snapshot.errors;
+                let result = self.failure_result(cx);
+                let all = errors.rows.len();
+                let meta = if result.total == all {
+                    tr!(
+                        "usage.failures_meta",
+                        provider = format::count(errors.provider),
+                        tool = format::count(errors.tool),
+                        stopped = format::count(errors.aborted)
+                    )
+                } else {
+                    tr!(
+                        "usage.failures_meta_filtered",
+                        events = format::count(result.total as u64),
+                        total = format::count(all as u64),
+                        provider = format::count(errors.provider),
+                        tool = format::count(errors.tool),
+                        stopped = format::count(errors.aborted)
+                    )
+                };
+                let table = self.failures_content(&result, theme, cx);
+                let controls = tabs_row(
+                    search_box(self.failure_search(), theme),
+                    self.failure_columns_control(theme, cx),
+                );
+                (
+                    meta,
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(DynamicSpacing::Base12.px(&theme))
+                        .child(controls)
+                        .child(table)
+                        .into_any_element(),
+                )
+            }
+        };
+
+        section(
+            "usage-details",
+            &tr!("usage.records"),
+            None,
+            Some(meta),
+            None,
+            content,
+            theme,
+        )
+    }
+
+    /// The sessions search field, as it appears in the details header.
+    fn session_search_box(&self, theme: Theme) -> AnyElement {
+        search_box(self.search(), theme)
+    }
+
+    /// The session table: searchable, sortable, pageable (§48/§49/§50).
+    ///
+    /// The page owns the ordering, so a header click comes back here before
+    /// anything re-sorts; the table just draws the page it is handed.
+    fn sessions_content(
+        &self,
+        result: &SessionQueryResult,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // The viewport matches the current page so the page — not a nested
+        // table — is the scroller. Pagination already caps how many rows land
+        // here.
+        let visible_rows = result.rows.len().max(3) as f32;
+        let table_h = ROW_H * visible_rows + HEADER_H;
+        let footer = self.pagination_footer(result, theme, cx);
+
+        let (columns, keys) = self.session_columns();
+        let rows = self.session_row_elements(&result.rows, &columns, &keys, theme, cx);
+        let table = self.table_element(
+            TableKind::Sessions,
+            "usage-sessions-table",
+            columns,
+            rows,
+            table_h,
+            empty_cell(&tr!("usage.no_sessions_match_search"), theme),
+            theme,
+            Rc::new(
+                move |page, ix, sort, cx| match (keys.get(ix).copied().flatten(), sort) {
+                    (Some(key), SortState::Ascending) => page.set_session_sort(key, false, cx),
+                    (Some(key), SortState::Descending) => page.set_session_sort(key, true, cx),
+                    _ => page.set_session_sort(SessionSort::Tokens, true, cx),
+                },
+            ),
+            cx,
+        );
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(table)
+            .children(self.totals_line(result, theme))
+            .child(footer)
+            .into_any_element()
+    }
+
+    /// Day/week/month table. The granularity adapts with the range, so the
+    /// same table is the weekly and monthly trend view for long windows (§42).
+    fn buckets_content(
+        &self,
+        result: &BucketQueryResult,
+        granularity: Granularity,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let visible_rows = result.rows.len().max(3) as f32;
+        let table_h = ROW_H * visible_rows + HEADER_H;
+        let (columns, keys) = self.bucket_columns();
+        let rows = self.bucket_row_elements(&result.rows, &columns, &keys, granularity, theme);
+        let table = self.table_element(
+            TableKind::Buckets,
+            "usage-buckets-table",
+            columns,
+            rows,
+            table_h,
+            empty_cell(&tr!("usage.no_buckets_match_search"), theme),
+            theme,
+            Rc::new(
+                move |page, ix, sort, cx| match (keys.get(ix).copied(), sort) {
+                    (Some(key), SortState::Ascending) => page.set_bucket_sort(key, false, cx),
+                    (Some(key), SortState::Descending) => page.set_bucket_sort(key, true, cx),
+                    _ => page.set_bucket_sort(BucketSort::Date, true, cx),
+                },
+            ),
+            cx,
+        );
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(table)
+            .child(self.bucket_totals(result, theme))
+            .child(self.bucket_pagination_footer(result, theme, cx))
+            .into_any_element()
+    }
+
+    /// Failures (§34): every provider error and tool failure in the range, in
+    /// the same table as the rest of the page.
+    fn failures_content(
+        &self,
+        result: &FailureQueryResult,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let visible_rows = result.rows.len().max(3) as f32;
+        let table_h = ROW_H * visible_rows + HEADER_H;
+        let (columns, keys) = self.failure_columns();
+        let rows = self.failure_row_elements(&result.rows, &columns, &keys, theme);
+        let table = self.table_element(
+            TableKind::Failures,
+            "usage-failures-table",
+            columns,
+            rows,
+            table_h,
+            empty_cell(&tr!("usage.no_failures_match_search"), theme),
+            theme,
+            Rc::new(move |page, ix, sort, cx| {
+                let key = keys.get(ix).copied().unwrap_or(FailureSort::When);
+                match sort {
+                    SortState::Ascending => page.set_failure_sort(key, false, cx),
+                    SortState::Descending => page.set_failure_sort(key, true, cx),
+                    SortState::Default => page.set_failure_sort(FailureSort::When, true, cx),
+                }
+            }),
+            cx,
+        );
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(table)
+            .child(self.failure_totals(result, theme))
+            .child(self.failure_pagination_footer(result, theme, cx))
+            .child(retry_note(theme))
+            .into_any_element()
+    }
+
+    // ── column plans ───────────────────────────────────────────────────────
+
+    /// Session columns plus their sort keys (the trailing affordance is not
+    /// sortable). Widths come from the plan, overridden by any divider drag.
+    fn session_columns(&self) -> (Vec<Column>, Vec<Option<SessionSort>>) {
+        // Room the table steals for its scrollbar, hairlines and cell padding.
+        const CHROME: f32 = 48.;
+        const GAPS: f32 = 12.;
+        const TITLE_MIN: f32 = 180.;
+        const OPEN_W: f32 = 38.;
+        let budget = (self.table_width() - CHROME).max(360.);
+        let hidden = self.hidden_columns();
+        let (sort, desc) = self.session_sort_state();
+
+        // `true` marks a column dropped when the window is too narrow (and
+        // hidden by the user on request).
+        let plan: [(SessionSort, f32, bool); 12] = [
+            (SessionSort::Title, 0., false),
+            (SessionSort::Workspace, 110., false),
+            (SessionSort::Provider, 110., false),
+            (SessionSort::Model, 156., false),
+            (SessionSort::Started, 88., true),
+            (SessionSort::Duration, 92., false),
+            (SessionSort::Requests, 92., false),
+            (SessionSort::Input, 70., true),
+            (SessionSort::Output, 76., true),
+            (SessionSort::Cache, 72., true),
+            (SessionSort::Tokens, 82., false),
+            (SessionSort::Errors, 82., false),
+        ];
+        let keep: Vec<(SessionSort, f32, bool)> = plan
+            .into_iter()
+            .filter(|(key, _, _)| *key == SessionSort::Title || !hidden.contains(key))
+            .collect();
+
+        // Optional columns are added in priority order while the title still
+        // breathes: the per-bucket token columns are the first to go.
+        let mut running: f32 = keep
+            .iter()
+            .filter(|(key, _, optional)| !*optional && *key != SessionSort::Title)
+            .map(|(key, default, _)| self.col_width(TableKind::Sessions, key.as_str(), *default))
+            .sum();
+        let mut keep_optional: Vec<SessionSort> = Vec::new();
+        for (key, default, optional) in &keep {
+            if !*optional {
+                continue;
+            }
+            let width = self.col_width(TableKind::Sessions, key.as_str(), *default);
+            if running + width + OPEN_W + GAPS + TITLE_MIN <= budget {
+                running += width;
+                keep_optional.push(*key);
+            }
+        }
+        let title_default = (budget - running - OPEN_W - GAPS).clamp(TITLE_MIN, 460.);
+        // `CHROME` already leaves this table its slack; the title fills it.
+
+        let mut columns = Vec::with_capacity(keep.len() + 1);
+        let mut keys = Vec::with_capacity(keep.len() + 1);
+        for (key, default, optional) in keep {
+            if optional && !keep_optional.contains(&key) {
+                continue;
+            }
+            let default = if key == SessionSort::Title {
+                title_default
+            } else {
+                default
+            };
+            let width = self.col_width(TableKind::Sessions, key.as_str(), default);
+            let numeric = !matches!(
+                key,
+                SessionSort::Title
+                    | SessionSort::Workspace
+                    | SessionSort::Provider
+                    | SessionSort::Model
+            );
+            let mut column = Column::new(key.as_str(), key.label())
+                .width(width)
+                .when_fill(key == SessionSort::Title)
+                .sortable()
+                .sort(sort_state(key == sort, desc));
+            if numeric {
+                column = column.numeric();
+            }
+            columns.push(column);
+            keys.push(Some(key));
+        }
+        // The trailing affordance: no header label, no sorting, fixed width.
+        columns.push(Column::new("open", "").width(OPEN_W));
+        keys.push(None);
+        (columns, keys)
+    }
+
+    /// The token breakdown table's columns plus their sort keys — the same
+    /// shape as the Sessions table: a name column that takes the remainder,
+    /// then fixed numeric columns, with Share as the trailing display column.
+    fn breakdown_columns(&self) -> (Vec<Column>, Vec<Option<BreakdownSort>>) {
+        let hidden = self.breakdown_hidden_columns();
+        let visible: Vec<BreakdownSort> = BreakdownSort::MEASURES
+            .into_iter()
+            .filter(|key| !hidden.contains(&key.as_str()))
+            .collect();
+        let fixed: f32 = visible.iter().map(|key| key.width()).sum();
+        let budget = self.table_width();
+        let name_w = (budget - fixed - FILL_SLACK).clamp(BreakdownSort::Name.width(), 460.);
+        let (sort, desc) = self.breakdown_sort_state();
+        let mut columns = Vec::with_capacity(visible.len() + 1);
+        let mut keys = Vec::with_capacity(visible.len() + 1);
+        columns.push(
+            Column::new(BreakdownSort::Name.as_str(), BreakdownSort::Name.label())
+                .width(self.col_width(TableKind::Breakdown, "name", name_w))
+                .fill()
+                .sortable()
+                .sort(sort_state(sort == BreakdownSort::Name, desc)),
+        );
+        keys.push(Some(BreakdownSort::Name));
+        for key in visible {
+            columns.push(
+                Column::new(key.as_str(), key.label())
+                    .width(self.col_width(TableKind::Breakdown, key.as_str(), key.width()))
+                    .numeric()
+                    .sortable()
+                    .sort(sort_state(key == sort, desc)),
+            );
+            keys.push(Some(key));
+        }
+        (columns, keys)
+    }
+
+    /// The tools table's columns, with any hidden ones dropped. The tool name
+    /// takes the room left over; every measure is its own narrow column.
+    fn tool_columns(&self) -> Vec<Column> {
+        let hidden = self.breakdown_hidden_columns();
+        let is_hidden = |id: &'static str| hidden.contains(&id);
+        let measures: [(&'static str, &'static str, f32); 4] = [
+            ("calls", "Calls", 76.),
+            ("errors", "Errors", 80.),
+            ("avg", "Avg", 76.),
+            ("max", "Max", 76.),
+        ];
+        let mut fixed = 0.;
+        for (id, _, default) in measures {
+            if !is_hidden(id) {
+                fixed += default;
+            }
+        }
+        let budget = self.table_width();
+        let name_w = (budget - fixed - FILL_SLACK).clamp(160., 460.);
+        let mut columns = vec![Column::new("tool", tr!("usage.col_tool"))
+            .width(name_w)
+            .fill()];
+        for (id, label, default) in measures {
+            if !is_hidden(id) {
+                columns.push(Column::new(id, label).width(default).numeric());
+            }
+        }
+        columns
+    }
+
+    /// Breakdown columns plus their sort keys. Hidden columns are dropped;
+    /// Date always stays.
+    fn bucket_columns(&self) -> (Vec<Column>, Vec<BucketSort>) {
+        let (sort, desc) = self.bucket_sort_state();
+        let plan: [(BucketSort, f32, bool); 5] = [
+            (BucketSort::Date, 0., false),
+            (BucketSort::Requests, 104., true),
+            (BucketSort::Tokens, 96., true),
+            (BucketSort::Cache, 104., true),
+            (BucketSort::Errors, 84., true),
+        ];
+        let keep: Vec<(BucketSort, f32, bool)> = plan
+            .into_iter()
+            .filter(|(key, _, _)| self.bucket_column_visible(*key))
+            .collect();
+        let fixed: f32 = keep
+            .iter()
+            .filter(|(key, _, _)| *key != BucketSort::Date)
+            .map(|(key, default, _)| self.col_width(TableKind::Buckets, key.id(), *default))
+            .sum();
+        let date_default = (self.table_width() - fixed - FILL_SLACK).clamp(160., 480.);
+        let mut columns = Vec::with_capacity(keep.len());
+        let mut keys = Vec::with_capacity(keep.len());
+        for (key, default, numeric) in keep {
+            let default = if key == BucketSort::Date {
+                date_default
+            } else {
+                default
+            };
+            let width = self.col_width(TableKind::Buckets, key.id(), default);
+            let mut column = Column::new(key.id(), key.label())
+                .width(width)
+                .when_fill(key == BucketSort::Date)
+                .sortable()
+                .sort(sort_state(key == sort, desc));
+            if numeric {
+                column = column.numeric();
+            }
+            columns.push(column);
+            keys.push(key);
+        }
+        (columns, keys)
+    }
+
+    /// Failure columns plus their sort keys. The message takes the remainder.
+    /// Hidden columns are dropped; When always stays.
+    fn failure_columns(&self) -> (Vec<Column>, Vec<FailureSort>) {
+        let (sort, desc) = self.failure_sort_state();
+        let plan: [(FailureSort, f32, bool); 5] = [
+            (FailureSort::When, 0., false),
+            (FailureSort::Kind, 96., false),
+            (FailureSort::Model, 150., false),
+            (FailureSort::Session, 200., false),
+            (FailureSort::Message, 180., false),
+        ];
+        let keep: Vec<(FailureSort, f32, bool)> = plan
+            .into_iter()
+            .filter(|(key, _, _)| self.failure_column_visible(*key))
+            .collect();
+        let message_visible = keep.iter().any(|(key, _, _)| *key == FailureSort::Message);
+        let fixed: f32 = keep
+            .iter()
+            .filter(|(key, _, _)| *key != FailureSort::When && *key != FailureSort::Message)
+            .map(|(key, default, _)| self.col_width(TableKind::Failures, key.id(), *default))
+            .sum();
+        let flex_default = if message_visible {
+            (self.table_width() - fixed - 108. - FILL_SLACK).clamp(180., 560.)
+        } else {
+            (self.table_width() - fixed - FILL_SLACK).clamp(160., 480.)
+        };
+        let mut columns = Vec::with_capacity(keep.len());
+        let mut keys = Vec::with_capacity(keep.len());
+        for (key, default, _) in keep {
+            let default = match key {
+                FailureSort::When if !message_visible => flex_default,
+                FailureSort::When => 108.,
+                FailureSort::Message => flex_default,
+                _ => default,
+            };
+            let width = self.col_width(TableKind::Failures, key.id(), default);
+            // The message takes the remaining width; without one, the time does.
+            let fills = match key {
+                FailureSort::Message => true,
+                FailureSort::When => !message_visible,
+                _ => false,
+            };
+            let mut column = Column::new(key.id(), key.label())
+                .width(width)
+                .when_fill(fills)
+                .resizable();
+            if key != FailureSort::Message {
+                column = column.sortable().sort(sort_state(key == sort, desc));
+            }
+            columns.push(column);
+            keys.push(key);
+        }
+        (columns, keys)
+    }
+
+    // ── row plans ──────────────────────────────────────────────────────────
+
+    /// One session per row, cell content in the register its column deserves
+    /// (§54). The selected row is the page's scoped session.
+    fn session_row_elements(
+        &self,
+        rows: &[SessionRow],
+        columns: &[Column],
+        keys: &[Option<SessionSort>],
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let selected = self.filter().session;
+        let entity = cx.entity();
+        let context_row = self.context_row();
+        let mut out = Vec::with_capacity(rows.len());
+        for (ix, row) in rows.iter().enumerate() {
+            let last = ix + 1 == rows.len();
+            let mut line = div()
+                .id(("usage-session-row", ix))
+                .group("usage-row")
+                .h(px(ROW_H))
+                .w_full()
+                .min_w(px(columns.iter().map(|column| column.width).sum::<f32>()))
+                .flex()
+                .items_center()
+                .when(!last, |row| {
+                    row.border_b_1().border_color(theme.border_subtle)
+                })
+                .hover_state(&theme)
+                .when(selected == Some(row.session), |line| {
+                    line.bg(theme.surface_selected)
+                })
+                .on_mouse_down(MouseButton::Left, {
+                    let entity = entity.clone();
+                    let session = row.session;
+                    move |event, window, cx| {
+                        if event.click_count >= 2 {
+                            entity.update(cx, |page, cx| page.open_session(window, cx, session));
+                        } else {
+                            entity.update(cx, |page, cx| page.set_session_scope(Some(session), cx));
+                        }
+                    }
+                })
+                .on_mouse_down(MouseButton::Right, {
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |page, cx| page.open_context_menu(ix, cx));
+                    }
+                });
+            for (col_ix, column) in columns.iter().enumerate() {
+                let cell = match keys.get(col_ix).copied().flatten() {
+                    // The title carries its context on a second line, so the
+                    // workspace and provider need no columns of their own.
+                    Some(SessionSort::Title) => two_line_cell(
+                        column,
+                        None,
+                        row.title.clone(),
+                        Some(session_context(row)),
+                        theme,
+                    ),
+                    Some(key) => session_cell(row, key, theme, column),
+                    None => open_session_cell(row.session, entity.clone(), theme, column),
+                };
+                line = line.child(cell);
+            }
+            if context_row == Some(ix) {
+                line = line.child(session_context_menu(row, theme, entity.clone()));
+            }
+            out.push(line.into_any_element());
+        }
+        out
+    }
+
+    /// One bucket per row. The date column carries the granularity as a quieter
+    /// suffix, so an all-time monthly table still says what each row is.
+    fn bucket_row_elements(
+        &self,
+        rows: &[BucketRow],
+        columns: &[Column],
+        keys: &[BucketSort],
+        granularity: Granularity,
+        theme: Theme,
+    ) -> Vec<AnyElement> {
+        let total_w: f32 = columns.iter().map(|column| column.width).sum();
+        let mut out = Vec::with_capacity(rows.len());
+        for (ix, row) in rows.iter().enumerate() {
+            let last = ix + 1 == rows.len();
+            let mut line = div()
+                .h(px(ROW_H))
+                .w_full()
+                .min_w(px(total_w))
+                .flex()
+                .items_center()
+                .when(!last, |row| {
+                    row.border_b_1().border_color(theme.border_subtle)
+                })
+                .hover_state(&theme);
+            for (ix, column) in columns.iter().enumerate() {
+                let key = keys.get(ix).copied().unwrap_or(BucketSort::Date);
+                if key == BucketSort::Date {
+                    line = line.child(
+                        cell_shell(column)
+                            .gap(DynamicSpacing::Base08.px(&theme))
+                            .child(
+                                div()
+                                    .text_size(TextSize::Small.px(&theme))
+                                    .text_color(theme.text_primary)
+                                    .child(row.label.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(TextSize::XSmall.px(&theme))
+                                    .text_color(theme.text_muted)
+                                    .child(granularity.label()),
+                            ),
+                    );
+                } else {
+                    let (text, color) = match key {
+                        BucketSort::Requests => {
+                            (format::count(row.totals.requests), theme.text_secondary)
+                        }
+                        BucketSort::Tokens => {
+                            (format::compact(row.totals.tokens.total), theme.text_primary)
+                        }
+                        BucketSort::Cache => (
+                            match row.totals.cache_hit_rate() {
+                                Some(rate) => format::percent(rate),
+                                None => "—".to_string(),
+                            },
+                            theme.text_muted,
+                        ),
+                        BucketSort::Errors => (
+                            format::count(row.totals.errors),
+                            if row.totals.errors > 0 {
+                                theme.error
+                            } else {
+                                theme.text_muted
+                            },
+                        ),
+                        BucketSort::Date => unreachable!("handled above"),
+                    };
+                    line = line.child(text_cell(column, text, color, theme));
+                }
+            }
+            out.push(line.into_any_element());
+        }
+        out
+    }
+
+    /// One failure per row, newest first unless the user re-sorted.
+    fn failure_row_elements(
+        &self,
+        rows: &[super::table::FailureRow],
+        columns: &[Column],
+        keys: &[FailureSort],
+        theme: Theme,
+    ) -> Vec<AnyElement> {
+        let total_w: f32 = columns.iter().map(|column| column.width).sum();
+        let mut elements = Vec::with_capacity(rows.len());
+        for (ix, row) in rows.iter().enumerate() {
+            let last = ix + 1 == rows.len();
+            let mut line = div()
+                .h(px(ROW_H))
+                .w_full()
+                .min_w(px(total_w))
+                .flex()
+                .items_center()
+                .when(!last, |row| {
+                    row.border_b_1().border_color(theme.border_subtle)
+                })
+                .hover_state(&theme);
+            for (ix, column) in columns.iter().enumerate() {
+                let key = keys.get(ix).copied().unwrap_or(FailureSort::When);
+                if key == FailureSort::Kind {
+                    let (label, status) = super::table::failure_kind_register(row.kind, theme);
+                    line = line.child(
+                        cell_shell(column)
+                            .child(status_badge(label, status, theme))
+                            .into_any_element(),
+                    );
+                    continue;
+                }
+                let (label, color) = match key {
+                    FailureSort::When => (super::table::failure_when(row.ts_ms), theme.text_muted),
+                    FailureSort::Kind => {
+                        let (label, color) = super::table::failure_kind_register(row.kind, theme);
+                        (label, color)
+                    }
+                    FailureSort::Model => (row.model.clone(), theme.text_secondary),
+                    FailureSort::Session => (row.session_title.clone(), theme.text_secondary),
+                    FailureSort::Message => (row.message.clone(), theme.text_muted),
+                };
+                line = line.child(text_cell(column, label, color, theme));
+            }
+            elements.push(line.into_any_element());
+        }
+        elements
+    }
+
+    /// A table with its handlers wired to this page. The column ids and widths
+    /// are captured so a divider drag knows what it grabbed; `on_sort` maps the
+    /// clicked column to a key.
+    #[allow(clippy::too_many_arguments)]
+    fn table_element(
+        &self,
+        table: TableKind,
+        id: &'static str,
+        columns: Vec<Column>,
+        rows: Vec<AnyElement>,
+        height: f32,
+        empty: AnyElement,
+        theme: Theme,
+        on_sort: Rc<SetSort>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ids = Rc::new(columns.iter().map(|column| column.id).collect::<Vec<_>>());
+        let widths = Rc::new(
+            columns
+                .iter()
+                .map(|column| column.width)
+                .collect::<Vec<_>>(),
+        );
+        let handlers = table_handlers(cx.entity(), table, ids, widths, on_sort);
+        data_table(id, &columns, rows, px(height), empty, theme, handlers)
+    }
+
+    /// The column-visibility control for the sessions table (§41).
+    fn columns_control(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.menu() == Some(MenuKind::Columns);
+        let entity = cx.entity();
+        let chip = filters::chip(
+            "usage-columns-chip",
+            tr!("usage.columns"),
+            None,
+            !self.hidden_columns().is_empty(),
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::Columns, window, cx)
+                });
+            },
+        );
+        if !open {
+            return filters::chip_with_menu(
+                "usage-columns-anchor",
+                chip,
+                false,
+                Corner::TopRight,
+                theme,
+                || div().into_any_element(),
+            );
+        }
+        let panel = filters::columns_menu(self, cx, theme);
+        filters::chip_with_menu(
+            "usage-columns-anchor",
+            chip,
+            true,
+            Corner::TopRight,
+            theme,
+            move || panel,
+        )
+    }
+
+    /// The footer summary (§53): totals over the whole filtered set, clearly
+    /// distinguished from the totals on the visible page.
+    fn totals_line(&self, result: &SessionQueryResult, theme: Theme) -> Option<AnyElement> {
+        let snapshot = self.snapshot()?;
+        let totals = &snapshot.summary.totals;
+        let page_requests: u64 = result.rows.iter().map(|row| row.totals.requests).sum();
+        let page_tokens: u64 = result.rows.iter().map(|row| row.totals.tokens.total).sum();
+
+        let mut filtered = tr!(
+            "usage.filtered_totals_requests",
+            requests = format::count(totals.requests),
+            tokens = format::compact(totals.tokens.total)
+        );
+        if totals.cost_coverage() > 0.0 {
+            filtered.push_str(&format!(" · {}", format::cost(totals.cost_usd)));
+        }
+        let page = tr!(
+            "usage.page_requests",
+            requests = format::count(page_requests),
+            tokens = format::compact(page_tokens)
+        );
+
+        Some(
+            div()
+                .w_full()
+                .pt(DynamicSpacing::Base08.px(&theme))
+                .flex()
+                .items_center()
+                .gap(DynamicSpacing::Base12.px(&theme))
+                .text_size(TextSize::Small.px(&theme))
+                .child(div().text_color(theme.text_muted).child(filtered))
+                .child(div().flex_1())
+                .child(div().text_color(theme.text_muted).child(page))
+                .into_any_element(),
+        )
+    }
+
+    /// The sessions footer (§27/§75): range, rows-per-page, and page stepping.
+    fn pagination_footer(
+        &self,
+        result: &SessionQueryResult,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pages = result.page_count();
+        let current = result.page;
+        let summary = if result.total == 0 {
+            tr!("usage.no_sessions_match").to_string()
+        } else {
+            tr!(
+                "usage.showing_range",
+                first = format::count(result.first_row() as u64),
+                last = format::count(result.last_row() as u64),
+                total = format::count(result.total as u64)
+            )
+        };
+
+        let size_open = self.menu() == Some(MenuKind::PageSize);
+        let entity = cx.entity();
+        let size_chip = filters::chip(
+            "usage-page-size-chip",
+            result.page_size.to_string(),
+            None,
+            false,
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::PageSize, window, cx)
+                });
+            },
+        );
+        let size_panel = size_open.then(|| filters::page_size_menu(self, cx, theme));
+        let size_control = filters::chip_with_menu(
+            "usage-page-size-anchor",
+            size_chip,
+            size_open,
+            Corner::TopRight,
+            theme,
+            move || size_panel.unwrap_or_else(|| div().into_any_element()),
+        );
+
+        let entity = cx.entity();
+        let on_page: PageFn = Rc::new(move |target, _, cx| {
+            entity.update(cx, |page, cx| page.set_page(target, cx));
+        });
+        table_pager(
+            "usage-page",
+            summary,
+            size_control,
+            current,
+            pages,
+            on_page,
+            theme,
+        )
+    }
+}
+
+/// The sort state for a column: only the active key shows a direction.
+fn sort_state(active: bool, desc: bool) -> SortState {
+    if !active {
+        SortState::Default
+    } else if desc {
+        SortState::Descending
+    } else {
+        SortState::Ascending
+    }
+}
+
+/// A header click routed to the page: which column and the state to move to.
+type SetSort = dyn Fn(&mut UsagePage, usize, SortState, &mut Context<UsagePage>);
+
+/// Wire a table's handlers to the page: header clicks sort, divider drags
+/// resize the column they grabbed.
+fn table_handlers(
+    entity: Entity<UsagePage>,
+    table: TableKind,
+    ids: Rc<Vec<&'static str>>,
+    widths: Rc<Vec<f32>>,
+    on_sort: Rc<SetSort>,
+) -> TableHandlers {
+    let sort_entity = entity.clone();
+    let start_entity = entity.clone();
+    let move_entity = entity.clone();
+    let end_entity = entity;
+    TableHandlers::new(
+        move |ix, sort, _window, cx| {
+            sort_entity.update(cx, |page, cx| on_sort(page, ix, sort, cx));
+        },
+        move |ix, x, _window, cx| {
+            if let (Some(id), Some(width)) = (ids.get(ix).copied(), widths.get(ix).copied()) {
+                start_entity.update(cx, |page, _| page.begin_resize(table, id, x, width));
+            }
+        },
+        move |_ix, x, _window, cx| {
+            move_entity.update(cx, |page, cx| page.drag_resize(x, cx));
+        },
+        move |_window, cx| {
+            end_entity.update(cx, |page, _| page.end_resize());
+        },
+    )
+}
+
+/// One session cell, in the register its column deserves (§54).
+fn session_cell(row: &SessionRow, key: SessionSort, theme: Theme, column: &Column) -> AnyElement {
+    let totals = row.totals;
+    let (text, color) = match key {
+        SessionSort::Title => (row.title.clone(), theme.text_primary),
+        SessionSort::Workspace => (row.workspace.clone(), theme.text_secondary),
+        SessionSort::Provider => (row.provider.clone(), theme.text_secondary),
+        SessionSort::Model => (row.top_model.clone(), theme.text_secondary),
+        SessionSort::Started => (
+            super::model::bucket_label(row.ended_ms, Granularity::Day),
+            theme.text_muted,
+        ),
+        SessionSort::Duration => (format::span_ms(row.duration_ms()), theme.text_muted),
+        SessionSort::Requests => (format::count(totals.requests), theme.text_secondary),
+        SessionSort::Input => (format::compact(totals.tokens.input), theme.text_muted),
+        SessionSort::Output => (format::compact(totals.tokens.output), theme.text_muted),
+        SessionSort::Cache => (
+            // "0" would claim the provider reported no cache reuse; "—" says
+            // nothing was reported at all.
+            if totals.tokens.cache_read == 0 && !row.cache_capable {
+                "—".to_string()
+            } else {
+                format::compact(totals.tokens.cache_read)
+            },
+            theme.text_muted,
+        ),
+        SessionSort::Tokens => (format::compact(totals.tokens.total), theme.text_primary),
+        SessionSort::Errors => {
+            let errors = totals.errors + row.tool_errors;
+            (
+                format::count(errors),
+                if errors > 0 {
+                    theme.error
+                } else {
+                    theme.text_muted
+                },
+            )
+        }
+        // Tool calls are shown in the tool activity panel, which ranks them
+        // properly; the table's column plan does not include one.
+        SessionSort::Tools => (format::count(row.tool_runs), theme.text_muted),
+    };
+    text_cell(column, text, color, theme)
+}
+
+/// A session's context line: where it ran and on whose models.
+fn session_context(row: &SessionRow) -> String {
+    [row.workspace.as_str(), row.provider.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The trailing affordance: open this session in the chat surface. Hidden
+/// until its row is hovered, so thirteen rows do not ship thirteen arrows.
+fn open_session_cell(
+    session: u16,
+    page: Entity<UsagePage>,
+    theme: Theme,
+    column: &Column,
+) -> AnyElement {
+    div()
+        .w(px(column.width))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            icon_button_frame(div(), &theme, ButtonSize::Default)
+                .id(SharedString::from(format!("usage-open-{session}")))
+                .tip(tr!("usage.ctx_open_session"))
+                .cursor_pointer()
+                .opacity(0.)
+                .group_hover("usage-row", |style| style.opacity(1.))
+                .hover_on_glass(&theme)
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    // Do not let the row's own click handler also fire: this
+                    // is a jump to another surface, not a scope change.
+                    cx.stop_propagation();
+                    page.update(cx, |page, cx| page.open_session(window, cx, session));
+                })
+                .child(icon(
+                    "icons/arrow-up-right.svg",
+                    ButtonSize::Default.icon_size().px(&theme),
+                    theme.text_muted,
+                )),
+        )
+        .into_any_element()
+}
+
+/// The session row's right-click menu (§43): only actions that are wired.
+fn session_context_menu(row: &SessionRow, theme: Theme, page: Entity<UsagePage>) -> AnyElement {
+    let session = row.session;
+    let session_id = row.id.clone();
+    let provider_id = row.provider_id;
+    let model_id = row.top_model_id;
+    let provider_label = row.provider.clone();
+    let model_label = row.top_model.clone();
+
+    let mut items: Vec<AnyElement> = Vec::new();
+    items.push(context_item(tr!("usage.ctx_open_session"), theme, {
+        let page = page.clone();
+        move |window, cx| {
+            page.update(cx, |page, cx| page.open_session(window, cx, session));
+        }
+    }));
+    items.push(context_item(tr!("usage.ctx_scope_to_session"), theme, {
+        let page = page.clone();
+        move |_, cx| {
+            page.update(cx, |page, cx| page.set_session_scope(Some(session), cx));
+        }
+    }));
+    items.push(context_separator(theme));
+    items.push(context_item(
+        tr!("usage.ctx_copy_session_id"),
+        theme,
+        move |_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(session_id.clone()));
+        },
+    ));
+    items.push(context_separator(theme));
+    items.push(context_item(
+        tr!("usage.ctx_filter_by_provider", name = provider_label),
+        theme,
+        {
+            let page = page.clone();
+            move |_, cx| {
+                page.update(cx, |page, cx| {
+                    page.toggle_filter_value(MenuKind::Provider, provider_id, cx)
+                });
+            }
+        },
+    ));
+    if let Some(model_id) = model_id {
+        items.push(context_item(
+            tr!("usage.ctx_filter_by_model", name = model_label),
+            theme,
+            {
+                let page = page.clone();
+                move |_, cx| {
+                    page.update(cx, |page, cx| {
+                        page.toggle_filter_value(MenuKind::Model, model_id, cx)
+                    });
+                }
+            },
+        ));
+    }
+    items.push(context_item(tr!("usage.ctx_filter_by_workspace"), theme, {
+        let page = page.clone();
+        move |_, cx| {
+            page.update(cx, |page, cx| {
+                let workspace = page
+                    .index()
+                    .and_then(|index| index.try_session(session).map(|entry| entry.workspace));
+                if let Some(workspace) = workspace {
+                    page.toggle_filter_value(MenuKind::Workspace, workspace, cx);
+                }
+            });
+        }
+    }));
+
+    anchored()
+        .position_mode(gpui::AnchoredPositionMode::Local)
+        .anchor(Corner::TopLeft)
+        .snap_to_window_with_margin(popover::WINDOW_MARGIN)
+        .child(deferred(context_menu_shell(theme, page, items)))
+        .into_any_element()
+}
+
+/// The menu shell, on the branch selector's picker metrics
+/// ([`picker_surface`]), dismissed by an outside click.
+fn context_menu_shell(theme: Theme, page: Entity<UsagePage>, items: Vec<AnyElement>) -> AnyElement {
+    picker_surface(div().id("usage-row-menu"), &theme)
+        .py(picker::list_padding_y(&theme))
+        .flex()
+        .flex_col()
+        .gap(DynamicSpacing::Base01.px(&theme))
+        .overflow_hidden()
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down_out(move |_, _, cx| {
+            page.update(cx, |page, cx| page.close_context_menu(cx));
+        })
+        .children(items)
+        .into_any_element()
+}
+
+/// One row of a context menu ([`picker_entry`]).
+fn context_item(
+    label: String,
+    theme: Theme,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    picker_entry(div(), &theme)
+        .h(picker::entry_height(&theme))
+        .flex_none()
+        .text_color(theme.text_secondary)
+        .cursor_pointer()
+        .hover_state(&theme)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            on_click(window, cx);
+        })
+        .child(label)
+        .into_any_element()
+}
+
+fn context_separator(theme: Theme) -> AnyElement {
+    context_menu_separator(&theme).into_any_element()
+}
+
+// ── shared pieces ─────────────────────────────────────────────────────────
+
+/// A top-level band on the canvas: a semantic title, a one-line description,
+/// optional meta, a hairline, then the content. Used for every secondary
+/// section so the page reads as hairlines and whitespace rather than a stack
+/// of boxes (DESIGN.md: hairlines over boxes). The summary metric board is
+/// the one place that keeps a card.
+fn section(
+    id: &'static str,
+    title: &str,
+    description: Option<&str>,
+    meta: Option<String>,
+    right: Option<AnyElement>,
+    content: AnyElement,
+    theme: Theme,
+) -> AnyElement {
+    card(
+        id,
+        title,
+        description,
+        meta,
+        right,
+        div()
+            .w_full()
+            .px(DynamicSpacing::Base12.px(&theme))
+            .pt(DynamicSpacing::Base12.px(&theme))
+            .pb(DynamicSpacing::Base12.px(&theme))
+            .child(content)
+            .into_any_element(),
+        theme,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn card(
+    id: &'static str,
+    title: &str,
+    description: Option<&str>,
+    meta: Option<String>,
+    right: Option<AnyElement>,
+    content: AnyElement,
+    theme: Theme,
+    clip: bool,
+) -> AnyElement {
+    let mut root = div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .w_full()
+        .rounded(panel::RADIUS.px(&theme))
+        .frosted_card(&theme, theme.border, panel::RADIUS.px(&theme))
+        // Translucent whenever a wallpaper is behind the column, whatever the
+        // renderer can do with it: the frost is the extra, not the condition.
+        .bg(theme.card_fill(theme.surface_elevated))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex_none()
+                .px(DynamicSpacing::Base12.px(&theme))
+                .py(DynamicSpacing::Base12.px(&theme))
+                .flex()
+                .flex_col()
+                .gap(DynamicSpacing::Base04.px(&theme))
+                .border_b_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(DynamicSpacing::Base08.px(&theme))
+                        .child(
+                            div()
+                                .text_size(TextSize::Large.px(&theme))
+                                .line_height(theme.ui_px(20.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_primary)
+                                .child(title.to_string()),
+                        )
+                        .children(meta.map(|meta| {
+                            div()
+                                .text_size(TextSize::Small.px(&theme))
+                                .text_color(theme.text_muted)
+                                .child(meta)
+                        }))
+                        .child(div().flex_1())
+                        .children(right),
+                )
+                .children(description.map(|description| {
+                    div()
+                        .text_size(TextSize::Small.px(&theme))
+                        .line_height(theme.ui_px(16.))
+                        .text_color(theme.text_muted)
+                        .child(description.to_string())
+                })),
+        )
+        .child(content);
+    if clip {
+        root = root.overflow_hidden();
+    }
+    root.into_any_element()
+}
+
+/// A segmented control's selection callback, boxed so one segment's handler
+/// can be cloned into every option.
+type SegmentPick<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
+
+/// A segmented control: one active segment, the rest quiet. The group is
+/// joined the way the settings card's "One at a time / All" control is — no
+/// gap, a shared hairline between neighbours, and only the group's outer
+/// corners round. Height, horizontal padding, label size, and radius all come
+/// from the button tokens ([`button_frame`] at [`ButtonSize::Medium`]), so the
+/// group lines up with the page's chips and buttons.
+///
+/// `inset` picks the resting fill for the surface the group sits on, exactly as
+/// [`filters::chip`] does: `surface_elevated` on the canvas, `background` inside a raised
+/// card so the inactive segments read as recessed wells instead of vanishing
+/// into the card. `enabled` keeps a segment that has no data yet visible but
+/// inert — the chart's metric switcher dims a metric it cannot plot rather
+/// than dropping it and reflowing the group.
+#[allow(clippy::too_many_arguments)]
+fn segmented<T, L>(
+    prefix: &'static str,
+    options: &[T],
+    active: T,
+    label: impl Fn(T) -> L,
+    key: impl Fn(T) -> &'static str,
+    enabled: impl Fn(T) -> bool,
+    inset: bool,
+    theme: Theme,
+    on_pick: impl Fn(T, &mut Window, &mut App) + 'static,
+) -> AnyElement
+where
+    T: Copy + PartialEq + 'static,
+    L: IntoElement,
+{
+    let on_pick: SegmentPick<T> = Rc::new(on_pick);
+    let resting = if inset {
+        theme.background
+    } else {
+        theme.surface_elevated
+    };
+    let radius = button::RADIUS.px(&theme);
+    let many = options.len() > 1;
+    let last = options.len().saturating_sub(1);
+    let mut row = div().flex().items_center();
+    for (ix, option) in options.iter().copied().enumerate() {
+        let is_active = option == active;
+        let is_enabled = enabled(option);
+        let handler = on_pick.clone();
+        row = row.child(
+            button_frame(div(), &theme, ButtonSize::Medium)
+                .id(SharedString::from(format!("{prefix}-{}", key(option))))
+                .rounded_none()
+                .border_1()
+                .border_color(theme.border)
+                // One control: only the outer corners round, and the segments
+                // share the hairline between them.
+                .when(!many, |tab| tab.rounded(radius))
+                .when(many && ix == 0, |tab| tab.rounded_l(radius))
+                .when(many && ix == last, |tab| tab.rounded_r(radius).border_l_0())
+                .when(many && ix > 0 && ix < last, |tab| tab.border_l_0())
+                .when(is_active, |tab| {
+                    tab.raised_flat(theme.surface_active)
+                        .text_color(theme.text_primary)
+                        .font_weight(FontWeight::MEDIUM)
+                        .cursor_pointer()
+                })
+                .when(!is_active && is_enabled, |tab| {
+                    tab.raised_flat(resting)
+                        .text_color(theme.text_secondary)
+                        .cursor_pointer()
+                        .hover_state(&theme)
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            handler(option, window, cx)
+                        })
+                })
+                // A metric with no source data stays visible but disabled, so
+                // the group keeps its shape as availability changes.
+                .when(!is_active && !is_enabled, |tab| {
+                    tab.bg(resting)
+                        .text_color(theme.text_disabled)
+                        .cursor_default()
+                })
+                .child(label(option)),
+        );
+    }
+    row.into_any_element()
+}
+
+/// A search field, shared by the Sessions table and the Breakdown table so both
+/// read the same.
+fn search_box(input: &Entity<ComposerInput>, theme: Theme) -> AnyElement {
+    picker_search_frame(div(), &theme)
+        .flex_1()
+        .min_w(px(180.))
+        .child(icon(
+            "icons/search.svg",
+            input::ICON.px(&theme),
+            theme.text_muted,
+        ))
+        .child(div().flex_1().min_w_0().child(input.clone()))
+        .into_any_element()
+}
+
+/// Search on the left, Columns on the right — the controls sit above the
+/// table card, never inside it.
+fn table_toolbar(search: AnyElement, columns: AnyElement, theme: Theme) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(DynamicSpacing::Base08.px(&theme))
+        .child(search)
+        .child(columns)
+        .into_any_element()
+}
+
+/// The page a pager button moves to.
+type PageFn = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// The pages a pager lists: all of them when few, otherwise the first, the
+/// last and the current one with its neighbours, `None` marking each gap.
+pub(super) fn page_window(current: usize, pages: usize) -> Vec<Option<usize>> {
+    if pages <= 7 {
+        return (1..=pages).map(Some).collect();
+    }
+    let lo = current.saturating_sub(1).max(2);
+    let hi = (current + 1).min(pages - 1);
+    let mut out = vec![Some(1)];
+    if lo > 2 {
+        out.push(None);
+    }
+    out.extend((lo..=hi).map(Some));
+    if hi < pages - 1 {
+        out.push(None);
+    }
+    out.push(Some(pages));
+    out
+}
+
+/// Footer under a table card: the count on the left; rows-per-page and the
+/// numbered pages on the right, between previous and next arrows.
+#[allow(clippy::too_many_arguments)]
+fn table_pager(
+    id: &'static str,
+    summary: String,
+    size_control: AnyElement,
+    current: usize,
+    pages: usize,
+    on_page: PageFn,
+    theme: Theme,
+) -> AnyElement {
+    let pages = pages.max(1);
+    let current = current.clamp(1, pages);
+    let square = ButtonSize::Medium.height(&theme);
+    let arrow = |key: &'static str, path: &'static str, target: usize, enabled: bool| {
+        let on_page = on_page.clone();
+        let frame = icon_button_frame(div(), &theme, ButtonSize::Medium)
+            .id(SharedString::from(format!("{id}-{key}")))
+            .border_1()
+            .border_color(theme.border)
+            .when(enabled, |button| {
+                button
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        on_page(target, window, cx)
+                    })
+            })
+            .child(icon(
+                path,
+                ButtonSize::Medium.icon_size().px(&theme),
+                if enabled {
+                    theme.text_secondary
+                } else {
+                    theme.text_disabled
+                },
+            ));
+        if enabled {
+            crate::motion::hover(
+                frame,
+                format!("{id}-{key}"),
+                &theme,
+                crate::motion::Hover::wash(&theme),
+            )
+        } else {
+            frame.into_any_element()
+        }
+    };
+    let numbers: Vec<AnyElement> = page_window(current, pages)
+        .into_iter()
+        .enumerate()
+        .map(|(ix, page)| match page {
+            None => div()
+                .w(square)
+                .flex()
+                .justify_center()
+                .text_size(TextSize::Small.px(&theme))
+                .text_color(theme.text_muted)
+                .child("…")
+                .into_any_element(),
+            Some(page) if page == current => button_frame(div(), &theme, ButtonSize::Medium)
+                .id(SharedString::from(format!("{id}-page-{ix}")))
+                .min_w(square)
+                .justify_center()
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.surface_active)
+                .font(num_font())
+                .font_weight(FontWeight::MEDIUM)
+                .text_size(TextSize::Small.px(&theme))
+                .text_color(theme.text_primary)
+                .child(page.to_string())
+                .into_any_element(),
+            Some(page) => {
+                let on_page = on_page.clone();
+                crate::motion::hover(
+                    button_frame(div(), &theme, ButtonSize::Medium)
+                        .id(SharedString::from(format!("{id}-page-{ix}")))
+                        .min_w(square)
+                        .justify_center()
+                        .cursor_pointer()
+                        .font(num_font())
+                        .text_size(TextSize::Small.px(&theme))
+                        .text_color(theme.text_secondary)
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            on_page(page, window, cx)
+                        })
+                        .child(page.to_string()),
+                    format!("{id}-page-{ix}"),
+                    &theme,
+                    crate::motion::Hover::wash(&theme),
+                )
+            }
+        })
+        .collect();
+
+    div()
+        .w_full()
+        .pt(DynamicSpacing::Base12.px(&theme))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(DynamicSpacing::Base12.px(&theme))
+        .gap_y(DynamicSpacing::Base08.px(&theme))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(TextSize::Small.px(&theme))
+                .text_color(theme.text_muted)
+                .child(summary),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(DynamicSpacing::Base06.px(&theme))
+                .child(
+                    div()
+                        .text_size(TextSize::Small.px(&theme))
+                        .text_color(theme.text_muted)
+                        .child(tr!("view.rows")),
+                )
+                .child(size_control),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(DynamicSpacing::Base04.px(&theme))
+                .child(arrow(
+                    "prev",
+                    "icons/chevron-left.svg",
+                    current.saturating_sub(1).max(1),
+                    current > 1,
+                ))
+                .children(numbers)
+                .child(arrow(
+                    "next",
+                    "icons/chevron-right.svg",
+                    (current + 1).min(pages),
+                    current < pages,
+                )),
+        )
+        .into_any_element()
+}
+
+/// The totals line under a data table: filtered totals left, this page right.
+fn totals_row(filtered: &str, page: &str, theme: Theme) -> AnyElement {
+    div()
+        .w_full()
+        .pt(DynamicSpacing::Base08.px(&theme))
+        .flex()
+        .items_center()
+        .gap(DynamicSpacing::Base12.px(&theme))
+        .text_size(TextSize::Small.px(&theme))
+        .child(
+            div()
+                .text_color(theme.text_muted)
+                .child(filtered.to_string()),
+        )
+        .child(div().flex_1())
+        .child(div().text_color(theme.text_muted).child(page.to_string()))
+        .into_any_element()
+}
+
+fn empty_line(text: &str, theme: Theme) -> AnyElement {
+    div()
+        .px(DynamicSpacing::Base08.px(&theme))
+        .py(DynamicSpacing::Base06.px(&theme))
+        .text_size(TextSize::Small.px(&theme))
+        .text_color(theme.text_muted)
+        .child(text.to_string())
+        .into_any_element()
+}
+
+fn retry_note(theme: Theme) -> AnyElement {
+    div()
+        .text_size(TextSize::Small.px(&theme))
+        .text_color(theme.text_muted)
+        .child(tr!("view.retries_are_unavailable_pi_records_automatic_ret"))
+        .into_any_element()
+}
+
+/// Tabular figures for numeric columns (§54). Both bundled faces carry `tnum`,
+/// and requesting it is what stops columns from jittering as digits change.
+pub(crate) fn num_font() -> Font {
+    let mut font = gpui::font(theme::ui_font_family());
+    font.features = FontFeatures(Arc::new(vec![
+        ("tnum".to_string(), 1),
+        ("lnum".to_string(), 1),
+    ]));
+    font
+}
+
+/// One row of a breakdown legend, shared by every breakdown tab: the row's
+/// glyph, its name and scope, the figure and its share, and a track whose fill
+/// is the share — bklit's legend with progress bars.
+struct LegendRow {
+    glyph: (SharedString, Hsla),
+    label: String,
+    sub: Option<String>,
+    value: String,
+    /// Share of the breakdown's total, 0..=1.
+    fraction: f64,
+    /// The row's key is in the page's scope.
+    selected: bool,
+}
+
+/// A legend row is one click target. Hover washes it at once and a row in scope
+/// keeps its wash; neither transitions, so reading the list never waits.
+fn legend_row(
+    id: SharedString,
+    row: LegendRow,
+    theme: Theme,
+    reduced_motion: bool,
+) -> Stateful<gpui::Div> {
+    let (path, color) = row.glyph;
+    let bar = legend_bar(&id, row.fraction, theme.accent, theme, reduced_motion);
+    let head = div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(DynamicSpacing::Base08.px(&theme))
+        .child(leading_tile(
+            theme,
+            icon_dyn(path, context_menu::ICON.px(&theme), color).into_any_element(),
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(TextSize::Small.px(&theme))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_primary)
+                        .child(row.label),
+                )
+                .children(row.sub.map(|sub| {
+                    div()
+                        .truncate()
+                        .text_size(TextSize::XSmall.px(&theme))
+                        .text_color(theme.text_muted)
+                        .child(sub)
+                })),
+        )
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_baseline()
+                .gap(DynamicSpacing::Base06.px(&theme))
+                .font(num_font())
+                .child(
+                    div()
+                        .text_size(TextSize::Small.px(&theme))
+                        .text_color(theme.text_primary)
+                        .child(row.value),
+                )
+                .child(
+                    div()
+                        .text_size(TextSize::XSmall.px(&theme))
+                        .text_color(theme.text_muted)
+                        .child(format::share(row.fraction)),
+                ),
+        );
+    div()
+        .id(id)
+        .w_full()
+        .px(DynamicSpacing::Base08.px(&theme))
+        .py(DynamicSpacing::Base06.px(&theme))
+        .rounded(Radius::Medium.px(&theme))
+        .flex()
+        .flex_col()
+        .gap(DynamicSpacing::Base06.px(&theme))
+        .cursor_pointer()
+        .when(row.selected, |wash| wash.bg(theme.surface_selected))
+        .hover_state(&theme)
+        .child(head)
+        .child(bar)
+}
+
+/// A legend row's share track. The fill grows from nothing on mount (the page's
+/// one reveal, 450ms) and holds still on every later repaint.
+fn legend_bar(
+    id: &SharedString,
+    fraction: f64,
+    fill: Hsla,
+    theme: Theme,
+    reduced_motion: bool,
+) -> AnyElement {
+    let fraction = if fraction.is_finite() {
+        fraction.clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
+    let fill = div()
+        .h_full()
+        .w(relative(fraction))
+        .rounded(Radius::Full.px(&theme))
+        .bg(fill);
+    let fill = if reduced_motion {
+        fill.into_any_element()
+    } else {
+        fill.with_animation(
+            ElementId::Name(format!("{id}-reveal").into()),
+            Animation::new(Motion::Layout.duration(&theme)).with_easing(Motion::Layout.easing()),
+            move |fill, progress| fill.w(relative(fraction * progress)),
+        )
+        .into_any_element()
+    };
+    div()
+        .w_full()
+        .h(px(6.))
+        .rounded(Radius::Full.px(&theme))
+        .bg(theme.surface_secondary)
+        .overflow_hidden()
+        .child(fill)
+        .into_any_element()
+}
+
+/// The name cell of a breakdown table: the row's label, with its secondary
+/// line (provider, parent folder) trailing in the quiet register.
+fn breakdown_name_cell(
+    column: &Column,
+    row: &GroupRow,
+    glyph: (SharedString, Hsla),
+    theme: Theme,
+) -> AnyElement {
+    let (path, color) = glyph;
+    two_line_cell(
+        column,
+        Some(icon_dyn(path, IconSize::Medium.px(&theme), color).into_any_element()),
+        row.label.clone(),
+        row.sub.clone(),
+        theme,
+    )
+}
+
+/// The Summary card's meta line: the range's headline counts.
+fn summary_meta(snapshot: &UsageSnapshot) -> String {
+    tr!(
+        "usage.summary_meta",
+        requests = format::count(snapshot.summary.totals.requests),
+        tokens = format::compact(snapshot.summary.totals.tokens.total),
+        sessions = format::count(snapshot.summary.sessions)
+    )
+}
+
+fn toggle(list: &mut Vec<u16>, value: u16) {
+    match list.iter().position(|entry| *entry == value) {
+        Some(ix) => {
+            list.remove(ix);
+        }
+        None => list.push(value),
+    }
+}
+
+fn session_title(entry: &super::model::SessionEntry) -> String {
+    if entry.title.is_empty() {
+        tr!(
+            "usage.session_fallback",
+            id = entry.id.chars().take(8).collect::<String>()
+        )
+    } else {
+        entry.title.clone()
+    }
+}
+
+fn model_meta(breakdown: &Breakdown) -> String {
+    tr!(
+        "usage.meta_models_requests",
+        models = format::count(breakdown.rows.len() as u64),
+        requests = format::count(breakdown.totals.requests)
+    )
+}
+
+fn workspace_meta(breakdown: &Breakdown) -> String {
+    tr!(
+        "usage.meta_workspaces_tokens",
+        workspaces = format::count(breakdown.rows.len() as u64),
+        tokens = format::compact(breakdown.totals.tokens.total)
+    )
+}
+
+fn provider_meta(breakdown: &Breakdown) -> String {
+    tr!(
+        "usage.meta_providers_requests",
+        providers = format::count(breakdown.rows.len() as u64),
+        requests = format::count(breakdown.totals.requests)
+    )
+}
+
+fn tools_meta(snapshot: &UsageSnapshot) -> String {
+    let tools = &snapshot.tools;
+    match snapshot.summary.tool_error_rate() {
+        Some(rate) if tools.errors > 0 => tr!(
+            "usage.meta_calls_failed_pct",
+            calls = format::count(tools.calls),
+            failed = format::count(tools.errors),
+            rate = format::percent(rate)
+        ),
+        Some(_) => tr!(
+            "usage.meta_calls_none_failed",
+            calls = format::count(tools.calls)
+        ),
+        None => tr!("usage.no_tool_calls"),
+    }
+}
+
+/// One label/value pair in the secondary readout under the board.
+/// One Summary strip panel: an icon-led heading, the lead block that gives
+/// the panel its context, then its figures as value-over-label tiles.
+fn strip_panel(
+    icon_path: &'static str,
+    heading: String,
+    lead: AnyElement,
+    tiles: Vec<(String, String)>,
+    trailing: Option<AnyElement>,
+    theme: Theme,
+) -> AnyElement {
+    let mut grid = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(DynamicSpacing::Base12.px(&theme));
+    // Two tiles a row, built as rows rather than a wrapping flex, so the
+    // columns line up whatever the label lengths.
+    for pair in tiles.chunks(2) {
+        let mut row = div().w_full().flex().gap(DynamicSpacing::Base12.px(&theme));
+        for (label, value) in pair {
+            row = row.child(stat_tile(label.clone(), value.clone(), theme));
+        }
+        if pair.len() == 1 {
+            row = row.child(div().flex_1());
+        }
+        grid = grid.child(row);
+    }
+
+    div()
+        .w_full()
+        .p(DynamicSpacing::Base16.px(&theme))
+        .flex()
+        .flex_col()
+        .gap(DynamicSpacing::Base16.px(&theme))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(DynamicSpacing::Base06.px(&theme))
+                .child(icon(
+                    icon_path,
+                    IconSize::Small.px(&theme),
+                    theme.text_muted,
+                ))
+                .child(
+                    div()
+                        .text_size(TextSize::Small.px(&theme))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_secondary)
+                        .child(heading),
+                ),
+        )
+        .child(lead)
+        .child(
+            div()
+                .w_full()
+                .pt(DynamicSpacing::Base12.px(&theme))
+                .border_t_1()
+                .border_color(theme.border_subtle)
+                .child(grid),
+        )
+        .children(trailing)
+        .into_any_element()
+}
+
+/// A panel's lead figure: one number at a size between the board's and the
+/// tiles', with a caption that says what it means.
+fn strip_hero(value: String, caption: String, theme: Theme) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(DynamicSpacing::Base02.px(&theme))
+        .child(
+            div()
+                .font(num_font())
+                .text_size(theme.ui_px(20.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_primary)
+                .child(value),
+        )
+        .child(ellipsis_line(
+            caption,
+            TextSize::Small.px(&theme),
+            theme.text_muted,
+        ))
+        .into_any_element()
+}
+
+/// A label over its figure, in the KPI board's order: muted name, then the
+/// number in tabular digits, so a panel reads as named values, not prose.
+fn stat_tile(label: String, value: String, theme: Theme) -> AnyElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(DynamicSpacing::Base02.px(&theme))
+        .child(ellipsis_line(
+            label,
+            TextSize::Small.px(&theme),
+            theme.text_muted,
+        ))
+        .child(
+            div()
+                .font(num_font())
+                .text_size(TextSize::Default.px(&theme))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_primary)
+                .child(value),
+        )
+        .into_any_element()
+}
+
+/// One line of text that ends in an ellipsis when it runs out of room.
+///
+/// The truncating text is a `flex_1` child of a full-width row, never a bare
+/// child of a column: in a column GPUI measures it before the column has a
+/// width, so its min-content width is zero and it renders as a lone "…".
+fn ellipsis_line(text: impl Into<SharedString>, size: Pixels, color: Hsla) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(size)
+                .text_color(color)
+                .child(text.into()),
+        )
+        .into_any_element()
+}
+
+/// One part of the token split: name, amount and share, over the Breakdown
+/// legend's thin share bar.
+fn share_row(
+    key: &'static str,
+    label: String,
+    value: u64,
+    fraction: f64,
+    theme: Theme,
+    reduced_motion: bool,
+) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(DynamicSpacing::Base04.px(&theme))
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .items_baseline()
+                .gap(DynamicSpacing::Base08.px(&theme))
+                .text_size(TextSize::Small.px(&theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text_secondary)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font(num_font())
+                        .text_color(theme.text_primary)
+                        .child(format::compact(value)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(theme.ui_px(48.))
+                        .flex()
+                        .justify_end()
+                        .font(num_font())
+                        .text_color(theme.text_muted)
+                        .child(format::percent(fraction * 100.0)),
+                ),
+        )
+        // Quiet ink, not accent: the board's one accent belongs to the metric
+        // the trend is plotting (§19).
+        .child(legend_bar(
+            &SharedString::from(format!("usage-strip-share-{key}")),
+            fraction,
+            theme.text_muted,
+            theme,
+            reduced_motion,
+        ))
+        .into_any_element()
+}
+
+/// Why a metric is not offered, phrased for the data that is missing.
+fn unavailable_reason(unavailable: &[&str]) -> String {
+    let mut reasons: Vec<String> = Vec::new();
+    if unavailable.contains(&"cost") {
+        reasons.push(tr!("usage.reason_needs_price_table"));
+    }
+    if unavailable.contains(&"latency") {
+        reasons.push(tr!("usage.reason_needs_request_gaps"));
+    }
+    if reasons.is_empty() {
+        String::new()
+    } else {
+        tr!(
+            "usage.not_shown",
+            metrics = unavailable.join(", "),
+            reasons = reasons.join("; ")
+        )
+    }
+}
+
+/// The metric cell model: the card's heading and the scope it reads, the
+/// figure, its change, the secondary line, and the interaction.
+struct KpiCell {
+    metric: sparkline::KpiMetric,
+    label: String,
+    /// The bucket the pointer is reading; `None` at rest (the range).
+    scope: Option<String>,
+    value: String,
+    /// Percent change from the previous period (at rest) or point (hovered).
+    change: Option<f64>,
+    sub: String,
+    tone: CellTone,
+    click: Option<ChartMetric>,
+}
+
+/// The board's heading for a card, in the register the page has always used.
+fn metric_label(metric: sparkline::KpiMetric) -> String {
+    match metric {
+        sparkline::KpiMetric::Requests => tr!("usage.metric_requests"),
+        sparkline::KpiMetric::Tokens => tr!("usage.metric_total_tokens"),
+        sparkline::KpiMetric::CacheRate => tr!("usage.metric_cache_hit_rate"),
+        sparkline::KpiMetric::Cost => tr!("usage.metric_cost"),
+    }
+}
+
+/// The range's change for one card. The cache card shows a rate, so it compares
+/// against the previous window's rate — not the cache volume the trend's Cache
+/// metric counts.
+fn range_delta(snapshot: &UsageSnapshot, metric: sparkline::KpiMetric) -> Option<f64> {
+    if metric == sparkline::KpiMetric::CacheRate {
+        // The comparison window carries totals only, which is all a rate needs.
+        let previous = snapshot.previous.as_ref()?.totals.cache_hit_rate()?;
+        let current = snapshot.summary.totals.cache_hit_rate()?;
+        return (previous.abs() > f64::EPSILON).then(|| (current - previous) / previous * 100.0);
+    }
+    snapshot.delta(metric.chart_metric()).pct
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CellTone {
+    Normal,
+    Muted,
+}
+
+// ── export ─────────────────────────────────────────────────────────────────
+
+/// Every request matching the filter, as CSV. The columns are the normalized
+/// record; nothing derived is exported as if it were measured.
+pub fn export_csv(index: &UsageIndex, filter: &UsageFilter) -> String {
+    let mut out = String::from(
+        "timestamp,session_id,session,workspace,provider,model,input,output,cache_read,cache_write,total,reasoning,cost_usd,duration_ms,outcome\n",
+    );
+    for record in &index.requests {
+        if !filter.matches_request(index, record) {
+            continue;
+        }
+        let session = index.session(record.session);
+        let (provider, model) = index.model_pair(record.model);
+        let stamp = super::model::local_datetime(record.ts_ms)
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            csv_field(&stamp),
+            csv_field(&session.id),
+            csv_field(&session.title),
+            csv_field(&index.workspace_of_session(record.session).path),
+            csv_field(&provider),
+            csv_field(&model),
+            record.tokens.input,
+            record.tokens.output,
+            record.tokens.cache_read,
+            record.tokens.cache_write,
+            record.tokens.total,
+            record.reasoning.unwrap_or(0),
+            record
+                .cost_usd
+                .map(|cost| format!("{cost:.6}"))
+                .unwrap_or_default(),
+            record.duration_ms.unwrap_or(0),
+            match record.outcome {
+                super::model::Outcome::Stop => "stop",
+                super::model::Outcome::ToolUse => "tool_use",
+                super::model::Outcome::Length => "length",
+                super::model::Outcome::Error => "error",
+                super::model::Outcome::Aborted => "aborted",
+            },
+        ));
+    }
+    out
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+/// The current view as JSON: the aggregates on screen, respecting the filter
+/// and the session search.
+pub fn export_json(index: &UsageIndex, snapshot: &UsageSnapshot, search: &str) -> String {
+    let summary = &snapshot.summary;
+    let totals = &summary.totals;
+    // Rows carry the interned id, not the raw one: resolve it so an export
+    // can be joined against pi's own session and model identifiers.
+    let breakdown = |rows: &[GroupRow], kind: &str| -> Vec<serde_json::Value> {
+        rows.iter()
+            .map(|row| {
+                let raw_id = match kind {
+                    "models" => index.model(row.id).id.clone(),
+                    "providers" => index.providers[row.id as usize].id.clone(),
+                    _ => index.workspaces[row.id as usize].path.clone(),
+                };
+                serde_json::json!({
+                    "id": raw_id,
+                    "label": row.label,
+                    "sub": row.sub,
+                    "requests": row.totals.requests,
+                    "tokens": row.totals.tokens.total,
+                    "input": row.totals.tokens.input,
+                    "output": row.totals.tokens.output,
+                    "cache_read": row.totals.tokens.cache_read,
+                    "cache_write": row.totals.tokens.cache_write,
+                    "cost_usd": row.totals.cost_usd,
+                    "share": row.share,
+                })
+            })
+            .collect()
+    };
+    let needle = search.trim().to_lowercase();
+    let sessions: Vec<serde_json::Value> = snapshot
+        .sessions
+        .iter()
+        .filter(|row| {
+            needle.is_empty()
+                || row.title.to_lowercase().contains(&needle)
+                || row.workspace.to_lowercase().contains(&needle)
+                || row.top_model.to_lowercase().contains(&needle)
+        })
+        .map(|row| {
+            serde_json::json!({
+                "session_id": index.session(row.session).id,
+                "title": row.title,
+                "workspace": row.workspace,
+                "top_model": row.top_model,
+                "models": row.models,
+                "started_ms": row.started_ms,
+                "ended_ms": row.ended_ms,
+                "requests": row.totals.requests,
+                "input": row.totals.tokens.input,
+                "output": row.totals.tokens.output,
+                "cache_read": row.totals.tokens.cache_read,
+                "cache_write": row.totals.tokens.cache_write,
+                "total": row.totals.tokens.total,
+                "cost_usd": row.totals.cost_usd,
+                "errors": row.totals.errors,
+                "tool_calls": row.tool_runs,
+                "tool_errors": row.tool_errors,
+            })
+        })
+        .collect();
+    let buckets: Vec<serde_json::Value> = snapshot
+        .buckets
+        .rows
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "start_ms": row.start_ms,
+                "label": row.label,
+                "requests": row.totals.requests,
+                "tokens": row.totals.tokens.total,
+                "input": row.totals.tokens.input,
+                "output": row.totals.tokens.output,
+                "cache_hit_rate": row.totals.cache_hit_rate(),
+                "errors": row.totals.errors,
+            })
+        })
+        .collect();
+    let errors: Vec<serde_json::Value> = snapshot
+        .errors
+        .rows
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "timestamp_ms": row.ts_ms,
+                "session_id": index.session(row.session).id,
+                "kind": row.kind.as_str(),
+                "model": index.model(row.model).label,
+                "message": row.message,
+            })
+        })
+        .collect();
+    let tools: Vec<serde_json::Value> = snapshot
+        .tools
+        .rows
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "tool": row.label,
+                "class": row.class.as_str(),
+                "calls": row.calls,
+                "errors": row.errors,
+                "avg_duration_ms": row.avg_duration_ms(),
+                "max_duration_ms": row.max_ms,
+            })
+        })
+        .collect();
+
+    let payload = serde_json::json!({
+        "generated_at_ms": super::collect::now_ms(),
+        "range": {
+            "preset": snapshot.filter.range.preset.as_str(),
+            "label": snapshot.filter.range.preset.as_str(),
+            "start_ms": snapshot.filter.range.start_ms,
+            "end_ms": snapshot.filter.range.end_ms,
+            "granularity": snapshot.series.granularity.as_str(),
+        },
+        "summary": {
+            "requests": totals.requests,
+            "turns": summary.turns,
+            "sessions": summary.sessions,
+            "models": summary.models,
+            "providers": summary.providers,
+            "workspaces": summary.workspaces,
+            "input": totals.tokens.input,
+            "output": totals.tokens.output,
+            "cache_read": totals.tokens.cache_read,
+            "cache_write": totals.tokens.cache_write,
+            "total": totals.tokens.total,
+            "reasoning": totals.reasoning,
+            "cache_hit_rate": totals.cache_hit_rate(),
+            "errors": totals.errors,
+            "aborted": totals.aborted,
+            "avg_duration_ms": totals.avg_duration_ms(),
+            "duration_samples": totals.duration_samples,
+            "tool_calls": summary.tool_runs,
+            "bash_calls": summary.bash_runs,
+            "tool_errors": summary.tool_errors,
+            "cost_usd": totals.cost_usd,
+            "priced_requests": totals.priced_requests,
+        },
+        "previous": snapshot.previous.as_ref().map(|previous| {
+            serde_json::json!({
+                "requests": previous.totals.requests,
+                "total": previous.totals.tokens.total,
+                "input": previous.totals.tokens.input,
+                "output": previous.totals.tokens.output,
+                "cache_read": previous.totals.tokens.cache_read,
+                "cache_write": previous.totals.tokens.cache_write,
+                "cost_usd": previous.totals.cost_usd,
+                "errors": previous.totals.errors,
+                "avg_duration_ms": previous.totals.avg_duration_ms(),
+            })
+        }),
+        "series": snapshot.series.points.iter().map(|point| {
+            serde_json::json!({
+                "start_ms": point.start_ms,
+                "label": point.label,
+                "requests": point.totals.requests,
+                "input": point.totals.tokens.input,
+                "output": point.totals.tokens.output,
+                "cache_read": point.totals.tokens.cache_read,
+                "cache_write": point.totals.tokens.cache_write,
+                "total": point.totals.tokens.total,
+                "errors": point.totals.errors,
+                "cost_usd": point.totals.cost_usd,
+                "avg_duration_ms": point.totals.avg_duration_ms(),
+            })
+        }).collect::<Vec<_>>(),
+        "models": breakdown(&snapshot.models.rows, "models"),
+        "providers": breakdown(&snapshot.providers.rows, "providers"),
+        "workspaces": breakdown(&snapshot.workspaces.rows, "workspaces"),
+        "sessions": sessions,
+        "buckets": buckets,
+        // The calendar's days, in the same shape as the buckets/series so an
+        // export can be joined day by day. The calendar is a fixed trailing
+        // year, independent of the date range, and only the days it actually
+        // covers are exported.
+        "calendar": snapshot
+            .calendar
+            .in_range()
+            .map(|day| {
+                serde_json::json!({
+                    "start_ms": day.start_ms,
+                    "requests": day.totals.requests,
+                    "input": day.totals.tokens.input,
+                    "output": day.totals.tokens.output,
+                    "cache_read": day.totals.tokens.cache_read,
+                    "cache_write": day.totals.tokens.cache_write,
+                    "total": day.totals.tokens.total,
+                    "errors": day.totals.errors,
+                    "cost_usd": day.totals.cost_usd,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "tools": tools,
+        "errors_detail": errors,
+    });
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+}

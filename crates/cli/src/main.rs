@@ -5,6 +5,10 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use harness_cli::durable::{self, DurableSession};
+use harness_cli::{
+    exec, host, host_service, llm, memory as memory, rest, routes, runner, server, sop, sse, tools,
+};
 use harness_context::effort::Effort;
 use harness_context::{validate_summary, BudgetPolicy, SummaryDefect, ToolResultTier};
 use harness_core::event::{EventKind, EventLog, Projection};
@@ -20,19 +24,6 @@ use harness_plugin::{
 };
 use std::path::PathBuf;
 
-mod durable;
-mod exec;
-mod host;
-mod host_service;
-mod llm;
-mod memory;
-mod rest;
-mod routes;
-mod runner;
-mod server;
-mod sop;
-mod sse;
-mod tools;
 
 #[derive(Parser)]
 #[command(name = "harness", version, about = "personal-AgentHarness")]
