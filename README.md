@@ -19,28 +19,46 @@
 | L7 扩展 | 策略链、作用域覆盖规则、系统提示只追加 | 24 |
 | Go 插件 | JSON-RPC over stdio | — |
 
-**209 个测试全部通过，零编译警告。**
+**311 个测试全部通过，零编译警告。**
 
-## 桌面与手机
+## 桌面版（纯 Rust，3.3MB）
 
-同一套内核，桌面和手机都是客户端（参考 Cindy 的 host 架构）。
-UI 用 **[assistant-ui](https://github.com/assistant-ui/assistant-ui)**（MIT，13K 星），不自写界面。
+用 **GPUI**（Zed 的 GPU 渲染框架），与 orbit 同款。无 webview、无 Node。
 
 ```bash
-# 1. 后端
-cargo build --release
-HARNESS_WORKDIR=/path/to/project ./target/release/harness --dir .harness serve --port 7788
-
-# 2. 界面
-cd apps/ui && pnpm install && HARNESS_URL=http://127.0.0.1:7788 pnpm dev
-
-# 3. 手机访问（监听局域网）
-./target/release/harness serve --bind 0.0.0.0 --port 7788
-# 手机浏览器打开 http://<桌面局域网IP>:7788
+cargo build --release -p harness-desktop
+./scripts/bundle-macos.sh
+open dist/hiq-harness.app
 ```
 
-UI 选型的完整对比见 [`docs/UI-RESEARCH.md`](docs/UI-RESEARCH.md)，
-架构与实测记录见 [`docs/MULTI-DEVICE.md`](docs/MULTI-DEVICE.md)。
+界面：侧栏（对话/事件/记忆/SOP）+ 对话区 + 输入区。
+设计令牌移植自 orbit，而 orbit 是 Zed `ui` crate 的一对一移植。
+详见 [`docs/DESKTOP.md`](docs/DESKTOP.md)。
+
+## 手机连接
+
+同一套内核，桌面和手机都是客户端（参考 Cindy 的 host 架构）。
+
+```bash
+HARNESS_WORKDIR=/path/to/project ./target/release/harness --dir .harness serve --port 7788
+# 手机（同局域网）
+./target/release/harness serve --bind 0.0.0.0 --port 7788
+```
+
+架构与协议见 [`docs/MULTI-DEVICE.md`](docs/MULTI-DEVICE.md)。
+
+## 流式输出
+
+后端提供 SSE 端点 `POST /run/stream`，标准 W3C Server-Sent Events：
+
+```
+event: start
+event: step       ← 每步即时推送
+event: tool
+event: tool_done
+event: text
+event: done
+```
 
 ## 已接入真实流程的部分
 
@@ -164,6 +182,7 @@ crates/
   persist/      L5 收据、检查点、租约
   orchestrate/  L6 SOP DAG 编排
   plugin/       L7 扩展宿主与策略链
+  desktop/      GPUI 原生桌面（纯 Rust）
   cli/          可执行入口
                   ├─ llm.rs / tools.rs   真实模型与工具
                   ├─ durable.rs          L5 持久化会话（kiso 六契约）
@@ -177,7 +196,8 @@ crates/
                   ├─ server.rs           手写 HTTP + WebSocket
                   └─ wire（在 core）     多端协议（Cindy device-link）
 plugins/        Go 插件（JSON-RPC over stdio）
-apps/ui/        桌面与手机界面（Next.js + assistant-ui，搬自官方模板）
+vendor/gpui/    vendored GPUI（参考 orbit 的做法）
+scripts/        打包脚本
 docs/           实测报告与架构说明
 ```
 
