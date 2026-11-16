@@ -2776,10 +2776,11 @@ impl OrbitApp {
         // metadata line.
         app.refresh_branch_status(cx);
         app.refresh_sidebar_branches(cx);
-        // Check for a newer pi in the background; a newer release installs
-        // itself through pi's own updater (see `pi_update_ui`).
-        app.check_pi_update_on_launch(cx);
-        app.check_plugin_updates_on_launch(cx);
+        // 改造：上游在这里检查 pi 的新版本并自我更新。本项目没有 pi，
+        // 运行时是内嵌的 harness 内核，没有可更新的宿主二进制，因此跳过。
+        // 保留调用点注释，说明这个能力是被有意关掉的，而不是忘了接。
+        // 改造：插件更新探测读的是 pi 的扩展生态（npm 包 + 版本比对），
+        // harness 没有这套机制，跳过。
         // Route banner clicks back to their session (bundle builds only).
         notifications::init();
         // A first launch with notifications on shows macOS's permission
