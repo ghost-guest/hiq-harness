@@ -32,3 +32,7 @@ apps/ui/.env*.local
 # assistant-ui 脚手架自带的 agent skills（不属于本项目）
 apps/ui/.agents/
 apps/ui/.claude/
+
+# GPUI 是 vendored 的（参考 orbit 的做法），只忽略其构建产物
+vendor/gpui/target/
+dist/
