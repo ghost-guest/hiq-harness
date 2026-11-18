@@ -131,12 +131,13 @@ pub fn run_task<W: Write>(
     state_dir: &Path,
     workdir: &Path,
     task: &str,
+    history: &[serde_json::Value],
     sink: W,
     abort: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<()> {
     let cfg = harness_cli::exec::ExecConfig::from_env();
     let mut sink = AbortableSink { inner: sink, abort };
-    harness_cli::sse::stream_task(&mut sink, state_dir, workdir, task, &cfg)
+    harness_cli::sse::stream_task(&mut sink, state_dir, workdir, task, history, &cfg)
 }
 
 /// 包一层写入端：置位后拒绝继续写出，内核的 `write_all` 会因此报错并退出。
@@ -200,8 +201,16 @@ pub fn translate(raw: &RawSseEvent) -> Option<Event> {
         },
 
         // ── 文本流（pi `json.md` › Reconstruct streaming messages）───
-        // `text_delta` 必须带 `contentIndex`，orbit 的 transcript 靠它定位块。
+        //
+        // `text` 是**最终定稿**：正文已经通过 `text_delta` 逐段推给界面并
+        // 累加在 `step.text` 里了。这里若再追加一遍全文，界面会显示两遍
+        // （实测：「记住了记住了」）。所以 `text` 不再产出增量事件 ——
+        // 它的用途只是「这一轮有正式回复」，由 `message_end` 负责收尾。
         "text" => Event::MessageUpdate {
+            usage: None,
+            assistant: None,
+        },
+        "text_delta" => Event::MessageUpdate {
             usage: None,
             assistant: Some(crate::types::AssistantMessageEvent::TextDelta {
                 delta: v.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
@@ -322,14 +331,28 @@ mod tests {
         ));
     }
 
+    /// `text_delta` 才是正文增量。
     #[test]
     fn text_delta_carries_delta() {
-        match tr("text", "{\"text\":\"你好\"}") {
+        match tr("text_delta", "{\"text\":\"你好\"}") {
             Some(Event::MessageUpdate {
                 assistant: Some(crate::types::AssistantMessageEvent::TextDelta { delta }),
                 ..
             }) => assert_eq!(delta, "你好"),
             other => panic!("意外的映射：{other:?}"),
+        }
+    }
+
+    /// 回归：`text` 是最终定稿，不能再产出增量。
+    ///
+    /// 内核先发 `text_delta`（逐段）再发 `text`（全文）。如果 `text` 也
+    /// 映射成 TextDelta，UI 会把全文追加到已累积的正文后面，界面上就
+    /// 显示两遍（实测：「记住了记住了」「BLUE-7749BLUE-7749」）。
+    #[test]
+    fn final_text_does_not_append_again() {
+        match tr("text", "{\"text\":\"你好\"}") {
+            Some(Event::MessageUpdate { assistant: None, .. }) => {}
+            other => panic!("`text` 不该再产出增量，实际 {other:?}"),
         }
     }
 

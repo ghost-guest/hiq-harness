@@ -18,7 +18,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-APP_NAME="Orbit Pi Alpha"
+APP_NAME="hiq Alpha"
 EXEC_NAME="orbit-pi"
 BUNDLE_ID="dev.orbit.pi.alpha"
 ICON="assets/icons/alpha-logo.icns"

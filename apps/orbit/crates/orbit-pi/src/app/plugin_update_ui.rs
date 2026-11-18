@@ -1,4 +1,10 @@
+// 改造：插件更新检查在启动时已关闭（见 `check_plugin_updates_on_launch`
+// 上的注释），该方法因此没有调用点。保留实现，日后接回自己的更新渠道时用。
+// 有意的死代码。
+#![allow(dead_code)]
+
 use super::*;
+
 use gpui::Timer;
 
 /// Let the session startup work settle before checking package registries.

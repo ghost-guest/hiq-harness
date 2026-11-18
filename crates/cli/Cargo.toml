@@ -27,3 +27,15 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
 clap.workspace = true
+# LLM 传输层：aimux（MIT，已发布 crates.io）。
+#
+# 选它而不是继续手写 / genai：
+#   - 它是 dim（arcships/dim）在生产里用的传输层，dim 的模型宿主直接依赖它；
+#   - 一个抽象同时覆盖 OpenAI Chat Completions、OpenAI Responses、
+#     Anthropic Messages、Gemini GenerateContent —— 换家模型不用重写传输；
+#   - 已发布到 crates.io（0.6.1），不需要 fork dim 的 67 万行；
+#   - 强类型事件（TextStreamPart）带 finish_reason 枚举、类型化 usage
+#     （input_token_details.cache_read_tokens），不必自己从 JSON 里抠。
+aimux-core = "0.6.1"
+aimux-providers = "0.6.1"
+futures = "0.3"

@@ -4,7 +4,7 @@
 //! 它保留结构化的工具调用链（API 需要），而不是纯文本投影。
 
 use crate::durable::{CallId, DurableSession, EffectOutcome, ExecutionId, InvocationSeq};
-use crate::llm::{parse_model_response, OpenAiClient};
+use crate::llm::OpenAiClient;
 use crate::memory::ProjectMemory;
 use crate::tools::LocalTools;
 use harness_context::cache::{CacheStats, HeaderFingerprint};
@@ -23,7 +23,14 @@ pub struct RunConfig {
     pub supported_efforts: Vec<Effort>,
     /// 系统提示
     pub system: String,
-    /// 工具结果降到「摘要」档的阈值（字符数）。
+    /// 会话里已有的历史消息（不含 system）。
+    ///
+    /// 按 OpenAI 的 chat 格式给：`[{"role":"user","content":"…"}, …]`。
+    /// **必须只追加、不改写**——前缀一变，服务端的 KV 缓存就整段失效
+    /// （DeepSeek 的缓存以「完整前缀单元」为单位匹配）。所以这里拿到的
+    /// 历史会原样拼在 system 之后、当前 task 之前，不做任何重排或去重。
+    pub history: Vec<Value>,
+    /// 摘要阈值：工具结果降到「摘要」档的字符数。
     /// 来自 Deva 的三段式：Full → Summary → DiskRef。
     pub summary_threshold: usize,
     /// 工具结果降到「磁盘引用」档的阈值（字符数）。
@@ -38,6 +45,7 @@ impl Default for RunConfig {
             max_steps: 0,
             effort: Some(Effort::High),
             supported_efforts: Vec::new(),
+            history: Vec::new(),
             system: "你是一个编程助手。用工具完成用户的任务，不要臆造文件内容。\
                      完成后用一句话说明你做了什么。"
                 .into(),
@@ -81,6 +89,11 @@ pub enum RunEvent {
     GuardNote { note: String },
     /// 模型给出最终文本
     FinalText { text: String },
+    /// 流式增量文本（模型逐段返回，界面边收边显示）。
+    ///
+    /// 与 `FinalText` 的区别：这条是补充显示用，最终落盘仍以 `FinalText`
+    /// 为准。两者都会出现（增量在前、最终文本在后）。
+    TextDelta { text: String },
     /// 思考/中间文本。预留给 token 级流式（模型侧逐段返回时用）。
     #[allow(dead_code)]
     Thinking { text: String },
@@ -88,6 +101,29 @@ pub enum RunEvent {
 
 /// 事件回调。返回 false 表示中止。
 pub type EventSink<'a> = &'a mut dyn FnMut(RunEvent);
+
+/// 把会话历史里的一条消息转成可发出去的 chat 消息。
+///
+/// 会话文件里混着会话头、工具块、空内容等，只有带 `role` 且内容非空的
+/// 才适合回填。`assistant` 的空回复也要丢掉 —— 发一个空 content 的
+/// assistant 消息会让部分服务端直接 400。
+fn sanitize_history_message(v: &Value) -> Option<Value> {
+    let role = v.get("role")?.as_str()?;
+    if !matches!(role, "user" | "assistant" | "system") {
+        return None;
+    }
+    let content = v.get("content")?;
+    let empty = match content {
+        Value::String(s) => s.trim().is_empty(),
+        Value::Array(a) => a.is_empty(),
+        Value::Null => true,
+        _ => false,
+    };
+    if empty {
+        return None;
+    }
+    Some(json!({ "role": role, "content": content }))
+}
 
 pub fn run_task(
     client: &OpenAiClient,
@@ -105,11 +141,16 @@ pub fn run_task(
     // 开场召回相关记忆并注入。
     // 放在 system 之后、user 之前 —— 这样前缀仍然只增不改。
     let recalled = memory.recall_block(task, 5);
-    let mut history: Vec<Value> = vec![json!({"role": "system", "content": cfg.system})];
+    let mut history_msgs: Vec<Value> = vec![json!({"role": "system", "content": cfg.system})];
     if let Some(block) = &recalled {
-        history.push(json!({"role": "system", "content": block}));
+        history_msgs.push(json!({"role": "system", "content": block}));
     }
-    history.push(json!({"role": "user", "content": task}));
+    // 会话历史：原样接在 system 之后、本次 task 之前。
+    // 只追加、不改写 —— 服务端的 KV 缓存按「完整前缀单元」匹配，
+    // 任何重排都会让前面整段缓存作废（实测：无历史时命中率 0%，
+    // 同前缀连打三次可到 94.2%）。
+    history_msgs.extend(cfg.history.iter().filter_map(sanitize_history_message));
+    history_msgs.push(json!({"role": "user", "content": task}));
 
     log.append(EventKind::UserMessage {
         text: task.to_string(),
@@ -136,20 +177,41 @@ pub fn run_task(
         if !pending.is_empty()
             || harness_core::event::Projection::new(&events).has_unresolved_uncertain()
         {
+            let notice = format!("存在未决的副作用，需人工裁决：{}", pending.join(", "));
+            // 必须把停止原因发出去：不发的话界面上只剩工具卡片，
+            // 用户看不到「为什么停了」（实测就是这样：整轮无 text 事件）。
+            sink(RunEvent::FinalText {
+                text: notice.clone(),
+            });
+            log.append(EventKind::AssistantMessage {
+                text: notice.clone(),
+                blocks: vec![],
+            });
+            log.commit()?;
             return Ok(RunOutcome {
                 steps,
                 guard_events,
-                final_text: format!("存在未决的副作用，需人工裁决：{}", pending.join(", ")),
+                final_text: notice,
                 cache: cache_stats.clone(),
                 effort: effort_plan.clone(),
             });
         }
 
         if cfg.max_steps > 0 && steps >= cfg.max_steps {
+            // 同理：跑满步数也要告诉用户，否则界面一片空白。
+            let notice = format!("已达步数上限（{} 步），任务未完成。", cfg.max_steps);
+            sink(RunEvent::FinalText {
+                text: notice.clone(),
+            });
+            log.append(EventKind::AssistantMessage {
+                text: notice.clone(),
+                blocks: vec![],
+            });
+            log.commit()?;
             return Ok(RunOutcome {
                 steps,
                 guard_events,
-                final_text: "已达步数上限".into(),
+                final_text: notice,
                 cache: cache_stats.clone(),
                 effort: effort_plan.clone(),
             });
@@ -159,19 +221,31 @@ pub fn run_task(
         invocation_in_step = 0u64;
         sink(RunEvent::StepStarted { step: steps });
 
-        // 一次模型调用
-        // 关键：不带 reasoning 字段时完全省略，
-        // 不要发出 "reasoning": null —— 多余的字段会改变请求字节。
-        let mut body = json!({
-            "model": client.model,
-            "messages": history,
-            "tools": tool_specs,
-            "max_tokens": 8192,
-        });
-        if let Some(e) = effective_effort {
-            body["reasoning"] = json!({"effort": e.as_str()});
-        }
-        let (resp, usage) = client.post_public(&body)?;
+        // 一次模型调用（真流式）。
+        //
+        // `reasoning` 由 transport 的 `with_effort` 注入：不带时完全省略，
+        // 不发出 "reasoning": null —— 多余字段会改变请求字节、破坏前缀缓存。
+        //
+        // 正文增量逐段推给界面，不等整轮结束 —— 这是原先
+        // curl + .output() 做不到的（必须等进程退出才能拿到任何字节）。
+        //
+        // 边发边攒：这段正文是模型本步的「思考痕迹」，下一步必须原样
+        // 回灌进历史。只推给界面、不记历史的话，模型看不到自己上一步说过
+        // 什么，会换个说法把同一句话再讲一遍（实测：同一句出现两遍）。
+        let mut streamed_text = String::new();
+        let done = client.complete_with_tools(
+            history_msgs.clone(),
+            tool_specs.clone(),
+            8192,
+            |delta| {
+                streamed_text.push_str(delta);
+                sink(RunEvent::TextDelta {
+                    text: delta.to_string(),
+                });
+            },
+        )?;
+
+        let usage = done.usage;
         let p_tok = usage.prompt_tokens.unwrap_or(0);
         let c_tok = usage.cached_tokens.unwrap_or(0);
 
@@ -200,7 +274,17 @@ pub fn run_task(
             );
         }
 
-        let model_resp = parse_model_response(&resp)?;
+        // 传输层已经给出结构化结果，不需要再解析原始 JSON。
+        let model_resp = if !done.tool_calls.is_empty() {
+            harness_core::agent_loop::ModelResponse::ToolCalls(done.tool_calls.clone())
+        } else {
+            let text = done.text.clone().unwrap_or_default();
+            if done.stop_reason.as_deref() == Some("Length") {
+                harness_core::agent_loop::ModelResponse::Length(text)
+            } else {
+                harness_core::agent_loop::ModelResponse::Text(text)
+            }
+        };
 
         match model_resp {
             harness_core::agent_loop::ModelResponse::Text(t) => {
@@ -225,8 +309,8 @@ pub fn run_task(
                 });
                 log.commit()?;
                 // 截断 → 要求续写
-                history.push(json!({"role": "assistant", "content": t}));
-                history.push(json!({
+                history_msgs.push(json!({"role": "assistant", "content": t}));
+                history_msgs.push(json!({
                     "role": "user",
                     "content": "上一条回复被长度截断，请从中断处继续，不要重复已说过的内容。"
                 }));
@@ -248,9 +332,16 @@ pub fn run_task(
                         })
                     })
                     .collect();
-                history.push(json!({
+                // assistant 消息带上本步已流出的正文（可能为空）。
+                // 空正文时仍要发 `null` —— 带 tool_calls 的 assistant 消息
+                // 允许 content 为空，但把空串发出去会多占字节、改变前缀。
+                history_msgs.push(json!({
                     "role": "assistant",
-                    "content": null,
+                    "content": if streamed_text.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(streamed_text.clone())
+                    },
                     "tool_calls": api_calls,
                 }));
 
@@ -265,7 +356,7 @@ pub fn run_task(
                                     error: format!("[被守卫拦下] {reason}"),
                                 },
                             });
-                            history.push(json!({
+                            history_msgs.push(json!({
                                 "role": "tool",
                                 "tool_call_id": req.id,
                                 "content": format!("[被守卫拦下] {reason}"),
@@ -396,7 +487,7 @@ pub fn run_task(
                         chars: out_text.chars().count(),
                     });
 
-                    history.push(json!({
+                    history_msgs.push(json!({
                         "role": "tool",
                         "tool_call_id": req.id,
                         "content": out_text,
@@ -407,7 +498,7 @@ pub fn run_task(
                 steps += 1;
                 let _ = session.save_checkpoint(
                     log.next_seq_hint(),
-                    &format!("step {steps} 完成，历史 {} 条消息", history.len()),
+                    &format!("step {steps} 完成，历史 {} 条消息", history_msgs.len()),
                     Vec::new(),
                 );
             }
@@ -455,5 +546,59 @@ fn first_line_summary(text: &str) -> String {
         format!("{t}…")
     } else {
         line.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_history_message;
+    use serde_json::json;
+
+    /// 会话历史必须能原样拼进请求。
+    ///
+    /// 这是「记得上文」与「缓存命中」的共同前提：没有历史时每轮只有
+    /// 几十 token 的前缀，服务端缓存单元根本不会命中（实测 0%；
+    /// 同前缀连打三次可到 94.2%）。
+    #[test]
+    fn history_messages_survive_sanitizing() {
+        let user = json!({"role": "user", "content": "第一句"});
+        let assistant = json!({"role": "assistant", "content": "第一答"});
+        for m in [&user, &assistant] {
+            let out = sanitize_history_message(m).expect("应保留");
+            assert_eq!(out["role"], m["role"]);
+            assert_eq!(out["content"], m["content"]);
+        }
+    }
+
+    /// 空回复、无 role、tool 块都不能发出去。
+    ///
+    /// 发一条 `content: ""` 的 assistant 消息，部分服务端直接 400；
+    /// 这也是会话文件里那些半成品条目最容易造成的问题。
+    #[test]
+    fn broken_history_entries_are_dropped() {
+        let cases = [
+            json!({"role": "assistant", "content": ""}),
+            json!({"role": "assistant", "content": "   "}),
+            json!({"role": "assistant", "content": []}),
+            json!({"role": "assistant", "content": null}),
+            json!({"content": "没有 role"}),
+            json!({"role": "tool", "content": "工具结果"}),
+            json!({"role": "system"}),
+        ];
+        for c in cases {
+            assert!(
+                sanitize_history_message(&c).is_none(),
+                "不该发出去：{c}"
+            );
+        }
+    }
+
+    /// sanitize 不能改动内容字节 —— 前缀一变缓存全失效。
+    #[test]
+    fn sanitizing_preserves_content_bytes() {
+        let text = "含中文与 emoji 的回复 🎯，不能删改任何字符";
+        let m = json!({"role": "assistant", "content": text});
+        let out = sanitize_history_message(&m).unwrap();
+        assert_eq!(out["content"].as_str().unwrap(), text);
     }
 }

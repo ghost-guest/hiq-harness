@@ -7,6 +7,11 @@
 //! `pi mcp list --json` probe into per-server runtime state. Connection
 //! testing, tool discovery, and reconnection are therefore always Pi's
 //! answer, never an Orbit approximation.
+// 改造：MCP 探测（`probe_with_agent_dir` 等）已改成零进程实现 ——
+// harness 内核没有 pi 那种「外部运行时持有 MCP 连接」的模型，
+// 探测结果恒为默认值。原本解析探测输出的代码因此没有调用点，
+// 保留作对照。有意的死代码。
+#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};

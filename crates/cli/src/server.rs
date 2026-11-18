@@ -522,6 +522,7 @@ fn http_dispatch(
                 std::path::Path::new(".harness"),
                 &workdir,
                 task,
+                &[],
                 &cfg,
             )?;
             return Ok(());

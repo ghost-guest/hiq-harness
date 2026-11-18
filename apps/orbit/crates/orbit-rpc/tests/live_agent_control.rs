@@ -123,6 +123,11 @@ fn live_agent_control_commands_round_trip() {
 
 /// A failed command must report `success: false` with a non-empty `error`
 /// string — the shape the app's error banner consumes (docs #error-handling).
+///
+/// **改造说明**：上游用「设置一个不存在的模型」来触发失败。本项目走
+/// OpenAI 兼容端点，内核没有模型目录（模型名由请求方给，服务端校验），
+/// 所以任何模型名都是合法请求、`set_model` 不会失败。这里改用一条
+/// 真实会拒绝的路径：还没有会话时 clone。
 #[test]
 fn live_failed_command_reports_error() {
     if !pi_available() {
@@ -133,12 +138,10 @@ fn live_failed_command_reports_error() {
     let client =
         PiClient::spawn(&repo_root(), Some(Path::new("/tmp/orbit-pi-sessions"))).expect("spawn pi");
 
+    // 刚 spawn 出来还没有会话，clone 必然被拒。
     let (_, rx) = client
-        .send(CommandBody::SetModel {
-            provider: "no-such-provider".into(),
-            model_id: "no-such-model".into(),
-        })
-        .expect("send set_model");
+        .send(CommandBody::CloneSession)
+        .expect("send clone_session");
 
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -149,15 +152,15 @@ fn live_failed_command_reports_error() {
                 error,
                 ..
             }) => {
-                assert_eq!(command, "set_model");
-                assert!(!success, "invalid model should fail");
+                assert_eq!(command, "clone_session");
+                assert!(!success, "clone without a session should fail");
                 let error = error.expect("failure carries an error string");
                 assert!(!error.is_empty(), "error string is empty");
                 eprintln!("✅ failed command reported: {error}");
                 break;
             }
             Ok(_) => continue,
-            Err(_) if Instant::now() > deadline => panic!("set_model timed out"),
+            Err(_) if Instant::now() > deadline => panic!("clone_session timed out"),
             Err(_) => continue,
         }
     }

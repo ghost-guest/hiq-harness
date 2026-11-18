@@ -530,7 +530,20 @@ fn head_or_empty(cwd: &Path) -> String {
 }
 
 fn diff_output(cwd: &Path, from: &str, to: &str, modes: &[&str]) -> anyhow::Result<String> {
-    diff_output_paths(cwd, from, to, modes, &["."])
+    diff_output_paths(cwd, from, to, modes, &diff_pathspecs())
+}
+
+/// 变更统计要排除的路径。
+///
+/// `.harness/` 是**内核自己的状态**（`events.jsonl` / `memory.json` /
+/// `session.json` / `tool-results/`），每一轮任务都会改写它。如果把它算进
+/// 「更改了 N 个文件」，用户会看到自己根本没动过的内部状态被列为改动
+/// （实测：一个只问了一句话的任务列出「更改了 3 个文件」）。
+///
+/// 用 git 原生的 pathspec 排除语法，而不是在解析处过滤 —— 这样行数统计
+/// （`--numstat`）也不会把它们的 `+222 -5` 算进总数。
+fn diff_pathspecs() -> Vec<&'static str> {
+    vec![".", ":(exclude).harness/**"]
 }
 
 fn diff_output_paths(

@@ -101,9 +101,12 @@ impl<E: Engine> Supervisor<E> {
 
                 // thread/start is the only place a new thread id appears.
                 if method == "thread/start" {
+                    // Two dialects: stdio nests the id under `thread`, the HTTP
+                    // runtime returns the thread object at the top level.
                     if let Some(id) = reply
                         .pointer("/thread/id")
                         .or_else(|| reply.get("threadId"))
+                        .or_else(|| reply.get("id"))
                         .and_then(Value::as_str)
                     {
                         self.state.thread_id = Some(id.to_string());
@@ -112,6 +115,10 @@ impl<E: Engine> Supervisor<E> {
                 // A prompt stashed while the thread was being created runs now,
                 // and its thread id is the one the caller gets back.
                 if let Some(text) = self.state.pending_prompt.take() {
+                    if self.state.thread_id.is_none() {
+                        // Never swallow a prompt because a thread id went missing.
+                        anyhow::bail!("engine created no thread id; prompt not sent: {text:?}");
+                    }
                     if let Some(thread) = self.state.thread_id.clone() {
                         self.guards.begin_turn();
                         self.text_buffer.clear();
@@ -384,6 +391,24 @@ mod tests {
         // replay: same projection from disk, no writes
         let replayed = crate::timebus::Log::open(&path).unwrap().project();
         assert_eq!(replayed.messages, proj.messages);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn http_shaped_thread_reply_still_runs_the_prompt() {
+        // The HTTP runtime returns {"id": "thr_…"} at the top level, not {"thread":{"id":…}}.
+        let engine = MockEngine::new(|method, _| match method {
+            "thread/start" => json!({"id": "thr_http", "model": "deepseek-flash"}),
+            "prompt/run" => json!({"output": "hi", "model": "deepseek-flash"}),
+            _ => json!({}),
+        });
+        let log = tmp_log("http-shape");
+        let path = log.path().to_path_buf();
+        let mut sup = Supervisor::new(engine, log, 128_000);
+        let (reply, _) = sup.handle("Prompt", json!({"text":"hi"})).unwrap();
+        assert_eq!(sup.state.thread_id.as_deref(), Some("thr_http"));
+        assert!(sup.engine.calls().iter().any(|c| c == "prompt/run"), "prompt was dropped");
+        assert_eq!(reply["output"], "hi");
         let _ = std::fs::remove_file(&path);
     }
 

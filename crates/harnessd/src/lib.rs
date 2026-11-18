@@ -11,6 +11,7 @@
 pub mod cacheguard;
 pub mod engine;
 pub mod guards;
+pub mod http_engine;
 pub mod mapping;
 pub mod orbit_compat;
 pub mod plugins;

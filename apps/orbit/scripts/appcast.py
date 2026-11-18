@@ -50,7 +50,7 @@ RSS_HEADER = (
     '<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" '
     'version="2.0">\n'
     "  <channel>\n"
-    "    <title>Orbit Pi</title>\n"
+    "    <title>hiq</title>\n"
 )
 RSS_FOOTER = "  </channel>\n</rss>\n"
 

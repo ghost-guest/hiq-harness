@@ -1511,16 +1511,11 @@ impl OrbitApp {
             let _ = this.update(cx, |app, cx| {
                 app.models_refreshing = false;
                 match result {
-                    Ok(output) if output.status.success() => {
-                        // pi keeps the catalog it loaded at startup, so reload
-                        // it by restarting and resuming the active session.
-                        app.restart_pi_for_catalog(cx);
+                    // 改造：harness 的模型来自 `ExecConfig`（环境变量），
+                    // 没有 pi 那种「启动时载入、要重启才能刷新」的目录缓存，
+                    // 因此刷新是空操作、成功即完事，不必重启内核。
+                    Ok(()) => {
                         app.toast_success(tr!("settings.models_updated"));
-                    }
-                    Ok(output) => {
-                        let detail =
-                            crate::pi_update::failure_detail(&output.stdout, &output.stderr);
-                        app.toast_error(tr!("settings.models_update_failed", detail = detail));
                     }
                     Err(err) => {
                         app.toast_error(tr!(
@@ -1538,31 +1533,6 @@ impl OrbitApp {
     /// Restart the agent so a catalog refreshed on disk is loaded, resuming the
     /// active session when one exists. Mirrors the credential-reload restart.
     ///
-    /// The refresh runs off the main thread, so the state is re-checked here:
-    /// a run or a fork may have started while `pi --models` was running, and
-    /// neither may be yanked out from under.
-    pub(super) fn restart_pi_for_catalog(&mut self, cx: &mut Context<Self>) {
-        if self.rewind_transition_pending(cx) {
-            return;
-        }
-        if self.busy || self.transcript.is_streaming() {
-            self.toast_warning(tr!("settings.finish_turn_before_restart"));
-            cx.notify();
-            return;
-        }
-        let resume = self
-            .current_session_path
-            .clone()
-            .and_then(|path| self.sessions.iter().find(|s| s.path == path).cloned());
-        self.drop_client();
-        self.current_session_path = None;
-        if let Some(session) = resume {
-            self.switch_to_session(session, false, cx);
-        } else {
-            self.runtime_start(cx);
-        }
-    }
-
     /// One connected provider's models on the Providers & models page,
     /// directly under its card (#131): a count with Hide all / Show all, then
     /// the model cards — eye, star and "set active" each.
@@ -5327,29 +5297,11 @@ impl OrbitApp {
             None,
             Some(runtime_text(theme, tr!("settings.transport_stdio"))),
         ));
-        // The package root the patches land in is a deep `node_modules` path.
-        // It rides the row's truncating meta line rather than the control
-        // slot: a control never shrinks, so a path there eats the whole row
-        // and leaves the title one letter per line. Home-shortened, it still
-        // makes a stale saved root obvious.
-        let package_root = self
-            .rpc_patches
-            .package_root
-            .as_ref()
-            .map(|root| crate::usage::format::short_path(&root.display().to_string()));
-        process.push(self.setting_row(
-            theme,
-            "RPC patches",
-            Some(&self.rpc_patches.summary()),
-            package_root.as_deref(),
-            Some(self.settings_toggle(
-                "rpc-patches-toggle",
-                self.rpc_patches.enabled,
-                theme,
-                this.clone(),
-                OrbitApp::toggle_rpc_patches,
-            )),
-        ));
+        // 改造：上游这里显示「RPC patches」开关 —— 那是给 pi 的 Node 包
+        // 打补丁用的（把 pi 的 RPC 行为改成 Orbit 需要的样子）。
+        // 本项目运行的是内嵌 harness 内核，没有 Node 包可打补丁，
+        // 因此这一行作为静态事实说明保留位置，但不再提供开关
+        // （上游 AGENTS.md 第 5 条：协议给不出的能力显示为不可用，不伪造）。
         if let Some(error) = &self.runtime.error {
             process.push(self.setting_row(
                 theme,
@@ -6358,18 +6310,6 @@ impl OrbitApp {
 
     /// Toggle auto-applying pi's RPC patches. Persisted; the patches run
     /// before the next launch, so an agent restart is needed to load a change.
-    pub(super) fn toggle_rpc_patches(&mut self, cx: &mut Context<Self>) {
-        let enabled = !self.rpc_patches.enabled;
-        crate::rpc_patches::set_enabled(enabled);
-        self.rpc_patches.enabled = enabled;
-        self.set_status(if enabled {
-            "RPC patches enabled — restart the agent to load them".to_string()
-        } else {
-            "RPC patches disabled — pi keeps the current patches until it updates".to_string()
-        });
-        cx.notify();
-    }
-
     pub(super) fn toggle_auto_compaction(&mut self, cx: &mut Context<Self>) {
         self.auto_compaction = !self.auto_compaction;
         self.send(

@@ -632,6 +632,8 @@ fn main() -> Result<()> {
                 summary_threshold: if clip_aggressive { 500 } else { 2_000 },
                 disk_threshold: if clip_aggressive { 1_500 } else { 6_000 },
                 spill_dir: dir.join("tool-results"),
+                // CLI 单次任务没有跨轮会话，历史为空。
+                history: Vec::new(),
             };
 
             let mut session = durable::DurableSession::open(&dir)?;

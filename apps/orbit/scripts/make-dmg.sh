@@ -24,7 +24,7 @@ ROOT="$(pwd)"
 
 TARGET="${1:-both}"
 VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' crates/orbit-pi/Cargo.toml | head -1)}"
-APP_NAME="Orbit Pi"
+APP_NAME="hiq"
 EXEC_NAME="orbit-pi"
 BUNDLE_ID="dev.orbit.pi"
 ICON="assets/icons/icon.icns"

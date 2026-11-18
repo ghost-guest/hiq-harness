@@ -59,10 +59,6 @@ pub fn sessions_dir() -> PathBuf {
     orbit_rpc::session_store::sessions_root()
 }
 
-fn dirs_home() -> PathBuf {
-    crate::platform::home_dir()
-}
-
 /// Load every session in pi's store, newest-*user message* first.
 ///
 /// Ordering is keyed on the session's last user-message time (see

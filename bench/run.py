@@ -112,7 +112,11 @@ def run(tasks, solver, out_path):
     results = []
     for t in tasks:
         d = fresh_dir(t)
-        if solver:
+        if solver == "gold":
+            # A perfect agent: proves the scoring pipeline itself reaches 100%.
+            apply_gold(t, d)
+            ok_solve, solve_out, dt_solve = True, "gold", 0.0
+        elif solver:
             ok_solve, solve_out, dt_solve = sh(solver, d, env={"TASK_PROMPT": t["prompt"]},
                                                timeout=t.get("timeout_s", 180) + 120)
         else:

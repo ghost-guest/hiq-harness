@@ -36,7 +36,7 @@ mkdir -p "$dir/share/applications"
 cat > "$dir/share/applications/dev.orbit.pi.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
-Name=Orbit Pi
+Name=hiq
 Comment=Native workbench for the pi coding agent
 Exec=orbit-pi
 Icon=dev.orbit.pi

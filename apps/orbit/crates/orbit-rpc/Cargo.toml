@@ -12,6 +12,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # 本项目改造：运行时换成 harness 内核（进程内调用，不再 spawn pi）。
 harness-cli = { path = "../../../../crates/cli" }
+# 上下文用量估算复用内核的口径（estimate_tokens），不另造一套。
+harness-context = { path = "../../../../crates/context" }
 
 [target.'cfg(windows)'.dependencies]
 # Reads the user's current PATH, which a running process does not see change.

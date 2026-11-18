@@ -41,3 +41,4 @@ dist/
 apps/orbit/target/
 # orbit 的营销站（Next.js），不属于桌面应用本体
 apps/orbit/marketing/
+.alma-snapshots

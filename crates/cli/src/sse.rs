@@ -85,6 +85,12 @@ pub fn to_sse(ev: &RunEvent) -> SseEvent {
         ),
         RunEvent::GuardNote { note } => SseEvent::new("guard", serde_json::json!({ "note": note })),
         RunEvent::FinalText { text } => SseEvent::new("text", serde_json::json!({ "text": text })),
+        // 流式增量：单独的事件名，界面据此边收边显示。
+        // 与 `text` 分开是必须的：`text` 是「最终定稿」，UI 收到后要
+        // 替换整行；`text_delta` 是「追加一片」，两者语义不同。
+        RunEvent::TextDelta { text } => {
+            SseEvent::new("text_delta", serde_json::json!({ "text": text }))
+        }
         RunEvent::Thinking { text } => {
             SseEvent::new("thinking", serde_json::json!({ "text": text }))
         }
@@ -100,6 +106,7 @@ pub fn stream_task<W: Write>(
     dir: &Path,
     workdir: &Path,
     task: &str,
+    history: &[serde_json::Value],
     cfg: &crate::exec::ExecConfig,
 ) -> anyhow::Result<()> {
     if task.trim().is_empty() {
@@ -152,6 +159,8 @@ pub fn stream_task<W: Write>(
         max_steps: cfg.max_steps,
         effort: Some(cfg.effort),
         supported_efforts: cfg.supported.clone(),
+        // 会话历史：由调用方从会话文件读出后传入，只追加不改写。
+        history: history.to_vec(),
         system: "你是一个编程助手，在给定工作区内完成任务。\
                  用工具读写文件、执行命令。不要臆造文件内容 —— 先读再改。\
                  完成后用一句话总结你做了什么。"
@@ -308,7 +317,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let cfg = crate::exec::ExecConfig::from_env();
         let mut buf: Vec<u8> = Vec::new();
-        stream_task(&mut buf, &dir, &dir, "  ", &cfg).unwrap();
+        stream_task(&mut buf, &dir, &dir, "  ", &[], &cfg).unwrap();
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains("event: error"));
         let _ = std::fs::remove_dir_all(&dir);

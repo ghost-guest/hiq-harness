@@ -207,7 +207,15 @@ fn capture_worktree_commit_from(
         if let Some(head) = head {
             git_with_index(cwd, &temporary_index, ["read-tree", head])?;
         }
-        git_with_index(cwd, &temporary_index, ["add", "-A", "--", "."])?;
+        // 快照排除 `.harness/`：它是内核自己的状态目录（每轮都改写），
+        // 收进快照会让每一轮的 diff 都变脏、也让快照对象无谓膨胀。
+        // 与 `git::diff_pathspecs()` 保持一致 —— 那边负责「不显示」，
+        // 这里负责「不进快照」，两处都要有，否则统计仍然会看到变化。
+        git_with_index(
+            cwd,
+            &temporary_index,
+            ["add", "-A", "--", ".", ":(exclude).harness/**"],
+        )?;
         let tree = git_with_index(cwd, &temporary_index, ["write-tree"])?
             .trim()
             .to_owned();

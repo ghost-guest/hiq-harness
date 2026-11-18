@@ -25,6 +25,13 @@
 //! production install. `ORBIT_FORCE_UPDATER=1` arms the real flow; an empty or
 //! invalid compiled-in key also leaves the updater off.
 
+// 改造：应用自更新已整体禁用（见 `run_install_helper` 与 `Updater::init` 的说明）。
+// 更新源钉死指向上游 Orbit 的发布页，装上会覆盖本项目的 harness 内核，
+// 因此安装/替换那一整套机制（下载、验签、原子替换、重启等待）全部不再运行，
+// 代码保留在原处只为对照上游、便于日后接自己的更新渠道。
+// 这些函数因此不会被调用 —— 是**有意的**死代码，不是漏接。
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -216,6 +223,11 @@ impl Updater {
     /// build cannot update itself: debug builds unless forced, a bare
     /// `cargo run` binary outside a managed install, or a keyless build.
     pub fn init() -> Option<Self> {
+        // 改造：更新源指向上游 Orbit 的发布页，装着它的新版本会覆盖本项目的
+        // 内核。所以这里直接不初始化 —— 应用内不再出现「有新版本」。
+        // 详见 `run_install_helper` 上的说明。
+        return None;
+        #[allow(unreachable_code)]
         let forced = std::env::var_os("ORBIT_FORCE_UPDATER").is_some_and(|value| value == "1");
         if cfg!(debug_assertions) && !forced {
             return None;
@@ -897,14 +909,17 @@ fn probe_writable(parent: &Path, prefix_name: &str) -> bool {
 /// exit code when the arguments name an install handoff.
 #[cfg(unix)]
 pub fn run_install_helper() -> Option<i32> {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let index = args.iter().position(|arg| arg == INSTALL_HELPER_FLAG)?;
-    // A malformed helper invocation must not fall through to a second UI.
-    let Some(flags) = HelperFlags::parse(&args[index + 1..]) else {
-        eprintln!("Orbit updater: malformed install-helper arguments");
-        return Some(1);
-    };
-    Some(run_install(&flags))
+    // 改造：**禁用应用自更新**。
+    //
+    // 上游的更新源编译期钉死指向 `github.com/imrj05/orbit/releases`
+    // （见 `FEED_URL`）。本项目在其之上换了内核，一旦让用户点「更新」，
+    // 下载回来的会是**上游 Orbit 的二进制**，把我们的 harness 内核覆盖掉。
+    // 这不是「功能缺失」，是会损坏安装 —— 必须彻底断开。
+    //
+    // 于是直接返回 `None`：即便命令行带了安装助手标志也不执行任何替换。
+    // 内置公钥本来也无效（`init()` 会拒绝），两处一起关，不留旁路。
+    let _ = INSTALL_HELPER_FLAG;
+    None
 }
 
 #[cfg(not(unix))]

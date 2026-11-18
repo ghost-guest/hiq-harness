@@ -9,6 +9,12 @@
 //! migration for an npm install, or a reported refusal for anything else.
 //! Everything here blocks; the app calls it from the background executor.
 
+// 改造：这个模块原本用于「检查 pi 有没有新版本、装它、把失败讲清楚」。
+// 本项目没有外部 pi 运行时，且应用自更新整体禁用，所以只剩下
+// `is_newer`（被 `plugins.rs` 用来比较插件版本）还在用。
+// 其余函数保留作对照，是有意的死代码。
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 /// pi's release endpoint — the one pi's own version check reads.

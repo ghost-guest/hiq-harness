@@ -3253,12 +3253,6 @@ impl OrbitApp {
                                 }),
                             ))
                             .child(self.render_host_facts(cx))
-                            // An npm-managed pi cannot update in place; the
-                            // official installer migrates it. The click is the
-                            // confirmation before it removes the npm package.
-                            .when(self.pi_install.kind.is_npm(), |col| {
-                                col.child(self.render_pi_migration(cx))
-                            })
                             .child(
                                 div()
                                     .flex()
@@ -3410,59 +3404,6 @@ impl OrbitApp {
                             .child(note)
                     }))
             }))
-    }
-
-    /// The npm → official-install migration panel. Shown only when pi was
-    /// installed with npm; the button is the explicit confirmation before the
-    /// official installer removes the npm package. User data is untouched.
-    pub(super) fn render_pi_migration(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let theme = *theme::get(cx);
-        let migrating = self.pi_migrating;
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(DynamicSpacing::Base08.px(&theme))
-            .px(px(14.))
-            .py(DynamicSpacing::Base12.px(&theme))
-            .rounded(panel::RADIUS.px(&theme))
-            .bg(theme.surface_elevated)
-            .border_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .text_size(TextSize::Default.px(&theme))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text_primary)
-                    .child(tr!("pi_update.migrate_title")),
-            )
-            .child(
-                div()
-                    .text_size(TextSize::Small.px(&theme))
-                    .text_color(theme.text_muted)
-                    .child(tr!("pi_update.migrate_note")),
-            )
-            .child(
-                button_frame(div().id("pi-migrate"), &theme, ButtonSize::Medium)
-                    .group(BUTTON_GROUP)
-                    .when(migrating, |b| b.opacity(0.55))
-                    .when(!migrating, |b| {
-                        b.cursor_pointer()
-                            .hover_state(&theme)
-                            .pressed_state(&theme, PressedRamp::Wash)
-                    })
-                    .on_click({
-                        let this = cx.entity();
-                        move |_, _window, cx| {
-                            this.update(cx, |app, cx| app.migrate_pi_install(cx));
-                        }
-                    })
-                    .child(div().text_color(theme.text_secondary).child(if migrating {
-                        tr!("pi_update.migrating")
-                    } else {
-                        tr!("pi_update.migrate")
-                    })),
-            )
     }
 
     /// One dependency row: status dot, name + detail, and either a version

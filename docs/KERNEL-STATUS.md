@@ -74,6 +74,19 @@ orbit 说的是 `pi --mode rpc` 的 JSONL 方言：`{"id","type":"prompt","messa
 
 ---
 
+### HTTP 传输实测（`scripts/probe-http.sh` 可复跑）
+
+```
+engine ready (http): http:http://127.0.0.1:7883
+get_available_models → {"credential":"missing","provider":"deepseek","models":[{"id":"deepseek-chat", …}, …]}
+prompt               → error: POST /v1/threads/thr_df30…/turns → HTTP 400
+                       {"error":{"message":"… DeepSeek API key not found …"}}
+time-bus             → {"seq":0,"kind":"turn.start","payload":{"thread":"thr_df30…"}}
+```
+
+三件事被钉住：状态码不被当成 body 解析（404 不会再变成"空成功"）、
+引擎错误原样上抛、thread id 在两种方言（`thread.id` / 顶层 `id`）下都能捕获。
+
 ## 怎么跑
 
 ```bash
@@ -84,7 +97,10 @@ python3 bench/run.py --selftest             # 20 任务判据自检
 python3 bench/run.py --list                 # 看待跑任务
 
 # 接真引擎：
-harnessd serve --engine /path/to/codewhale-app-server --log .harness/timebus.ndjson
+harnessd serve --engine /path/to/codewhale app-server --log .harness/timebus.ndjson   # stdio，tool-free
+harnessd serve --http-engine http://127.0.0.1:7878 --log .harness/timebus.ndjson      # 工具/审批面
+./scripts/probe-engine.sh /path/to/codewhale                                          # 协议探针
+./scripts/probe-http.sh  /path/to/codewhale                                           # HTTP 冒烟
 harnessd replay .harness/timebus.ndjson     # 日志是事实：任何状态可从它重建
 harnessd doctor                             # 环境检查
 ```
@@ -144,9 +160,10 @@ GET /v1/sessions  → 真实会话列表（id/title/runtime_store/created_at…�
 
 ## 已知缺口（不粉饰）
 
-1. **工具执行还没接**：stdio 面是 tool-free，S1 的「工具调用」验收必须走 `app-server --http`。
-   即：需要给 `harnessd` 加一个 HTTP 传输（`POST /thread`、`/prompt`、`/v1/chat/completions`），
-   现在只有 stdio。这是 S1 唯一没闭合的部分。
+1. ~~工具执行还没接~~ **已接 HTTP 传输**（`crates/harnessd/src/http_engine.rs`）：
+   `POST /v1/threads` 建线程 → `POST /v1/threads/{id}/turns {prompt}` 起轮（工具/审批在这一面），
+   `GET /v1/threads/{id}/events` SSE 流式、`POST …/interrupt`、`…/steer`、`POST /v1/approvals/{id}` 审批。
+   模型目录走 `GET /v1/providers` + `/v1/providers/{id}/models`（没有 `/v1/models`，404 已实测）。
 2. ~~审批应答的字段名未对真引擎验证过~~ **已按源码对正**：
    `CommandExecutionRequestApprovalResponse { decision }`，
    取值 `accept / acceptForSession / acceptWithExecpolicyAmendment / applyNetworkPolicyAmendment / decline / cancel`
@@ -156,7 +173,9 @@ GET /v1/sessions  → 真实会话列表（id/title/runtime_store/created_at…�
    我们已把 `commandActions` 映射成守卫认识的 `read_file/list_dir/grep`，应答改用 `accept/decline/cancel`，
    并由 `real_engine_payload_maps_command_actions_to_our_tool_names` 与
    `approval_accepts_with_the_engines_own_wording` 两个测试钉住。
-3. **未跑过任何真实任务**。二进制已能编、能握手、能列模型；缺 provider key，所以 `bench --solver` 仍无基线数字。
+3. **未跑过任何真实任务**。二进制能编、能握手、能列模型、能起轮；
+   起轮一路走到 provider 后返回 `400 DeepSeek API key not found`（错误原文已透传，不是假成功）。
+   缺 key 是唯一阻塞，`bench --solver` 因此仍无基线数字。
 4. **orbit 的 `client.rs` 还没指向 harnessd**。协议层已兼容（`--compat orbit`），
    但 orbit 目前仍在进程内直接驱动旧内核；把它改成 spawn `harnessd serve --compat orbit` 是最后一步接线。
 5. 守卫的三级阶梯阈值沿用现项目 `harness-guards`，没有在 20 任务上标定过误杀率。

@@ -1801,7 +1801,7 @@ pub const WINDOW_CONTROLS_W: f32 = 46. * 3.;
 #[cfg(target_os = "macos")]
 pub fn titlebar_options() -> TitlebarOptions {
     TitlebarOptions {
-        title: Some(SharedString::from("Orbit Pi")),
+        title: Some(SharedString::from("hiq")),
         // Transparent titlebar: the sidebar extends to the top and the native
         // traffic lights sit inside it.
         appears_transparent: true,
@@ -1816,7 +1816,7 @@ pub fn titlebar_options() -> TitlebarOptions {
 #[cfg(not(target_os = "macos"))]
 pub fn titlebar_options() -> TitlebarOptions {
     TitlebarOptions {
-        title: Some(SharedString::from("Orbit Pi")),
+        title: Some(SharedString::from("hiq")),
         appears_transparent: draws_window_controls(),
         traffic_light_position: None,
     }

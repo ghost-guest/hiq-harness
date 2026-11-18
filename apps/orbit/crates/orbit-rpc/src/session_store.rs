@@ -18,6 +18,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -43,21 +44,31 @@ pub struct SessionFile {
 /// 与 orbit 的 `sessions::sessions_dir()` 配对：那边读，这边写，
 /// 必须指向同一个位置，否则侧栏看不到新会话。
 ///
+/// **它是全局唯一的**，不是「每个工作区一个」：侧栏（`sessions.rs`）
+/// 遍历这个根下的每个 slug 子目录来把会话按项目分组，所以所有项目的
+/// 会话共用同一个根、各占一个子目录。
+///
+/// **不能回退到进程 cwd**：GUI 由 LaunchServices 启动，cwd 是 `/`，
+/// 于是根会算成 `/.harness/sessions` —— 根文件系统只读，每次建会话都报
+/// `Read-only file system (os error 30)`（界面上显示「Prompt 失败」）。
+/// 现在退到家目录的应用数据目录，这也是 GUI 应用应有的做法。
+///
 /// 测试通过 [`create_session_in`] / [`list_sessions_in`] 等显式传根目录的
 /// 变体注入临时目录 —— 环境变量是进程级共享状态，并行测试互相覆盖会
 /// 造成假失败，所以核心逻辑都接受 `root` 参数，只有面向生产的两三个
 /// 便捷函数才读全局。
 pub fn sessions_root() -> PathBuf {
-    // 放在项目的 `.harness/sessions` 下，与内核的其它状态同处一地
-    // （AGENTS.md：记忆与状态存项目内，不存家目录）。
-    std::env::var("HARNESS_SESSIONS_DIR")
+    if let Ok(dir) = std::env::var("HARNESS_SESSIONS_DIR") {
+        return PathBuf::from(dir);
+    }
+    // 与 pi 的 `~/.pi/agent/sessions` 对应，只是换成本项目自己的目录名。
+    // 放家目录而不是 temp：会话是用户数据，落在 `/var/folders/...` 会被系统清理。
+    // **绝不读 cwd**：GUI 由 LaunchServices 启动时 cwd 是 `/`，根会算成
+    // `/.harness/sessions`，只读，建会话直接 `os error 30`。
+    let home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let base = std::env::var("HARNESS_WORKDIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            base.join(".harness/sessions")
-        })
+        .unwrap_or_else(std::env::temp_dir);
+    home.join(".orbit-pi").join("sessions")
 }
 
 /// 工作区在会话库里的目录名。
@@ -95,7 +106,11 @@ pub fn create_session_in(
         "cwd": workspace.to_string_lossy(),
         "name": name,
     });
-    writeln!(file, "{header}")?;
+    // 一次性写入，理由同 `append_message`：`writeln!` 走 `write_fmt`，
+    // 含多字节字符时可能短写且静默丢尾。
+    let mut line = header.to_string();
+    line.push('\n');
+    file.write_all(line.as_bytes())?;
     file.flush()?;
 
     Ok(SessionFile {
@@ -118,9 +133,29 @@ pub fn append_message(path: &Path, role: &str, text: &str) -> std::io::Result<()
             "timestamp": now_ms(),
         }
     });
+    // 不用 `writeln!`：它走 `write_fmt`，在含多字节字符的长行上可能
+    // 只写出一部分就返回 Ok，尾部被静默丢掉（实测：中文回复的会话行
+    // 断在 `"text":` 之后，行尾的 `,"role":…}` 整个消失，侧栏读该会话
+    // 即报 JSON 解析失败）。改为显式 `write` + 长度校验，短写必须报错。
     let mut file = OpenOptions::new().append(true).open(path)?;
-    writeln!(file, "{entry}")?;
-    file.flush()
+    // 正文与换行拼成一次 `write_all`：分两次写在 O_APPEND 下不保证相邻，
+    // 实测会出现两条消息首尾相连成一行（内容对、但整行不再是合法 JSON）。
+    let mut line = entry.to_string();
+    line.push('\n');
+    let expected = line.len();
+    let before = file.metadata()?.len();
+    file.write_all(line.as_bytes())?;
+    file.flush()?;
+    // `write_all` 理论上要么全写要么报错，但原实现就是「返回 Ok 却少写」，
+    // 所以核对增量，短写必须显形而不是留下一行半截 JSON。
+    let written = file.metadata()?.len().saturating_sub(before);
+    if written != expected as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            format!("短写：期望 {expected} 字节，实际 {written}"),
+        ));
+    }
+    Ok(())
 }
 
 /// 读一个会话文件里的消息（跳过会话头与无法解析的行）。
@@ -218,7 +253,16 @@ pub fn list_sessions_in(sessions_root: &Path) -> Vec<SessionFile> {
 
 /// 克隆一个会话：复制全部内容到新文件，换新 id。
 pub fn clone_session(src: &Path, workspace: &Path) -> std::io::Result<SessionFile> {
-    let created = create_session(workspace, None)?;
+    clone_session_in(src, workspace, &sessions_root())
+}
+
+/// [`clone_session`] 的显式根目录变体（测试用，避免写进用户真实数据目录）。
+pub fn clone_session_in(
+    src: &Path,
+    workspace: &Path,
+    sessions_root: &Path,
+) -> std::io::Result<SessionFile> {
+    let created = create_session_in(sessions_root, workspace, None)?;
     let body = fs::read_to_string(src)?;
     // 丢掉源文件的第一行（会话头），其余原样追加。
     let mut lines = body.lines();
@@ -231,8 +275,15 @@ pub fn clone_session(src: &Path, workspace: &Path) -> std::io::Result<SessionFil
 }
 
 fn new_session_id() -> String {
-    // 时间戳 + 进程 id，够唯一（pi 用 uuid；这里不引入依赖）。
-    format!("{}-{}", now_ms(), std::process::id())
+    // 时间戳 + 进程 id + 自增计数。
+    //
+    // 只靠「毫秒 + pid」不够：克隆是在源文件刚建好之后立刻调用的，
+    // 同一毫秒里必然撞号，`File::create` 会把**源文件截断**（克隆破坏原
+    // 会话）；连续点两次「新任务」也会互相覆盖。计数是进程内原子自增，
+    // 同一毫秒内的多次调用因此各得一个 id。
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{}", now_ms(), std::process::id(), seq)
 }
 
 fn now_ms() -> u128 {
@@ -268,6 +319,78 @@ mod tests {
     fn slug_replaces_slashes_like_pi() {
         // sessions.rs 的注释：workspace 绝对路径 `/` → `-`
         assert_eq!(workspace_slug(Path::new("/Users/a/proj")), "-Users-a-proj");
+    }
+
+    #[test]
+    /// 回归：中文长回复必须整行落盘。
+    ///
+    /// 原先用 `writeln!` 写，含多字节字符的行会短写、尾部被静默丢掉 ——
+    /// 会话文件留下半行 JSON，侧栏打开该会话直接解析失败。
+    #[test]
+    fn multibyte_reply_is_written_whole() {
+        // 用进程内唯一目录：`fresh_root` 只按 tag+pid 命名，同一测试
+        // 二进制里重复执行会命中同一目录，导致计数虚高。
+        let uniq = format!("{}-{:?}", std::process::id(), std::thread::current().id());
+        let root = std::env::temp_dir().join(format!("sess-mb-{uniq}"));
+        let ws = std::env::temp_dir().join(format!("sess-mb-ws-{uniq}"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+        let s = create_session_in(&root, &ws, None).unwrap();
+        let reply = "`add` 函数用了减号，`return a - b` 应为 `a + b`。";
+        for _ in 0..5 {
+            append_message(&s.path, "assistant", reply).unwrap();
+        }
+        let body = fs::read_to_string(&s.path).unwrap();
+        for (i, line) in body.lines().enumerate() {
+            serde_json::from_str::<serde_json::Value>(line)
+                .unwrap_or_else(|e| panic!("第 {i} 行不是完整 JSON：{e} | {line:?}"));
+        }
+        assert_eq!(body.lines().count(), 6, "会话头 + 5 条消息");
+        let msgs = read_messages(&s.path).unwrap();
+        assert_eq!(msgs.len(), 5);
+        assert_eq!(msgs[0]["content"][0]["text"], reply);
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    /// 回归：会话库的根绝不能落在 `/` 或进程 cwd 上。
+    ///
+    /// GUI 由 LaunchServices 启动，cwd 是 `/`。原先 `sessions_root()`
+    /// 在没有环境变量时回退 `current_dir()`，算出 `/.harness/sessions`，
+    /// 每次建会话都报 `Read-only file system (os error 30)`，
+    /// 界面上显示「Prompt 失败」，侧栏挂一条失败记录。
+    #[test]
+    fn sessions_root_is_never_the_cwd() {
+        // 不碰 `HARNESS_SESSIONS_DIR`：环境变量是进程级共享状态，
+        // 并行测试里改它会让别的用例看见错误的根。
+        // 测试进程的 cwd 是 crate 目录，若回退 cwd，断言会失败。
+        let root = sessions_root();
+        assert!(
+            root.is_absolute() || root.starts_with("."),
+            "根应为绝对路径，实际 {}",
+            root.display()
+        );
+        assert_ne!(
+            root,
+            Path::new("/").join(".harness/sessions"),
+            "根不能是 `/.harness/sessions`（只读，建会话必然 os error 30）"
+        );
+        let cwd_root = std::env::current_dir()
+            .unwrap_or_default()
+            .join(".harness/sessions");
+        assert_ne!(root, cwd_root, "根不能跟着进程 cwd 走");
+
+        // 端到端：显式传一个临时根时能建出来，且文件在该根内
+        let tmp = std::env::temp_dir().join(format!("ws-root-{}", std::process::id()));
+        let ws = tmp.join("workspace");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&ws).unwrap();
+        let s = create_session_in(&tmp, &ws, None).expect("建会话不该失败");
+        assert!(s.path.starts_with(&tmp), "会话应落在会话库根内");
+        assert!(s.path.exists());
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -330,7 +453,7 @@ mod tests {
         let src = create_session_in(&root, &ws, None).unwrap();
         append_message(&src.path, "user", "原始内容").unwrap();
 
-        let copy = clone_session(&src.path, &ws).unwrap();
+        let copy = clone_session_in(&src.path, &ws, &root).unwrap();
         assert_ne!(copy.id, src.id);
         let msgs = read_messages(&copy.path).unwrap();
         assert_eq!(msgs.len(), 1);

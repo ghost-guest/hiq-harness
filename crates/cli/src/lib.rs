@@ -12,6 +12,7 @@ pub mod exec;
 pub mod host;
 pub mod host_service;
 pub mod llm;
+pub mod llm_transport;
 pub mod memory;
 pub mod rest;
 pub mod routes;

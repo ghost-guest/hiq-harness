@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [package.metadata.bundle]
-name = "Orbit Pi"
+name = "hiq"
 identifier = "dev.orbit.pi"
 # One icon per platform variant: .icns (macOS), .ico (Windows), .png (Linux).
 icon = [

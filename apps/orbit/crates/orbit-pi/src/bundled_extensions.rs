@@ -157,7 +157,6 @@ impl BundledExtensions {
         // running; re-check before every spawn so a session switch or Runtime
         // restart still gets custom UI, quota, and auth. The unchanged fast
         // path is a stat, so this costs nothing in the common case.
-        crate::rpc_patches::apply_on_launch();
         let args = if apply_default {
             SessionDefault::load().cli_args()
         } else {

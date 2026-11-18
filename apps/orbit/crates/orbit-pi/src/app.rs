@@ -9,7 +9,6 @@
 //! - [`events`] — the heartbeat: event drain, responses, session watcher
 //! - [`session`] — prompt/queue/turn lifecycle and navigation
 //! - [`pickers`] — model, command-palette, branch, and workspace pickers
-//! - [`pi_update_ui`] — the launch-time pi self-update: check, install, report
 //! - [`composer_ops`] — autocomplete, attachments, add-menu, model chips
 //! - [`sidebar`] — session/workspace sidebar rendering + row menus
 //! - [`settings`] — Settings surface (General/Runtime/Agent/Skills/Plugins/Providers)
@@ -372,9 +371,6 @@ pub struct OrbitApp {
     /// sends a `prompt` too, and tearing the live run down over its reply would
     /// stop showing a run that is still streaming.
     prompt_in_flight: Option<String>,
-    /// Result of auto-applying pi's RPC patches before this launch, surfaced
-    /// in Settings → Runtime. See [`crate::rpc_patches`].
-    rpc_patches: crate::rpc_patches::PatchReport,
     /// Sessions with a live pi process, keyed by session-file path. The
     /// active session lives in `client`/`transcript` above; this map holds
     /// the background ones (see `ParkedSession`).
@@ -1058,12 +1054,6 @@ pub struct OrbitApp {
     /// another package manager). Refreshed with the dependency probe and after
     /// every install/update, so the setup page and the updater agree.
     pi_install: crate::pi_install::Installation,
-    /// A newer pi exists but this install is npm-managed and must be migrated
-    /// to the official installer first. Holds the available version; cleared
-    /// once migration succeeds. Never acted on without the user's click.
-    pi_migration_required: Option<String>,
-    /// True while the official installer runs on the background executor.
-    pi_migrating: bool,
     /// Whether the setup page is open on request (Settings → About →
     /// Requirements) rather than because something is missing.
     setup_open: bool,
@@ -1913,8 +1903,8 @@ impl OrbitApp {
         let extensions = BundledExtensions::install();
         // Teach the installed pi's RPC mode the capabilities Orbit uses
         // (custom UI, quota, auth) before spawning it. Best-effort and cached
-        // across launches; see `rpc_patches`.
-        let rpc_patches = crate::rpc_patches::apply_on_launch();
+        // 改造：上游在这里给 pi 的 RPC 打补丁（`rpc_patches`）。
+        // harness 内核没有 Node 包，无补丁可打，跳过。
         // Load the access mode and write it back so the guard extension finds
         // the file on the very first tool call of the session. A failed write
         // means the guard cannot read a mode and falls back to its own
@@ -2240,7 +2230,6 @@ impl OrbitApp {
             client,
             runtime,
             reloading_app: false,
-            rpc_patches,
             sidebar_width: px(crate::layout::sidebar_width()
                 .unwrap_or(SIDEBAR_DEFAULT_W)
                 .max(SIDEBAR_MIN_W)),
@@ -2523,8 +2512,6 @@ impl OrbitApp {
             _copy_selection_sub: copy_selection_sub,
             deps,
             pi_install,
-            pi_migration_required: None,
-            pi_migrating: false,
             setup_open: false,
             host,
             refreshing: false,
@@ -4183,7 +4170,6 @@ mod mcp_ui;
 mod new_task;
 mod open_in;
 mod permissions_ui;
-mod pi_update_ui;
 mod pickers;
 mod plugin_update_ui;
 mod retention_ui;

@@ -43,6 +43,8 @@ pub const PI_PACKAGE_ROOT_ENV: &str = "PI_PACKAGE_ROOT";
 
 /// 工作区覆盖（本实现新增：内核按此决定 agent 在哪里读写文件）。
 pub const HARNESS_WORKDIR_ENV: &str = "HARNESS_WORKDIR";
+/// 会话库根目录的环境变量（与 `session_store::sessions_root()` 读的一致）。
+pub const HARNESS_SESSIONS_DIR_ENV: &str = "HARNESS_SESSIONS_DIR";
 
 // 下面这些常量保留自上游：`augmented_path` / `fallback_bin_dirs` 仍在用它们。
 const PI_PACKAGE_NAME: &str = "@earendil-works/pi-coding-agent";
@@ -91,8 +93,6 @@ pub struct PiClient {
     abort: Arc<AtomicBool>,
     /// 运行时可调状态（模型、思考等级、会话名等），`get_state` 读它。
     config: Arc<Mutex<RuntimeConfig>>,
-    /// 当前会话文件路径（与工作线程共享）。
-    session: Arc<Mutex<Option<PathBuf>>>,
     subagent_status_token: String,
 }
 
@@ -107,6 +107,9 @@ pub struct RuntimeConfig {
     pub provider: String,
     pub thinking_level: String,
     pub session_name: Option<String>,
+    /// 当前会话文件路径。`None` 表示还没建会话。
+    /// 工作线程（`WorkerCtx`）写它，`get_state` / `get_session_stats` 读它。
+    pub session_file: Option<String>,
     pub auto_compaction: bool,
     pub auto_retry: bool,
     pub steering_mode: String,
@@ -125,6 +128,7 @@ impl Default for RuntimeConfig {
             provider: "magpie".into(),
             thinking_level: "medium".into(),
             session_name: None,
+            session_file: None,
             auto_compaction: true,
             auto_retry: true,
             steering_mode: "all".into(),
@@ -145,6 +149,12 @@ impl PiClient {
     }
 
     pub fn spawn_with_bin(workspace_dir: &Path, session_dir: Option<&Path>) -> Result<Self> {
+        // 会话库的根由 `session_store::sessions_root()` 决定：它是**全局唯一**
+        // 的位置（`~/.orbit-pi/sessions`，可用 `HARNESS_SESSIONS_DIR` 覆盖），
+        // 侧栏遍历它下面的每个 slug 子目录来按项目分组。
+        //
+        // 这里**不再钉住环境变量**：根已经是确定的、与进程 cwd 无关的值，
+        // 钉一份反而会让多个工作区互相覆盖。
         let state_dir = session_dir
             .map(Path::to_path_buf)
             .unwrap_or_else(|| workspace_dir.join(".harness"));
@@ -158,10 +168,10 @@ impl PiClient {
         let writer_alive = Arc::new(AtomicBool::new(true));
         let abort = Arc::new(AtomicBool::new(false));
         let config = Arc::new(Mutex::new(RuntimeConfig::default()));
-        let session: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let queue: Arc<Mutex<(Vec<String>, Vec<String>)>> =
+            Arc::new(Mutex::new((Vec::new(), Vec::new())));
 
         let workspace = workspace_dir.to_path_buf();
-
         {
             let ws = workspace.clone();
             let sd = state_dir.clone();
@@ -171,7 +181,7 @@ impl PiClient {
             let ab = abort.clone();
             let cf = config.clone();
             let alive = writer_alive.clone();
-            let ss = session.clone();
+            let qq = queue.clone();
             // 工作线程：取命令 → 执行 → 投事件。对应上游的 writer 线程，
             // 只是「写到 stdin」换成「驱动内核」。
             thread::spawn(move || {
@@ -183,7 +193,7 @@ impl PiClient {
                     stderr: er,
                     abort: ab,
                     config: cf,
-                    session: ss,
+                    queue: qq,
                 };
                 while let Ok(cmd) = commands_rx.recv() {
                     if let Err(err) = ctx.handle(cmd.id, cmd.body) {
@@ -205,7 +215,6 @@ impl PiClient {
             writer_alive,
             abort,
             config,
-            session,
             subagent_status_token: String::new(),
         })
     }
@@ -370,8 +379,9 @@ struct WorkerCtx {
     stderr: Arc<Mutex<VecDequeCompat>>,
     abort: Arc<AtomicBool>,
     config: Arc<Mutex<RuntimeConfig>>,
-    /// 当前会话文件路径。`None` 表示还没建会话。
-    session: Arc<Mutex<Option<PathBuf>>>,
+    /// 待投递队列（steering, followUp）。内核没有运行中插话的能力，
+    /// 这里只维护状态并如实回报，不假装会自动投递。
+    queue: Arc<Mutex<(Vec<String>, Vec<String>)>>,
 }
 
 impl WorkerCtx {
@@ -543,7 +553,7 @@ impl WorkerCtx {
                 id,
                 "get_session_stats",
                 json!({
-                    "contextUsage": serde_json::Value::Null,
+                    "contextUsage": self.context_usage(),
                     "sessionFile": self
                         .current_session()
                         .map(|p| p.to_string_lossy().into_owned()),
@@ -572,6 +582,176 @@ impl WorkerCtx {
                 }),
             ),
 
+            // ── C 组：队列、重试、压缩开关 ────────────────────────
+            //
+            // 内核的执行循环是一次性的（一次任务跑到结束），没有 pi 那种
+            // 「运行中还能插话」的双车道队列。所以这里如实实现能实现的：
+            // 队列的各条命令维护一个内存队列、如实回 `queue_update`，
+            // 但当前任务结束后不会自动投递 —— 界面不会看到假的投递。
+            CommandBody::ClearQueue => {
+                let q = self.take_queue();
+                let _ = self.events.send(Event::QueueUpdate {
+                    value: json!({
+                        "steering": q.0,
+                        "followUp": q.1,
+                    }),
+                });
+                self.respond(
+                    id,
+                    "clear_queue",
+                    json!({ "steering": q.0, "followUp": q.1 }),
+                )
+            }
+            CommandBody::Steer { message, .. } => {
+                self.push_queue(true, message);
+                self.respond(id, "steer", json!({}))
+            }
+            CommandBody::FollowUp { message, .. } => {
+                self.push_queue(false, message);
+                self.respond(id, "follow_up", json!({}))
+            }
+            CommandBody::SetSteeringMode { mode } => {
+                self.config
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .steering_mode = mode;
+                self.respond(id, "set_steering_mode", json!({}))
+            }
+            CommandBody::SetFollowUpMode { mode } => {
+                self.config
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .follow_up_mode = mode;
+                self.respond(id, "set_follow_up_mode", json!({}))
+            }
+            CommandBody::SetAutoCompaction { enabled } => {
+                self.config
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .auto_compaction = enabled;
+                self.respond(id, "set_auto_compaction", json!({}))
+            }
+            CommandBody::SetAutoRetry { enabled } => {
+                self.config
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .auto_retry = enabled;
+                self.respond(id, "set_auto_retry", json!({}))
+            }
+            CommandBody::AbortRetry => {
+                // 内核没有「正在重试」这个状态，重置标志即等价于「不再重试」。
+                self.config
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .auto_retry = false;
+                self.respond(id, "abort_retry", json!({}))
+            }
+            CommandBody::Compact { custom_instructions } => {
+                // 内核的压缩是「上下文层按阈值自动触发」，没有手动压缩入口。
+                // 这里如实报告当前用量与是否需要压缩，不伪造一份摘要
+                // （上游 AGENTS.md 第 5 条：不假造协议给不出的东西）。
+                let usage = self.context_usage();
+                let _ = custom_instructions;
+                self.respond(
+                    id,
+                    "compact",
+                    json!({
+                        "compacted": false,
+                        "reason": "内核的压缩按上下文阈值自动触发，没有手动入口",
+                        "contextUsage": usage,
+                    }),
+                )
+            }
+            CommandBody::CycleModel => {
+                // 只有一个模型时，循环等于不动。
+                let name = self
+                    .config
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .model_name
+                    .clone();
+                self.respond(id, "cycle_model", json!({ "model": { "name": name } }))
+            }
+            CommandBody::CycleThinkingLevel => {
+                const LEVELS: [&str; 4] = ["minimal", "low", "medium", "high"];
+                let mut cfg = self.config.lock().unwrap_or_else(|p| p.into_inner());
+                let next = LEVELS
+                    .iter()
+                    .position(|l| *l == cfg.thinking_level)
+                    .map(|i| LEVELS[(i + 1) % LEVELS.len()])
+                    .unwrap_or(LEVELS[2]);
+                cfg.thinking_level = next.to_string();
+                drop(cfg);
+                self.respond(id, "cycle_thinking_level", json!({ "level": next }))
+            }
+
+            // ── D 组：认证与配额 ──────────────────────────────────
+            //
+            // harness 走 OpenAI 兼容协议，凭证是 base_url + api_key
+            // （`ExecConfig::from_env` 读取，缺省指向本机 Magpie 中继）。
+            // 没有 pi 那种「多 provider OAuth / 设备码登录」体系，
+            // 所以这里如实报告「一个已配置的 provider」，
+            // 而不是假造一套登录流程（上游 AGENTS.md 第 5 条）。
+            CommandBody::AuthList => self.respond(
+                id,
+                "auth.list",
+                json!({
+                    "providers": [{
+                        "id": self.provider_id(),
+                        "name": self.provider_id(),
+                        "credential": "api_key",
+                        "authenticated": self.has_credential(),
+                        // 没有 OAuth，methods 留空 —— 界面据此不显示登录按钮
+                        "methods": [],
+                    }],
+                }),
+            ),
+            CommandBody::AuthStatus { provider } => {
+                if provider != self.provider_id() {
+                    return self.respond_err(
+                        id,
+                        "auth.status",
+                        &format!("未知的 provider：{provider}"),
+                    );
+                }
+                self.respond(
+                    id,
+                    "auth.status",
+                    json!({
+                        "provider": provider,
+                        "authenticated": self.has_credential(),
+                        "credential": "api_key",
+                        "methods": [],
+                    }),
+                )
+            }
+            // 登录/登出/取消：没有 OAuth 体系，如实报错。
+            // 界面会给出一行「该操作不可用」，而不是转圈等一个不会来的回调。
+            CommandBody::AuthLogin { provider, .. } => self.respond_err(
+                id,
+                "auth.login",
+                &format!(
+                    "harness 用 API key 直连（provider={}），没有 OAuth 登录流程",
+                    provider
+                ),
+            ),
+            CommandBody::AuthLogout { provider } => self.respond_err(
+                id,
+                "auth.logout",
+                &format!("harness 的凭证来自环境变量，无法在应用内登出（provider={provider}）"),
+            ),
+            CommandBody::AuthCancel { .. } => self.respond_err(
+                id,
+                "auth.cancel",
+                "没有进行中的登录流程可取消",
+            ),
+            CommandBody::QuotaList { provider } => {
+                let _ = provider;
+                // 配额来自上游服务商的账单接口，harness 不采集也不缓存
+                // （没有可靠的跨 provider 口径）。回空列表，界面显示「无数据」。
+                self.respond(id, "quota.list", json!({ "reports": [] }))
+            }
+
             // 其余命令在后续批次实现。这里返回明确的未实现错误，
             // 而不是静默成功 —— 界面上会显示错误，不会伪装成可用。
             other => {
@@ -581,17 +761,90 @@ impl WorkerCtx {
         }
     }
 
-    // ── 会话状态 ──────────────────────────────────────────────
-
-    fn current_session(&self) -> Option<PathBuf> {
-        self.session
+    /// 当前的 provider 标识（来自 `ExecConfig` 的 base_url 主机名）。
+    fn provider_id(&self) -> String {
+        self.config
             .lock()
             .unwrap_or_else(|p| p.into_inner())
+            .provider
             .clone()
     }
 
+    /// 是否配置了可用凭证。走内核同一个来源（`ExecConfig::from_env`），
+    /// 不另读一份配置，避免两处判断不一致。
+    fn has_credential(&self) -> bool {
+        !harness_cli::exec::ExecConfig::from_env()
+            .api_key
+            .is_empty()
+    }
+
+    // ── 队列（内存）───────────────────────────────────────────
+
+    fn push_queue(&self, steer: bool, message: String) {
+        let (steer_q, follow_q) = {
+            let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+            if steer {
+                q.0.push(message);
+            } else {
+                q.1.push(message);
+            }
+            (q.0.clone(), q.1.clone())
+        };
+        let _ = self.events.send(Event::QueueUpdate {
+            value: json!({ "steering": steer_q, "followUp": follow_q }),
+        });
+    }
+
+    fn take_queue(&self) -> (Vec<String>, Vec<String>) {
+        let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+        let out = (q.0.clone(), q.1.clone());
+        q.0.clear();
+        q.1.clear();
+        out
+    }
+
+    /// 上下文用量：按会话消息估算 token，配合内核的窗口常量算百分比。
+    ///
+    /// 走 `harness_context::estimate_tokens` 与 `BudgetPolicy`，
+    /// 与内核自动压缩用的是同一套口径，不另造一套估算。
+    fn context_usage(&self) -> Value {
+        let msgs = self.current_messages();
+        let text: String = msgs
+            .iter()
+            .filter_map(|m| m.get("content").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect();
+        if text.is_empty() {
+            return Value::Null;
+        }
+        let tokens = harness_context::estimate_tokens(&text) as u64;
+        // 256k 是 Magpie 中继实际报告的 context_window（实测 /v1/models）。
+        const WINDOW: u64 = 256_000;
+        let percent = (tokens as f64 / WINDOW as f64) * 100.0;
+        json!({
+            "tokens": tokens,
+            "contextWindow": WINDOW,
+            "percent": percent,
+        })
+    }
+
+    // ── 会话状态 ──────────────────────────────────────────────
+
+    fn current_session(&self) -> Option<PathBuf> {
+        self.config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .session_file
+            .as_ref()
+            .map(PathBuf::from)
+    }
+
     fn set_current_session(&self, path: Option<PathBuf>) {
-        *self.session.lock().unwrap_or_else(|p| p.into_inner()) = path;
+        self.config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .session_file = path.map(|p| p.to_string_lossy().into_owned());
     }
 
     /// 当前会话的消息列表；没有会话时返回空。
@@ -611,11 +864,23 @@ impl WorkerCtx {
             }
         }
         if let Some(path) = self.current_session() {
-            let _ = crate::session_store::append_message(&path, "user", &message);
+            if let Err(e) = crate::session_store::append_message(&path, "user", &message) {
+                self.push_stderr(format!("写用户消息失败：{e}"));
+            }
         }
 
         // 先确认命令被接受（UI 在等这个 response）。
         self.respond(id, "prompt", json!({}))?;
+
+        // 会话历史：读已落盘的消息，去掉刚落盘的这条 user（内核会自己加）。
+        // 这是「记得上文」与「缓存能命中」的共同前提 —— 没有历史时
+        // 每轮都只有几十 token 的前缀，服务端缓存根本不会命中。
+        let mut history = self.current_messages();
+        if let Some(last) = history.last() {
+            if last.get("role").and_then(|r| r.as_str()) == Some("user") {
+                history.pop();
+            }
+        }
 
         self.abort.store(false, Ordering::Relaxed);
         self.config
@@ -630,8 +895,14 @@ impl WorkerCtx {
             reply: Arc::new(Mutex::new(String::new())),
         };
         let reply = sink.reply.clone();
-        let result =
-            crate::bridge::run_task(&self.state_dir, &self.workspace, &message, sink, &self.abort);
+        let result = crate::bridge::run_task(
+            &self.state_dir,
+            &self.workspace,
+            &message,
+            &history,
+            sink,
+            &self.abort,
+        );
 
         self.config
             .lock()
@@ -641,8 +912,29 @@ impl WorkerCtx {
         let text = reply.lock().unwrap_or_else(|p| p.into_inner()).clone();
         if !text.trim().is_empty() {
             if let Some(path) = self.current_session() {
-                let _ = crate::session_store::append_message(&path, "assistant", &text);
+                if let Err(e) = crate::session_store::append_message(&path, "assistant", &text) {
+                    // 写盘失败必须让用户看见：否则这一轮回答只活在内存里，
+                    // 切走会话就永久丢失（侧栏读到的还是旧内容）。
+                    self.push_stderr(format!("写回复失败：{e}"));
+                    let _ = self.events.send(Event::MessageEnd {
+                        value: json!({
+                            "error": format!("回复未能写入会话文件：{e}"),
+                        }),
+                    });
+                }
             }
+
+            // 回复落盘后发 message_end：orbit 的 transcript 靠它给这一行
+            // 盖上 elapsed 并结算流式状态。不发的话界面只显示「已完成」
+            // 而不是「用时 X」—— 因为 elapsed 一直是 None。
+            //
+            // **不能带 content**：正文已经通过 `text_delta` 逐段流给界面并
+            // 累积在 `step.text` 里了。这里再带一份全文，transcript 会把它
+            // 当成一条新的 settled 消息落成行，界面上就会显示两遍
+            // （实测：「记住了记住了」「BLUE-7749BLUE-7749」）。
+            let _ = self.events.send(Event::MessageEnd {
+                value: json!({ "role": "assistant" }),
+            });
         }
 
         let aborted = self.abort.load(Ordering::Relaxed);
@@ -715,13 +1007,25 @@ struct EventSink {
 impl std::io::Write for EventSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         for raw in self.parser.push(buf) {
-            // 文本增量既转发给界面，也攒起来落盘。
-            if raw.event.as_deref() == Some("text") {
-                if let Some(delta) = crate::bridge::text_of(&raw) {
-                    if let Ok(mut acc) = self.reply.lock() {
-                        acc.push_str(&delta);
+            // 正文累积：
+            // - `text_delta` 是流式增量 → **追加**
+            // - `text` 是最终定稿   → **覆盖**（不追加，否则同一段文字会算两遍）
+            match raw.event.as_deref() {
+                Some("text_delta") => {
+                    if let Some(delta) = crate::bridge::text_of(&raw) {
+                        if let Ok(mut acc) = self.reply.lock() {
+                            acc.push_str(&delta);
+                        }
                     }
                 }
+                Some("text") => {
+                    if let Some(full) = crate::bridge::text_of(&raw) {
+                        if let Ok(mut acc) = self.reply.lock() {
+                            *acc = full;
+                        }
+                    }
+                }
+                _ => {}
             }
             if let Some(ev) = crate::bridge::translate(&raw) {
                 let _ = self.events.send(ev);

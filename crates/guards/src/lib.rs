@@ -314,6 +314,7 @@ pub struct GuardStats {
 pub const EXPLORATION_TOOLS: &[&str] = &[
     "grep",
     "glob",
+    "list_dir",
     "read_file",
     "read_section",
     "semantic_search",
@@ -630,8 +631,23 @@ mod tests {
     }
 
     #[test]
-    fn spiral_default_has_valid_window() {
-        // 回归：曾经用 derive(Default) 导致 window=0，守卫永远不触发
+    fn spiral_counts_list_dir_as_exploration() {
+        // 回归：`list_dir` 曾经不在白名单里，导致对它的重复调用
+        // 只能靠 no_progress 发提示（每轮上限 2 次），永远拦不住。
+        // 实测表现：界面上连续 8~10 条「这个 list_dir 调用已累计 N 次相同结果」，
+        // 模型被提示着继续调，停不下来。
+        let mut s = ReadOnlySpiral::new();
+        let mut saw_block = false;
+        for _ in 0..HARD_THRESHOLD {
+            if matches!(s.record("list_dir"), SpiralDecision::Block { .. }) {
+                saw_block = true;
+            }
+        }
+        assert!(saw_block, "list_dir 必须算探索类，重复调用要被螺旋守卫拦下");
+    }
+
+    #[test]
+    fn spiral_default_has_valid_window() {        // 回归：曾经用 derive(Default) 导致 window=0，守卫永远不触发
         let mut s = ReadOnlySpiral::default();
         let mut saw_advisory = false;
         for _ in 0..ADVISORY_THRESHOLD {

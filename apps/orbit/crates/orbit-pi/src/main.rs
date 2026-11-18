@@ -105,7 +105,6 @@ mod repository_clone;
 mod review;
 mod rewind;
 mod rewind_picker;
-mod rpc_patches;
 mod session_defaults;
 mod session_retention;
 mod sessions;
@@ -754,7 +753,7 @@ fn main() {
     application.run(|cx: &mut App| {
         // Rename the process before the menu bar is built so macOS labels the
         // application menu "Orbit" instead of the executable (`orbit-pi`).
-        platform::set_process_name("Orbit");
+        platform::set_process_name("hiq");
         bind_keys(cx);
         theme::init(cx);
         // Adopt the persisted interface language before the first paint (and

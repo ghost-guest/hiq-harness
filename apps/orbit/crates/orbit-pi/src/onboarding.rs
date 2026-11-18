@@ -129,17 +129,9 @@ pub fn host_facts(host: &crate::platform::Host) -> Vec<HostFact> {
 /// an update refuses to apply (npm vs. the official managed install vs. a
 /// package manager Orbit must not touch).
 pub fn pi_install_facts(installation: &crate::pi_install::Installation) -> Vec<HostFact> {
-    let method = if !installation.installed() {
-        tr!("onboarding.pi_method_missing")
-    } else {
-        match &installation.kind {
-            crate::pi_install::InstallKind::Managed { .. } => {
-                tr!("onboarding.pi_method_official")
-            }
-            crate::pi_install::InstallKind::Npm { .. } => tr!("onboarding.pi_method_npm"),
-            crate::pi_install::InstallKind::Other => tr!("onboarding.pi_method_other"),
-        }
-    };
+    // 改造：运行时来源只有「内嵌」一种（见 `pi_install` 模块头），
+    // 上游那套 npm / managed / 其他包管理器的分支不复存在。
+    let method = installation.kind.label().to_string();
     let path = installation
         .bin
         .as_ref()

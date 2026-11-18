@@ -6,7 +6,8 @@
 //! `doctor`  — environment check before wiring a real engine
 
 use anyhow::{Context, Result};
-use harnessd::engine::{JsonRpcEngine, MockEngine};
+use harnessd::engine::{Engine, JsonRpcEngine, MockEngine};
+use harnessd::http_engine::HttpEngine;
 use harnessd::protocol::{encode, Frame, UiEvent};
 use harnessd::server::Supervisor;
 use harnessd::timebus::{read_entries, Log};
@@ -35,6 +36,7 @@ fn serve(args: &[String]) -> Result<()> {
     let mut window: u64 = std::env::var("HARNESSD_WINDOW").ok().and_then(|v| v.parse().ok()).unwrap_or(128_000);
     let mut plugin_paths: Vec<String> = Vec::new();
     let mut compat: Option<String> = None;
+    let mut http_base: Option<String> = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -43,6 +45,7 @@ fn serve(args: &[String]) -> Result<()> {
             "--log" => log_path = it.next().cloned().unwrap_or(log_path),
             "--window" => window = it.next().and_then(|v| v.parse().ok()).unwrap_or(window),
             "--compat" => compat = it.next().cloned(),
+            "--http-engine" => http_base = it.next().cloned(),
             "--plugin" => {
                 if let Some(p) = it.next() {
                     plugin_paths.push(p.clone());
@@ -53,6 +56,19 @@ fn serve(args: &[String]) -> Result<()> {
     }
 
     let log = Log::open(&log_path)?;
+    if let Some(base) = http_base.clone() {
+        // HTTP is the only transport with tools and approvals (see http_engine.rs).
+        let token = std::env::var("CODEWHALE_RUNTIME_TOKEN").ok();
+        let mut sup = Supervisor::new(HttpEngine::new(base, token), log, window);
+        sup.prepare()?;
+        eprintln!("engine ready (http): {}", sup.engine.name());
+        load_plugins(&mut sup, &plugin_paths)?;
+        return if compat.as_deref() == Some("orbit") {
+            serve_orbit(&mut sup)
+        } else {
+            serve_stdio(&mut sup)
+        };
+    }
     let engine = match program {
         Some(p) => JsonRpcEngine::spawn(&p, &engine_args)?,
         None => {
@@ -93,6 +109,31 @@ fn serve(args: &[String]) -> Result<()> {
         return serve_orbit(&mut sup);
     }
 
+    serve_stdio(&mut sup)
+}
+
+fn load_plugins<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>, paths: &[String]) -> Result<()> {
+    for path in paths {
+        let spec = harnessd::plugins::PluginSpec::new(
+            std::path::Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("plugin"),
+            path,
+            Vec::new(),
+        );
+        match sup.plugins.load(&spec) {
+            Ok(()) => eprintln!("plugin loaded: {} {:?}", spec.name, sup.plugins.tools()),
+            Err(e) => {
+                eprintln!("plugin `{}` refused: {e}", spec.name);
+                std::process::exit(3);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn serve_stdio<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<()> {
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -140,7 +181,8 @@ fn serve_orbit<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
         let v: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                write!(out, "{}\n", serde_json::to_string(&response_of("", "", false, Value::Null, Some(e.to_string())))?)?;
+                let r = response_of("", "", false, Value::Null, Some(e.to_string()));
+                write!(out, "{}\n", serde_json::to_string(&r)?)?;
                 out.flush()?;
                 continue;
             }
@@ -149,7 +191,8 @@ fn serve_orbit<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
         let kind = v.get("type").and_then(Value::as_str).unwrap_or("").to_string();
 
         let Some(cmd) = command_of(&kind) else {
-            write!(out, "{}\n", serde_json::to_string(&response_of(&id, &kind, false, Value::Null, Some(format!("unsupported command `{kind}`"))))?)?;
+            let r = response_of(&id, &kind, false, Value::Null, Some(format!("unsupported command `{kind}`")));
+            write!(out, "{}\n", serde_json::to_string(&r)?)?;
             out.flush()?;
             continue;
         };
@@ -162,7 +205,8 @@ fn serve_orbit<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
                 }
             }
             Err(e) => {
-                write!(out, "{}\n", serde_json::to_string(&response_of(&id, &kind, false, Value::Null, Some(e.to_string())))?)?;
+                let r = response_of(&id, &kind, false, Value::Null, Some(e.to_string()));
+                write!(out, "{}\n", serde_json::to_string(&r)?)?;
             }
         }
         out.flush()?;
