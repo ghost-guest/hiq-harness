@@ -172,6 +172,42 @@ impl<E: Engine> Supervisor<E> {
         let tool = tool_name(&params, &method);
         let args = params.to_string();
 
+        // 插件可以先于守卫一票否决（S4 的验收：插件 deny 一条命令，内核记录并继续）。
+        // 插件只在「引擎愿意问」的那一刻有发言权——它的位置是审批通道，不是命令行。
+        // 插件要有话可说，就得看到**命令本身**，不是整个参数 JSON。
+        let command = params
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or(args.as_str());
+        if let Some(Ok(v)) = self.plugins.call_tool(
+            "policy.check",
+            json!({ "tool": tool, "command": command }),
+        )
+        {
+            // SDK 把工具返回值包在 `content` 里（`{"content": {...}}`），
+            // 两种形状都认，免得插件作者被包装层坑一次。
+            let verdict = v.get("content").unwrap_or(&v);
+            let denied = verdict.get("decision").and_then(Value::as_str) == Some("deny")
+                || verdict.get("allow").and_then(Value::as_bool) == Some(false);
+            if denied {
+                let reason = verdict
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("plugin denied this command")
+                    .to_string();
+                self.denials += 1;
+                self.log.append(
+                    "guard.deny",
+                    json!({ "tool": tool, "reason": reason, "source": "plugin", "digest": digest(&args) }),
+                )?;
+                self.plugins.broadcast(
+                    "guard.deny",
+                    json!({ "tool": tool, "reason": reason, "source": "plugin" }),
+                );
+                return Ok(Some((frame.id.unwrap_or(0), json!({ "decision": "decline" }))));
+            }
+        }
+
         let verdict = self.guards.before(&tool, &args);
         let decision = match verdict {
             Verdict::Deny(reason) => {

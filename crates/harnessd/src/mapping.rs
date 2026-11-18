@@ -139,6 +139,11 @@ pub fn map(cmd: &str, p: &Value, st: &mut SessionState) -> Action {
                     if let Some(m) = st.model.clone() {
                         params["model"] = json!(m);
                     }
+                    // 档位必须随起轮一起送：`turn/start` 在 0.10.3 上是 -32601，
+                    // 唯一还在的入口只有 prompt/run 与 HTTP 的 turns。
+                    if let Some(e) = st.effort.clone() {
+                        params["effort"] = json!(e);
+                    }
                     Action::Call { method: "thread/start".into(), params }
                 }
                 Some(_) => match caps.pick(&["prompt/run", "prompt/request"]) {

@@ -422,16 +422,26 @@ impl GuardSet {
     }
 
     /// 在**拿到结果之后**调用。
+    ///
+    /// 两个守卫都要跑，然后取**更强**的那个裁决。早期版本在这里对失败熔断
+    /// `return Note` 就结束了——结果是「同一条命令失败 12 次」永远只得到温馨提示，
+    /// 永远升不到拒跑/终止。守卫成了摆设，返工照样发生。
     pub fn after_call(&mut self, sig: &Signature, success: bool) -> PostCallVerdict {
-        // 失败熔断优先
-        if let GateDecision::Block { reason } = self.failure.record(sig, success) {
-            return PostCallVerdict::Note { note: reason };
-        }
-        match self.no_progress.record(sig) {
+        let gate = self.failure.record(sig, success);
+        let progress = match self.no_progress.record(sig) {
             NoProgressDecision::Allow => PostCallVerdict::OK,
             NoProgressDecision::Nudge { note } => PostCallVerdict::Note { note },
             NoProgressDecision::Refuse { reason } => PostCallVerdict::ReplaceResult { reason },
             NoProgressDecision::Stop { reason } => PostCallVerdict::Stop { reason },
+        };
+
+        match progress {
+            // 阶梯已经升到拒跑/终止，就不要再被「提醒」压回去。
+            PostCallVerdict::ReplaceResult { .. } | PostCallVerdict::Stop { .. } => progress,
+            _ => match gate {
+                GateDecision::Block { reason } => PostCallVerdict::Note { note: reason },
+                _ => progress,
+            },
         }
     }
 }

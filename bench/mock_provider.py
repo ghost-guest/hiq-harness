@@ -87,6 +87,11 @@ class Handler(BaseHTTPRequestHandler):
         messages = req.get("messages", [])
         task = pick_task(messages)
         already_acted = any(m.get("role") == "tool" for m in messages)
+        # 想测「流式中途插话」就得让轮次活得久一点：MOCK_DELAY=秒。
+        import os, time as _t
+        delay = float(os.environ.get("MOCK_DELAY", "0") or 0)
+        if delay:
+            _t.sleep(delay)
 
         if task and not already_acted:
             cmd = write_command(task["gold"])

@@ -222,12 +222,55 @@ impl Engine for HttpEngine {
                 if let Some(m) = params.get("model").and_then(Value::as_str) {
                     body["model"] = json!(m);
                 }
+                // 引擎的字段名是 `reasoning_effort`（StartTurnRequest）；
+                // 我们的抽象叫 effort，翻译在这里。
+                if let Some(e) = params.get("effort").and_then(Value::as_str) {
+                    body["reasoning_effort"] = json!(e);
+                }
                 let v = self.curl("POST", &format!("/v1/threads/{id}/turns"), Some(&body))?;
                 if let Some(t) = v.get("turn_id").or_else(|| v.pointer("/turn/id")).and_then(Value::as_str) {
                     self.last_turn = Some(t.to_string());
                 }
                 self.ensure_stream();
                 Ok(json!({ "thread": { "id": id }, "turn": v }))
+            }
+            // 分叉：`Fork`（回到某条消息之前）与 `CloneSession`（原样复制）都走这一条。
+            "thread/fork" => {
+                let id = self
+                    .thread_id
+                    .clone()
+                    .or_else(|| params.get("threadId").and_then(Value::as_str).map(str::to_string))
+                    .context("fork without a thread")?;
+                let v = self.curl("POST", &format!("/v1/threads/{id}/fork"), Some(&json!({})))?;
+                if let Some(new_id) = v
+                    .get("id")
+                    .or_else(|| v.pointer("/thread/id"))
+                    .and_then(Value::as_str)
+                {
+                    self.thread_id = Some(new_id.to_string());
+                }
+                Ok(v)
+            }
+            // 流式中途插话：HTTP 面按 turn 走，stdio 面的 `thread/message` 在这里翻译。
+            "thread/message" | "turn/steer" => {
+                let thread = self.thread_id.clone().context("steer without a thread")?;
+                let turn = self
+                    .last_turn
+                    .clone()
+                    .or_else(|| params.get("turnId").and_then(Value::as_str).map(str::to_string))
+                    .context("steer without a turn")?;
+                let text = params
+                    .get("text")
+                    .or_else(|| params.get("input"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                self.curl(
+                    "POST",
+                    &format!("/v1/threads/{thread}/turns/{turn}/steer"),
+                    // 实测：steer 要的是 `prompt`，不是 OpenAI 风格的 input 数组。
+                    Some(&json!({ "prompt": text })),
+                )
             }
             "thread/interrupt" | "turn/interrupt" => {
                 let thread = self
@@ -241,22 +284,6 @@ impl Engine for HttpEngine {
                     .or_else(|| params.get("turnId").and_then(Value::as_str).map(str::to_string))
                     .context("interrupt without a turn id")?;
                 self.curl("POST", &format!("/v1/threads/{thread}/turns/{turn}/interrupt"), Some(&json!({})))
-            }
-            "turn/steer" => {
-                let thread = self.thread_id.clone().context("steer without a thread")?;
-                let turn = self.last_turn.clone().context("steer without a turn")?;
-                let text = params
-                    .get("input")
-                    .and_then(|i| i.get(0))
-                    .and_then(|i| i.get("text"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                self.curl(
-                    "POST",
-                    &format!("/v1/threads/{thread}/turns/{turn}/steer"),
-                    Some(&json!({ "input": [{ "type": "text", "text": text }] })),
-                )
             }
             other => bail!("`{other}` is not mapped on the HTTP transport"),
         }
@@ -433,6 +460,58 @@ mod tests {
         let mut e = HttpEngine::new(base, None);
         let err = e.request("app/models", json!({})).unwrap_err().to_string();
         assert!(err.contains("404"), "{err}");
+    }
+
+    /// 只在请求体里出现 `needle` 时才回 200——这样「字段有没有送出去」是可断言的。
+    fn serve_expect(needle: &'static str, reply: &'static str) -> String {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = l.accept() {
+                let mut buf = [0u8; 8192];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (status, body) = if req.contains(needle) {
+                    ("200 OK", reply)
+                } else {
+                    ("400 Bad Request", r#"{"error":"missing expected field"}"#)
+                };
+                let resp = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn effort_is_sent_as_reasoning_effort() {
+        let base = serve_expect("reasoning_effort", r#"{"turn_id":"turn_1"}"#);
+        let mut e = HttpEngine::new(base, None);
+        e.thread_id = Some("thr_1".into());
+        let v = e
+            .request("prompt/run", json!({"prompt":"hi","effort":"high"}))
+            .expect("effort must reach the engine as reasoning_effort");
+        assert_eq!(v["thread"]["id"], "thr_1");
+    }
+
+    #[test]
+    fn fork_switches_to_the_new_thread() {
+        let base = serve_expect("/v1/threads/thr_1/fork", r#"{"id":"thr_2"}"#);
+        let mut e = HttpEngine::new(base, None);
+        e.thread_id = Some("thr_1".into());
+        let v = e.request("thread/fork", json!({})).unwrap();
+        assert_eq!(v["id"], "thr_2");
+        assert_eq!(e.thread_id.as_deref(), Some("thr_2"), "fork must move the session");
+    }
+
+    #[test]
+    fn steer_targets_the_live_turn() {
+        let base = serve_expect("/turns/turn_9/steer", r#"{"ok":true}"#);
+        let mut e = HttpEngine::new(base, None);
+        e.thread_id = Some("thr_1".into());
+        e.last_turn = Some("turn_9".into());
+        let v = e.request("thread/message", json!({"text":"wait, use the other file"})).unwrap();
+        assert_eq!(v["ok"], true);
     }
 
     #[test]

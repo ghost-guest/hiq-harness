@@ -83,6 +83,29 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
   只满足其一的检查会被判 `INVALID`——防止"永远通过"的假判据。
 - `bench/run.py --solver '<cmd>'` 用真实 harness 跑分，指标：通过率、新建/维护分别通过率、守卫拒绝数、阻塞轮数、耗时。
 
+## 按方案原文逐条对账（S0–S5 验收表）
+
+方案里每行都写了「验收」。下面是**原文**口径，不是我的改写。
+
+| 验收原文 | 状态 | 证据 |
+|---|---|---|
+| S0 两仓独立构建，harnessd 能调 `ExecPolicyEngine` | 改为进程依赖（§0.1） | `check-engine.sh` exit 0；`JsonRpcEngine` 只走 JSON-RPC，从不链接引擎 crate |
+| S1 orbit 界面能发一条消息，看到流式回复和工具调用 | 协议层完成，**GUI 未目测** | 事件名映射 + 终态泵 + 真进程测试；`orbit_dialect_end_to_end` 通过 |
+| S2 切换模型/档位生效；fork 出新会话能跑到不同结论 | 模型/分叉实测，**档位只到单测** | `POST /v1/providers/ollama/switch` 200；`POST /v1/threads/{id}/fork` → 201 新 id；`effort_is_sent_as_reasoning_effort` 单测 |
+| S3 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | 前两条通过，**缓存命中未测** | steer 实测 `steer_count=1`（轮次跑动中插话）；`ten_long_tasks_are_not_falsely_killed` 0/10；缓存命中要真 provider 的 usage 字段 |
+| S4 写一个 Go 插件，deny 一条命令，内核记录并继续 | **通过** | `go_plugin_can_deny_a_command_and_the_kernel_records_it`：线上回 decline、日志记 `guard.deny`（带 `source: plugin`）、下一问照常 accept |
+| S5 通过率/返工率/误杀率有基线数字 | 通过率+误杀率有，**返工率口径待定** | 20/20（脚本化）、0/20（1.5B）；误杀 0/10 |
+
+### 这一轮修掉的两个真缺陷
+
+1. **守卫的阶梯被自己挡住**：`after_call` 在失败熔断命中时直接 `return Note`，
+   于是「同一条命令失败 12 次」永远只拿到温馨提示，升不到拒跑/终止——守卫形同摆设，
+   返工照样发生。现在两个守卫都跑、取更强裁决，第 12 次真的 `Deny`
+   （`the_same_failure_over_and_over_is_still_caught` 钉住）。
+2. **插件只能看不能否**：`policy.check` 从来没被内核调用过，
+   `guard.deny` 只是单向广播。现在审批前先问插件，插件 deny 即 `decline`；
+   SDK 返回的 `{"content": {...}}` 包装层也一并解掉了。
+
 ### S5 基线：真管道、真工具、真改文件
 
 `bench/run.py --solver scripts/bench-solve.sh` 现在跑的是**整条链**：
