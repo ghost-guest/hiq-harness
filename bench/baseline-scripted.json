@@ -1,0 +1,214 @@
+{
+  "summary": {
+    "total": 20,
+    "passed": 20,
+    "pass_rate": 1.0,
+    "greenfield_pass_rate": 1.0,
+    "brownfield_pass_rate": 1.0,
+    "guard_denials": 0,
+    "blocked_turns": 0,
+    "mean_duration_s": 3.74
+  },
+  "results": [
+    {
+      "id": "b01_off_by_one",
+      "kind": "brownfield",
+      "pass": true,
+      "duration_s": 2.6,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b02_empty_input",
+      "kind": "brownfield",
+      "pass": true,
+      "duration_s": 7.06,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b03_float_compare",
+      "kind": "brownfield",
+      "pass": true,
+      "duration_s": 3.18,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b04_mutable_default",
+      "kind": "brownfield",
+      "pass": true,
+      "duration_s": 3.35,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b05_early_return",
+      "kind": "brownfield",
+      "pass": true,
+      "duration_s": 3.67,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b06_unflushed_file",
+      "kind": "brownfield",
+      "pass": true,
+      "duration_s": 3.65,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b07_encoding",
+      "kind": "brownfield",
+      "pass": true,
+      "duration_s": 3.1,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b08_timezone",
+      "kind": "brownfield",
+      "pass": true,
+      "duration_s": 3.14,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b09_bare_except",
+      "kind": "brownfield",
+      "pass": true,
+      "duration_s": 3.36,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b10_memo",
+      "kind": "brownfield",
+      "pass": true,
+      "duration_s": 3.41,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g01_fizzbuzz",
+      "kind": "greenfield",
+      "pass": true,
+      "duration_s": 3.1,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g02_csv_totals",
+      "kind": "greenfield",
+      "pass": true,
+      "duration_s": 3.19,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g03_top_words",
+      "kind": "greenfield",
+      "pass": true,
+      "duration_s": 3.22,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g04_flatten",
+      "kind": "greenfield",
+      "pass": true,
+      "duration_s": 3.44,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g05_backoff",
+      "kind": "greenfield",
+      "pass": true,
+      "duration_s": 3.7,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g06_lru",
+      "kind": "greenfield",
+      "pass": true,
+      "duration_s": 7.28,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g07_semver",
+      "kind": "greenfield",
+      "pass": true,
+      "duration_s": 3.14,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g08_logparse",
+      "kind": "greenfield",
+      "pass": true,
+      "duration_s": 3.99,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g09_args",
+      "kind": "greenfield",
+      "pass": true,
+      "duration_s": 3.54,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g10_todo",
+      "kind": "greenfield",
+      "pass": true,
+      "duration_s": 3.76,
+      "detail": "ok",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    }
+  ]
+}

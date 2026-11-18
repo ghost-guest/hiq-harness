@@ -29,6 +29,11 @@ use crate::protocol::Frame;
 pub struct HttpEngine {
     base: String,
     token: Option<String>,
+    /// Extra fields for `POST /v1/threads` (`model`, `auto_approve`, `mode`,
+    /// `permission_posture`). Comes from `HARNESSD_THREAD_BODY` so an operator
+    /// can pick the posture without a code change — the runtime API rejects
+    /// unknown keys loudly, so keeping this data-driven beats hardcoding.
+    thread_body: Value,
     thread_id: Option<String>,
     last_turn: Option<String>,
     inbox: VecDeque<Frame>,
@@ -41,6 +46,10 @@ impl HttpEngine {
         Self {
             base: base.trim_end_matches('/').to_string(),
             token,
+            thread_body: std::env::var("HARNESSD_THREAD_BODY")
+                .ok()
+                .and_then(|v| serde_json::from_str::<Value>(&v).ok())
+                .unwrap_or_else(|| json!({})),
             thread_id: None,
             last_turn: None,
             inbox: VecDeque::new(),
@@ -88,7 +97,7 @@ impl HttpEngine {
         if let Some(t) = &self.thread_id {
             return Ok(t.clone());
         }
-        let v = self.curl("POST", "/v1/threads", Some(&json!({})))?;
+        let v = self.curl("POST", "/v1/threads", Some(&self.thread_body))?;
         let id = v
             .get("id")
             .or_else(|| v.pointer("/thread/id"))
@@ -136,6 +145,21 @@ impl HttpEngine {
     }
 }
 
+/// 未知事件也要带名字转发（`engine/<kind>`），否则 UI 只能看到一团。
+fn out_method(kind: &str) -> &'static str {
+    match kind {
+        "turn.lifecycle" => "engine/turn.lifecycle",
+        "turn.usage" => "thread/tokenUsage/updated",
+        "pre_turn" | "post_turn" => "engine/turn.phase",
+        "thread.started" => "engine/thread.started",
+        "user_message" => "engine/user.message",
+        "agent_message" => "item/completed",
+        "file" => "engine/file",
+        "status" => "thread/status/changed",
+        _ => "engine/event",
+    }
+}
+
 fn truncate(s: &str) -> String {
     let s = s.trim();
     if s.len() <= 300 { s.to_string() } else { format!("{}…", &s[..300]) }
@@ -173,7 +197,7 @@ impl Engine for HttpEngine {
                 }))
             }
             "thread/start" => {
-                let v = self.curl("POST", "/v1/threads", Some(&json!({})))?;
+                let v = self.curl("POST", "/v1/threads", Some(&self.thread_body))?;
                 if let Some(id) = v.get("id").and_then(Value::as_str) {
                     self.thread_id = Some(id.to_string());
                 }
@@ -272,12 +296,36 @@ impl Engine for HttpEngine {
                         if let Some(data) = line.strip_prefix("data:") {
                             if let Ok(v) = serde_json::from_str::<Value>(data.trim()) {
                                 let kind = v
-                                    .get("type")
+                                    .get("kind")
+                                    .or_else(|| v.get("event"))
                                     .and_then(Value::as_str)
                                     .unwrap_or("event")
                                     .to_string();
-                                // Approvals must block us, so they keep their id and are
-                                // surfaced as reverse requests rather than plain events.
+                                // 事件名直接对上 `ui_kind_for`，UI 才能拿到
+                                // `turn_end` / `text_delta` 这类认识的种类；
+                                // 认不出的照样转发，不丢。
+                                let method = match kind.as_str() {
+                                    "turn.completed" | "turn.failed" | "turn.cancelled" => "turn/completed",
+                                    "turn.started" => "turn/started",
+                                    "error" => "error",
+                                    "item.started" => "item/started",
+                                    "item.completed" => "item/completed",
+                                    "item.delta" => {
+                                        let inner = v
+                                            .pointer("/payload/kind")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("");
+                                        if inner == "agent_message" {
+                                            "item/agentMessage/delta"
+                                        } else {
+                                            "item/commandExecution/outputDelta"
+                                        }
+                                    }
+                                    other => {
+                                        // 借用一下 string：未知种类带自己的名字转发。
+                                        out_method(other)
+                                    }
+                                };
                                 if kind.contains("approval") {
                                     let approval_id = v
                                         .get("approval_id")
@@ -292,7 +340,7 @@ impl Engine for HttpEngine {
                                     f.id = Some(0);
                                     out.push(f);
                                 } else {
-                                    out.push(Frame::notification("engine/event", v));
+                                    out.push(Frame::notification(method, v));
                                 }
                             }
                         }

@@ -83,6 +83,37 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
   只满足其一的检查会被判 `INVALID`——防止"永远通过"的假判据。
 - `bench/run.py --solver '<cmd>'` 用真实 harness 跑分，指标：通过率、新建/维护分别通过率、守卫拒绝数、阻塞轮数、耗时。
 
+### S5 基线：真管道、真工具、真改文件
+
+`bench/run.py --solver scripts/bench-solve.sh` 现在跑的是**整条链**：
+`harnessd serve --compat orbit` → `codewhale app-server --http` → 工具（bash/read/edit）→ 改工作区 → 自测。
+
+| 跑法 | 通过率 | 新建/维护 | 均值 | 含义 |
+|---|---|---|---|---|
+| 脚本化 provider（`bench/mock_provider.py`） | 20/20 = 1.0 | 10/10 · 10/10 | 3.74 s | **管道上限**：模型永远做对时，harness 能不能把活干完 |
+| 本地 qwen-coder-32k（ollama） | 见 `bench/baseline-local-model.json` | | | 模型+harness 的下限 |
+
+复跑：
+
+```
+HARNESSD_BIN=./target/debug/harnessd \
+HARNESS_ENGINE_BIN=/path/to/codewhale \
+CODEWHALE_HOME=/tmp/cw-bench \
+python3 bench/run.py --solver "$PWD/scripts/bench-solve.sh"
+```
+
+`mock_provider.py` 只做一件事：把 bench 的 gold 变成**真的 tool_call**（`cat > 文件`），
+让引擎自己执行、自己写盘。所以 20/20 证明的是接缝②③和评测器，不是模型能力。
+
+### 这一轮实测到的三个硬事实（都写进代码注释了）
+
+1. **SSE 是单订阅的**：harnessd 订阅之后，第二个 `curl -N /events` 只收到 `thread.started`。
+   所以「轮次结束」不能靠旁路再开一条流判定，必须由 harnessd 自己泵到终态事件再返回。
+2. **`ask` 姿态下 shell 安全校验先于审批**：多行命令直接 `BLOCKED: Command contains multiple lines`，
+   根本走不到审批那一步；`auto_approve` 才放行多行。守卫否决因此只能拦「引擎愿意问」的命令。
+3. **持久化状态会污染下一轮**：同一 `CODEWHALE_HOME` 跑过被拒命令后，后续任务全变慢/全失败；
+   干净 home 立刻恢复。基线必须每次用干净的 `CODEWHALE_HOME`。
+
 ---
 
 ### HTTP 传输实测（`scripts/probe-http.sh` 可复跑）

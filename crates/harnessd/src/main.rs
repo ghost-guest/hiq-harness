@@ -118,6 +118,67 @@ fn serve(args: &[String]) -> Result<()> {
     serve_stdio(&mut sup)
 }
 
+
+/// 引擎的通知是**之后**到的（HTTP/SSE 尤其如此）。命令处理完就把它们取出来，
+/// 一直取到**终态事件**为止——不是「静默一秒就撒手」。
+///
+/// 这条区别很重要：静默判活会在模型慢的时候提前收工，把还在跑的轮次丢掉；
+/// 而终态（`turn_end` / `turn.failed` / `agent_end` / `process_exited`）
+/// 是引擎自己说的「这轮结束了」。超时兜底由 `HARNESSD_TURN_TIMEOUT` 控制。
+fn drain_async_events<E: harnessd::engine::Engine>(
+    sup: &mut Supervisor<E>,
+) -> Result<Vec<harnessd::protocol::UiEvent>> {
+    let timeout: u64 = std::env::var("HARNESSD_TURN_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600);
+    let started = std::time::Instant::now();
+    let mut all = Vec::new();
+    let mut terminal = false;
+    let mut saw_any = false;
+    let mut idle = 0;
+    loop {
+        let batch = sup.pump()?;
+        if batch.is_empty() {
+            if terminal {
+                break;
+            }
+            idle += 1;
+            if !saw_any && idle >= 20 {
+                // 引擎一句话都没说：别把命令卡死在这儿。
+                break;
+            }
+            if started.elapsed().as_secs() >= timeout {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        } else {
+            saw_any = true;
+            idle = 0;
+            for event in &batch {
+                if is_terminal(&event.kind) {
+                    terminal = true;
+                }
+            }
+            all.extend(batch);
+        }
+    }
+    Ok(all)
+}
+
+fn is_terminal(kind: &str) -> bool {
+    matches!(
+        kind,
+        "turn_end" | "agent_end" | "agent_settled" | "process_exited" | "error"
+    ) || kind.contains("turn.completed")
+        || kind.contains("turn.failed")
+        || kind.contains("agent_end")
+}
+
+fn starts_a_turn(method: &str) -> bool {
+    matches!(method, "Prompt" | "turn/start" | "prompt/run" | "prompt/request")
+}
+
 fn load_plugins<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>, paths: &[String]) -> Result<()> {
     for path in paths {
         let spec = harnessd::plugins::PluginSpec::new(
@@ -162,6 +223,11 @@ fn serve_stdio<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
                 write!(out, "{}", encode(&Frame::response(id, reply)))?;
                 for e in events {
                     write!(out, "{}", encode(&Frame::notification("event", serde_json::to_value(e)?)))?;
+                }
+                if starts_a_turn(&method) {
+                    for e in drain_async_events(sup)? {
+                        write!(out, "{}", encode(&Frame::notification("event", serde_json::to_value(e)?)))?;
+                    }
                 }
             }
             Err(e) => {
@@ -208,6 +274,13 @@ fn serve_orbit<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
                 write!(out, "{}\n", serde_json::to_string(&response_of(&id, &kind, true, reply, None))?)?;
                 for e in events_to_orbit(&events) {
                     write!(out, "{}\n", serde_json::to_string(&e)?)?;
+                }
+                if starts_a_turn(cmd) {
+                    for e in drain_async_events(sup)? {
+                        for out_event in events_to_orbit(&[e]) {
+                            write!(out, "{}\n", serde_json::to_string(&out_event)?)?;
+                        }
+                    }
                 }
             }
             Err(e) => {
