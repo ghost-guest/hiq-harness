@@ -120,9 +120,19 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 ### GUI 这一条为什么卡住（有证据）
 
 我试着把界面跑起来：`cargo build -p orbit-pi` 成功，进程能起、能连上 harnessd
-（`HARNESSD_BIN` + `HARNESSD_HTTP_ENGINE`），但取证失败——`screencapture` 拿到的是
-纯黑图（80×50 缩略图里**只有 1 种颜色**），因为这台机器此刻屏幕是休眠/锁屏的。
-所以「界面能不能看到流式回复」不是代码没通，是**没有能看的屏幕**。这一条只能醒着的人点一次。
+（`HARNESSD_BIN` + `HARNESSD_HTTP_ENGINE`），但取证失败：
+`screencapture` 一开始拿到纯黑图（缩略图只有 1 种颜色），用 `caffeinate -d -u` 唤醒后
+再截，OCR 读出来的是——
+
+```
+11月19日周四
+03:08
+Mac
+使用触控ID 或输入密码
+```
+
+也就是**锁屏界面**。窗口在锁屏后面，截不到；解锁需要指纹或密码，那不是我能做的。
+所以「界面能不能看到流式回复」不是代码没通，是**机器锁着**。这一条只能等人开屏点一次。
 
 （另一个坑：`orbit-pi` 用的是 GPUI 原生窗口，不是终端 TUI，`tmux capture-pane`
 抓到的永远是空白——我第一次的判断也错了。）
