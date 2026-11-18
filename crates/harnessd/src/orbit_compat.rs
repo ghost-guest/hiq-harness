@@ -67,11 +67,14 @@ pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
     events
         .iter()
         .map(|e| match e.kind.as_str() {
+            // orbit 读的是 `assistantMessageEvent`（types.rs:934），不是 `assistant`。
+            // 键名写错不会报错，只会让界面一个字都不显示——所以这里对齐解析器的键。
             "text_delta" | "reasoning_delta" => {
                 let text = e.data.get("delta").cloned().unwrap_or(Value::Null);
+                let kind = if e.kind == "reasoning_delta" { "thinking_delta" } else { "text_delta" };
                 json!({
                     "type": "message_update",
-                    "assistant": { "type": "text_delta", "text": text, "delta": text }
+                    "assistantMessageEvent": { "type": kind, "delta": text, "text": text }
                 })
             }
             "tool_output_delta" => json!({ "type": "tool_execution_update", "value": e.data }),
@@ -80,7 +83,7 @@ pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
             "tool_call" | "tool_start" => json!({ "type": "tool_execution_start", "value": e.data }),
             "tool_end" => json!({ "type": "tool_execution_end", "value": e.data }),
             "turn_start" => json!({ "type": "turn_start" }),
-            "turn_end" => json!({ "type": "agent_end", "will_retry": false }),
+            "turn_end" => json!({ "type": "agent_end", "willRetry": false }),
             "usage" => json!({ "type": "message_update", "usage": e.data }),
             "compacted" | "compact_requested" => json!({ "type": "compaction_end", "value": e.data }),
             "cache_freeze" => json!({ "type": "queue_update", "value": e.data }),
@@ -128,16 +131,20 @@ mod tests {
 
     #[test]
     fn text_delta_becomes_message_update() {
+        // 键名必须与 orbit 的解析器一致（`assistantMessageEvent`）；写错不报错，
+        // 界面只会一片空白，所以这条断言盯的是**解析器读的那个键**。
         let out = events_to_orbit(&[UiEvent::new("text_delta", json!({"delta": "hello"}))]);
         assert_eq!(out[0]["type"], "message_update");
-        assert_eq!(out[0]["assistant"]["text"], "hello");
+        assert_eq!(out[0]["assistantMessageEvent"]["type"], "text_delta");
+        assert_eq!(out[0]["assistantMessageEvent"]["delta"], "hello");
+        assert!(out[0].get("assistant").is_none(), "orbit does not read `assistant`");
     }
 
     #[test]
     fn turn_end_becomes_agent_end() {
         let out = events_to_orbit(&[UiEvent::new("turn_end", json!({}))]);
         assert_eq!(out[0]["type"], "agent_end");
-        assert_eq!(out[0]["will_retry"], false);
+        assert_eq!(out[0]["willRetry"], false, "orbit reads `willRetry`, not `will_retry`");
     }
 
     #[test]

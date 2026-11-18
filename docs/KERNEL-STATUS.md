@@ -90,13 +90,13 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 | 验收原文 | 状态 | 证据 |
 |---|---|---|
 | S0 两仓独立构建，harnessd 能调 `ExecPolicyEngine` | 改为进程依赖（§0.1） | `check-engine.sh` exit 0；`JsonRpcEngine` 只走 JSON-RPC，从不链接引擎 crate |
-| S1 orbit 界面能发一条消息，看到流式回复和工具调用 | 协议层完成，**GUI 未目测** | 事件名映射 + 终态泵 + 真进程测试；`orbit_dialect_end_to_end` 通过 |
+| S1 orbit 界面能发一条消息，看到流式回复和工具调用 | 数据层已验证，**界面仍需人眼看一次** | 真跑输出回放：`a_real_session_parses_into_the_events_the_ui_renders` 解析出文本增量 + tool_execution_start/end + agent_end |
 | S2 切换模型/档位生效；fork 出新会话能跑到不同结论 | 模型/分叉实测，**档位只到单测** | `POST /v1/providers/ollama/switch` 200；`POST /v1/threads/{id}/fork` → 201 新 id；`effort_is_sent_as_reasoning_effort` 单测 |
 | S3 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | 前两条通过，**缓存命中未测** | steer 实测 `steer_count=1`（轮次跑动中插话）；`ten_long_tasks_are_not_falsely_killed` 0/10；缓存命中要真 provider 的 usage 字段 |
 | S4 写一个 Go 插件，deny 一条命令，内核记录并继续 | **通过** | `go_plugin_can_deny_a_command_and_the_kernel_records_it`：线上回 decline、日志记 `guard.deny`（带 `source: plugin`）、下一问照常 accept |
 | S5 通过率/返工率/误杀率有基线数字 | 通过率+误杀率有，**返工率口径待定** | 20/20（脚本化）、0/20（1.5B）；误杀 0/10 |
 
-### 这一轮修掉的四个真缺陷
+### 这一轮修掉的六个真缺陷
 
 1. **守卫的阶梯被自己挡住**：`after_call` 在失败熔断命中时直接 `return Note`，
    于是「同一条命令失败 12 次」永远只拿到温馨提示，升不到拒跑/终止——守卫形同摆设，
@@ -110,6 +110,19 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
    20/20 的基线里「tools=0」本该是红灯，却没人看。修完真跑：每题 tools=1。
 4. **assistant 消息同样漏记**：stdio 叫 `agentMessage`、HTTP 叫 `agent_message`，
    只认前者。现在两种都认。
+5. **工具调用在界面上不是工具**：`item_start/item_end` 一律翻成 message_start/end，
+   界面只会看到"消息"，看不到"在跑 bash"。现在按 item 种类细分成
+   `tool_execution_start/end`。
+6. **文本增量键名与 orbit 解析器不一致**：我发 `assistant`，orbit 读
+   `assistantMessageEvent`（`types.rs:934`）——键名写错不报错，界面就是一片空白。
+   已对齐，并用真跑输出回放钉住。
+
+### 一个不是我造成、但我得说清楚的坑
+
+`apps/orbit` 里 `orbit-pi`（TUI 二进制）的 19 个测试文件仍按老签名
+`spawn_with_bin(bin, workspace, session)` 三参调用，而 `orbit-rpc` 的签名是两参
+——**在我接手之前就编译不过**（`84425a2` 那版已是两参）。`orbit-rpc` 全绿，
+`orbit-pi` 待修；不要把它当绿。
 
 ### 指标口径（这次真的能算了）
 

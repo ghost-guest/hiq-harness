@@ -249,6 +249,20 @@ impl<E: Engine> Supervisor<E> {
     fn on_notification(&mut self, method: &str, params: Value) -> Result<Vec<UiEvent>> {
         let mut out = vec![UiEvent::new(ui_kind_for(method), params.clone())];
 
+        // 工具调用如果按 item_start/item_end 走，UI 只会把它当成一条消息，
+        // 看不到"在跑什么工具"。按 item 的种类再细分一次。
+        if method == "item/started" || method == "item/completed" {
+            if let Some(kind) = params.pointer("/item/kind").and_then(Value::as_str) {
+                if kind == "tool_call" {
+                    out[0].kind = if method == "item/started" {
+                        "tool_start".into()
+                    } else {
+                        "tool_end".into()
+                    };
+                }
+            }
+        }
+
         match method {
             "item/agentMessage/delta" => {
                 if let Some(d) = params.get("delta").and_then(Value::as_str) {

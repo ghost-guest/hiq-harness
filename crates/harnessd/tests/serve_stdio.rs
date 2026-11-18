@@ -182,7 +182,10 @@ fn orbit_dialect_end_to_end() {
     assert_eq!(responses[0]["success"], true);
 
     assert!(
-        parsed.iter().any(|v| v["type"] == "message_update" && v["assistant"]["text"] == "hello"),
+        parsed
+            .iter()
+            .any(|v| v["type"] == "message_update"
+                && v["assistantMessageEvent"]["delta"] == "hello"),
         "no streamed text in orbit's dialect: {lines:?}"
     );
     assert!(parsed.iter().any(|v| v["type"] == "agent_end"), "no agent_end: {lines:?}");
