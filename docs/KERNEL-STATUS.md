@@ -416,6 +416,38 @@ GET /v1/sessions  → 真实会话列表（id/title/runtime_store/created_at…�
 - `prompt` → 走到 provider 调用后返回 `-32603 Runtime owner 400`，因为本机 **没有配 provider key**
   （`codewhale auth status`：`not signed in`，provider 表为空）。这不是代码问题，是环境缺 key。
 
+## S1 的真引擎验收（这轮补上的）
+
+之前"界面能发一条消息、看到流式回复和工具调用"这条验收，证据只有 `render_tests` 里的
+**假 pi 子进程**——它能证明事件进得来，证明不了这条链对着真引擎跑得通。
+
+补的方式：`crates/orbit-rpc/examples/seam1_real_engine.rs`。orbit 自己的 `PiClient`
+拉起 harnessd（靠 `HARNESSD_HTTP_ENGINE` 指向真引擎，和界面走的是同一条路），发一句
+要求它真的调用 bash 的 prompt，然后卡三件事：**有流式文本 / 工具调用带真名字 / 收到收尾**。
+
+第一次跑就抓到两个真缺陷：
+
+1. **事件多包了一层**。harnessd 发 `{"type":"tool_execution_start","value":{…}}`，
+   而 orbit 的解析器（`Event::from_value`）把**整行**当 `value` 用，于是界面读到的是
+   `value.value.item`——工具行渲染成空白。改成平铺（`flat()`）。
+2. **工具字段是引擎方言**。HTTP 引擎给的是 `{"item":{metadata:{tool_name,tool_input}}}`，
+   界面读的是 `toolCallId` / `toolName` / `args`。加了 `tool_fields()` 把两种方言归一，
+   并补了一个测试 `a_tool_row_can_be_opened_by_tool_execution_alone`：**只靠**
+   `tool_execution_start` 也要能开出工具行（真引擎下没有 `toolCall` 内容块）。
+
+修完跑出来的是：
+
+```text
+文本长度: 13   文本片段: "```\nseam1\n```"
+工具调用: ["bash"]
+agent_end: true
+PASS 接缝① 真引擎
+```
+
+这里最该记住的一点：工具那条第一次是 `["?"]`——**事件到了，名字没到**。
+`text.is_empty()` 和 `tools.is_empty()` 两个判断都会放它过去，而界面上是一行空白。
+现在探针会专门断言"工具名不能是 `?`"。
+
 ## 会"绿得发空"的检查，全改成了会红
 
 这一类缺陷没有错误信号：检查照跑、结果照绿、什么都没验。一次只修一处，逐条改掉：

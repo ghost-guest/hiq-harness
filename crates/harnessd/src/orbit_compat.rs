@@ -61,6 +61,70 @@ pub fn params_of(v: &Value) -> Value {
     out
 }
 
+/// orbit 的事件解析器（`Event::from_value`）把**整行**当成 `value`，
+/// 所以字段必须平铺在顶层；再套一层 `"value"` 它就读不到了。
+/// 这类键名错不会报错，只会让界面上一片空白——只有在真引擎下跑一轮才暴露。
+fn flat(kind: &str, data: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    out.insert("type".into(), Value::String(kind.into()));
+    match data {
+        Value::Object(m) => {
+            for (k, v) in m {
+                if k == "type" {
+                    continue;
+                }
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        other => {
+            out.insert("value".into(), other.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+/// 工具事件有两种方言：
+///   HTTP/SSE：`{"item":{id, kind, metadata:{tool_name, tool_input, status, exit_code}}}`
+///   stdio   ：`{toolCallId, toolName, args, result}`
+/// 界面读的是后者那套键（`transcript.rs:2350` 起）。这里统一成界面认的形状。
+fn tool_fields(ty: &str, data: &Value) -> Value {
+    let item = data.get("item").unwrap_or(data);
+    let meta = item.get("metadata").unwrap_or(&Value::Null);
+    let first = |keys: &[&str]| -> Option<Value> {
+        for src in [item, meta, data] {
+            for k in keys {
+                if let Some(v) = src.get(*k) {
+                    if !v.is_null() {
+                        return Some(v.clone());
+                    }
+                }
+            }
+        }
+        None
+    };
+    let mut out = serde_json::Map::new();
+    out.insert("type".into(), Value::String(ty.into()));
+    if let Some(v) = first(&["toolCallId", "id"]) {
+        out.insert("toolCallId".into(), v);
+    }
+    if let Some(v) = first(&["toolName", "tool_name", "tool"]) {
+        out.insert("toolName".into(), v);
+    }
+    if let Some(v) = first(&["args", "tool_input", "input", "arguments"]) {
+        out.insert("args".into(), v);
+    }
+    if let Some(v) = first(&["status"]) {
+        out.insert("status".into(), v);
+    }
+    if let Some(v) = first(&["exitCode", "exit_code"]) {
+        out.insert("exitCode".into(), v);
+    }
+    if let Some(v) = first(&["result", "output"]) {
+        out.insert("result".into(), v);
+    }
+    Value::Object(out)
+}
+
 /// Our UI events → orbit events. Unknown kinds are forwarded as `unknown` so a
 /// new engine notification shows up in the UI instead of vanishing.
 pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
@@ -77,18 +141,18 @@ pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
                     "assistantMessageEvent": { "type": kind, "delta": text, "text": text }
                 })
             }
-            "tool_output_delta" => json!({ "type": "tool_execution_update", "value": e.data }),
-            "item_start" => json!({ "type": "message_start", "value": e.data }),
-            "item_end" => json!({ "type": "message_end", "value": e.data }),
-            "tool_call" | "tool_start" => json!({ "type": "tool_execution_start", "value": e.data }),
-            "tool_end" => json!({ "type": "tool_execution_end", "value": e.data }),
+            "tool_output_delta" => tool_fields("tool_execution_update", &e.data),
+            "item_start" => flat("message_start", &e.data),
+            "item_end" => flat("message_end", &e.data),
+            "tool_call" | "tool_start" => tool_fields("tool_execution_start", &e.data),
+            "tool_end" => tool_fields("tool_execution_end", &e.data),
             "turn_start" => json!({ "type": "turn_start" }),
             "turn_end" => json!({ "type": "agent_end", "willRetry": false }),
             "usage" => json!({ "type": "message_update", "usage": e.data }),
-            "compacted" | "compact_requested" => json!({ "type": "compaction_end", "value": e.data }),
-            "cache_freeze" => json!({ "type": "queue_update", "value": e.data }),
-            "steer_sent" | "follow_up_started" => json!({ "type": "queue_update", "value": e.data }),
-            "error" => json!({ "type": "extension_error", "value": e.data }),
+            "compacted" | "compact_requested" => flat("compaction_end", &e.data),
+            "cache_freeze" => flat("queue_update", &e.data),
+            "steer_sent" | "follow_up_started" => flat("queue_update", &e.data),
+            "error" => flat("extension_error", &e.data),
             other => json!({ "type": "unknown", "value": { "kind": other, "data": e.data } }),
         })
         .collect()

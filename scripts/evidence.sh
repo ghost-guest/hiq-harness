@@ -24,6 +24,38 @@ code_block() { say '```'; "$@" 2>&1; say '```'; }
 # 表格里留下一格空白，而脚本照样 exit 0。所以每一格都要对照一个形状检查，
 # 跑完只要有一格不合格就整体退出非零，并在末尾点名。
 PROBLEMS=()
+# 红点检查的两个函数放在这里，是为了能单独自测（--selftest-red）。
+KNOWN_RED="bench/known-red.txt"
+suite_names() { # 从 cargo 输出里取出 failures 块中的用例名
+  sed -n '/^failures:$/,/^$/p' | grep -E '^[[:space:]]{4}[A-Za-z_]' | sed 's/^[[:space:]]*//' | sort -u
+}
+check_red() { # suite_label, output
+  local label="$1" out="$2" names unknown
+  names=$(printf '%s\n' "$out" | suite_names)
+  if [ -z "$names" ]; then return 0; fi
+  unknown=$(printf '%s\n' "$names" | while read -r n; do
+              [ -z "$n" ] && continue
+              grep -q "^${label}::${n}\$" "$KNOWN_RED" 2>/dev/null || echo "$n"
+            done)
+  if [ -n "$unknown" ]; then
+    PROBLEMS+=("$label 出现未登记的失败：$(printf '%s' "$unknown" | tr '\n' ' ')")
+  fi
+}
+
+if [ "${1:-}" = "--selftest-red" ]; then
+  PROBLEMS=()
+  check_red orbit-pi 'failures:
+    nobody_registered_this_one'
+  check_red orbit-pi 'failures:
+    app::session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag'
+  if [ ${#PROBLEMS[@]} -eq 1 ] && printf '%s' "${PROBLEMS[0]}" | grep -q 'nobody_registered_this_one'; then
+    echo "selftest-red ok：未登记的那条被抓住，已登记的那条没误报"
+    exit 0
+  fi
+  echo "selftest-red FAILED：${PROBLEMS[*]:-（什么都没抓到）}"
+  exit 1
+fi
+
 need() {
   local name="$1" value="$2" pattern="$3"
   if ! printf '%s' "$value" | grep -Eq "$pattern"; then
@@ -40,17 +72,32 @@ say
 
 say "## 1. 测试"
 say
-say '| 套件 | 结果 |'
-say '|---|---|'
-ws=$(cargo test --workspace 2>&1 | grep -E "^test result" | awk '{p+=$4;f+=$6} END {print p" passed / "f" failed"}')
-need "workspace 测试结果" "$ws" '^[0-9]+ passed / [0-9]+ failed$'
+say '红点不是"允许红"，是"红点必须被解释"。实际失败的用例会与 `bench/known-red.txt`'
+say '求差：清单里没有的那一条，就是没人解释过的失败，本节直接判不合格。'
+say
+KNOWN_RED="bench/known-red.txt"
+ws_out=$(cargo test --workspace 2>&1)
+ws=$(printf '%s\n' "$ws_out" | grep -E "^test result" | awk '{p+=$4;f+=$6} END {print p" passed / "f" failed"}')
+need "workspace 测试结果" "$ws" '^[0-9]+ passed / 0 failed$'
+check_red "workspace" "$ws_out"
 say "| \`cargo test --workspace\`（内核 9 个 crate） | $ws |"
-rpc=$(cd apps/orbit && cargo test -p orbit-rpc 2>&1 | grep -E "^test result" | awk '{p+=$4;f+=$6} END {print p" passed / "f" failed"}')
-need "orbit-rpc 测试结果" "$rpc" '^[0-9]+ passed / [0-9]+ failed$'
+
+rpc_out=$(cd apps/orbit && cargo test -p orbit-rpc 2>&1)
+rpc=$(printf '%s\n' "$rpc_out" | grep -E "^test result" | awk '{p+=$4;f+=$6} END {print p" passed / "f" failed"}')
+need "orbit-rpc 测试结果" "$rpc" '^[0-9]+ passed / 0 failed$'
+check_red "orbit-rpc" "$rpc_out"
 say "| \`cargo test -p orbit-rpc\`（接缝① 客户端） | $rpc |"
-pi=$(cd apps/orbit && cargo test -p orbit-pi 2>&1 | grep -E "^test result" | tail -1 | sed -E 's/^test result: (FAILED|ok)\. //; s/; [0-9]+ (ignored|measured)[^;]*//g')
+
+pi_out=$(cd apps/orbit && cargo test -p orbit-pi 2>&1)
+pi=$(printf '%s\n' "$pi_out" | grep -E "^test result" | tail -1 | sed -E 's/^test result: (FAILED|ok)\. //; s/; [0-9]+ (ignored|measured)[^;]*//g')
 need "orbit-pi 测试结果" "$pi" 'passed; [0-9]+ failed'
+check_red "orbit-pi" "$pi_out"
+pi_names=$(printf '%s\n' "$pi_out" | suite_names | tr '\n' ' ')
 say "| \`cargo test -p orbit-pi\`（GPUI 界面，无头） | $pi |"
+if [ -n "$pi_names" ]; then
+  say
+  say "orbit-pi 的红点（每一条都在 \`bench/known-red.txt\` 里登记了原因）：\`$pi_names\`"
+fi
 say
 
 say "## 2. 基准自检（不花 token，不碰网络）"
@@ -136,7 +183,23 @@ say '> 这条通道曾经整条是坏的（id 硬编码 0 / 命令没摊平 / �
 say '> 而所有基线都跑在 `auto_approve:true` 上，所以没人发现。探针会自己起一个引擎去验。'
 probe=$(env CODEWHALE_HOME="$HOME_DIR" python3 scripts/probe-approval.py 2>&1)
 code_block printf '%s\n' "$probe"
-need "审批通道探针" "$probe" '^PASS ' 
+need "审批通道探针" "$probe" '^PASS '
+
+say "## 6. 接缝① 真引擎（orbit 客户端 → harnessd → 引擎）"
+say
+say '`orbit-pi` 的渲染测试用的是假 pi 子进程。这一节用**真的**：orbit 自己的'
+say '`PiClient` 拉起 harnessd（环境变量指定 HTTP 引擎，和界面走的是同一条路），'
+say '发一句 prompt，要求它真的调用 bash，然后检查流式文本 / 工具名 / 收尾三件事。'
+say
+# 独立的 home：§4 的引擎还在跑，共用同一个 CODEWHALE_HOME 会撞 workspace 身份。
+SEAM_HOME="$(mktemp -d /tmp/evidence-seam.XXXXXX)"
+[ -f "$HOME_DIR/config.toml" ] && cp "$HOME_DIR/config.toml" "$SEAM_HOME/" 2>/dev/null
+seam=$(cd apps/orbit && env HARNESS_ENGINE_BIN="$ENGINE_BIN" \
+        HARNESSD_BIN="$ROOT/target/debug/harnessd" CODEWHALE_HOME="$SEAM_HOME" \
+        cargo run -q -p orbit-rpc --example seam1_real_engine 2>&1)
+code_block printf '%s\n' "$seam"
+need "接缝① 真引擎" "$seam" '^PASS '
+rm -rf "$SEAM_HOME" 2>/dev/null || true
 
 if [ ${#PROBLEMS[@]} -gt 0 ]; then
   say

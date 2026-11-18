@@ -1,0 +1,16 @@
+# 已知红：这些用例**故意**不修，每条都写清原因。evidence.sh 会把实际失败集与这份清单
+# 求差：多出来的任何一条都算「证据不完整」，因为多出来的那条没人解释过。
+#
+# 格式：<套件>::<用例名>
+#
+# 分类原则：
+#   old-product-model  上游 pi 把 agent 装成外部依赖，我们的内核进程内跑——产品模型不同，测试的前提不成立
+#   design-diff        内核按设计拒绝这条路径（比如 Raw 直通），要变绿就得给内核加新协议
+#   env                 测试依赖宿主机上的东西（git 身份、字体度量）
+orbit-pi::onboarding::tests::every_dependency_has_an_install_hint
+orbit-pi::onboarding::tests::host_facts_cover_the_platform_and_the_stores
+orbit-pi::onboarding::tests::install_hints_match_the_host
+orbit-pi::git_accounts::tests::workspace_local_identity_and_remotes_are_read_without_remote_access
+orbit-pi::backdrop::tests::mark_placement_and_small_fallback
+orbit-pi::app::session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag
+orbit-pi::app::process_exit_cleanup_tests::a_custom_surface_closes_when_its_process_dies

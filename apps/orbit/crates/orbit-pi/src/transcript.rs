@@ -4514,6 +4514,42 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_row_can_be_opened_by_tool_execution_alone() {
+        // 真引擎（HTTP）下没有 `toolCall` 内容块，工具只有 `tool_execution_start`
+        // 一条事件——字段还是 harnessd 摊平后的 `toolCallId` / `toolName` / `args`。
+        // 如果界面只认内容块里的 toolCall，这条路会渲染成空行：看着接上了，其实没有。
+        let mut t = Transcript::new();
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        t.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::TextDelta {
+                delta: "跑一下".into(),
+            }),
+        });
+        t.apply_event(&Event::ToolExecutionStart {
+            value: json!({
+                "type": "tool_execution_start",
+                "toolCallId": "item_abc",
+                "toolName": "bash",
+                "args": {"command": "echo hi"},
+                "status": "in_progress"
+            }),
+        });
+        t.apply_event(&Event::ToolExecutionEnd {
+            value: json!({"toolCallId": "item_abc", "result": "hi", "status": "completed"}),
+        });
+        {
+            let messages = t.messages.borrow();
+            assert_eq!(messages.len(), 1);
+            let tools: Vec<_> = messages[0].tools().collect();
+            assert_eq!(tools.len(), 1, "工具行必须由 tool_execution_start 建出来");
+            assert_eq!(tools[0].name, "bash");
+        }
+    }
+
+    #[test]
     fn live_assistant_steps_merge_into_one_row() {
         // One turn, many steps: each step is a separate assistant message
         // from pi, but the transcript renders ONE row with ONE fold.

@@ -1,20 +1,24 @@
 <!-- 这份是 `bash scripts/evidence.sh` 的原样输出，不是手抄的。
      重跑：HARNESS_ENGINE_BIN=/path/to/codewhale bash scripts/evidence.sh
-     脚本自带形状检查：任何一格取不到数字，它会打印「证据不完整」并以非零退出。 -->
+     脚本自带形状检查：任何一格取不到数字就打印「证据不完整」并点名，exit 1；
+     失败用例必须全部登记在 bench/known-red.txt，多出一条就算不合格。 -->
 
 # S0–S5 验收证据
 
-- 生成时间：2026-11-19 05:36:03 CST
-- 提交：`00c7ada` (fix(ci): check-engine 从'没 vendored 就不查'改成真检查——引擎依赖与 path 逃逸两个方向都验过会红，并入 gate)
+- 生成时间：2026-11-19 06:05:10 CST
+- 提交：`60594f6` (fix(ci): 把四处'绿得发空'的检查改成会红——Go 缺失不再静默跳过、solver 失败单独计数并进门禁)
 - 引擎：`/tmp/kh/codewhale/target/debug/codewhale`（外部二进制，D1 进程依赖）
 
 ## 1. 测试
 
-| 套件 | 结果 |
-|---|---|
+红点不是"允许红"，是"红点必须被解释"。实际失败的用例会与 `bench/known-red.txt`
+求差：清单里没有的那一条，就是没人解释过的失败，本节直接判不合格。
+
 | `cargo test --workspace`（内核 9 个 crate） | 395 passed / 0 failed |
 | `cargo test -p orbit-rpc`（接缝① 客户端） | 94 passed / 0 failed |
-| `cargo test -p orbit-pi`（GPUI 界面，无头） | 1931 passed; 6 failed; 0 filtered out; finished in 39.70s |
+| `cargo test -p orbit-pi`（GPUI 界面，无头） | 1932 passed; 6 failed; 0 filtered out; finished in 40.47s |
+
+orbit-pi 的红点（每一条都在 `bench/known-red.txt` 里登记了原因）：`app::session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag backdrop::tests::mark_placement_and_small_fallback git_accounts::tests::workspace_local_identity_and_remotes_are_read_without_remote_access onboarding::tests::every_dependency_has_an_install_hint onboarding::tests::host_facts_cover_the_platform_and_the_stores onboarding::tests::install_hints_match_the_host `
 
 ## 2. 基准自检（不花 token，不碰网络）
 
@@ -63,7 +67,7 @@ selftest ok: 20 tasks, every check fails before the fix and passes after
 ```
 ### 4.2 建会话
 ```
-{"schema_version":2,"id":"thr_ca537ab3ca3a4b11a78d05489121c897","created_at":"2026-11-18T21:37:47.864727Z","updated_at":"2026-11-18T21:37:47.864727Z","model":"auto/deepseek-v4.1-flash","model_provider":"custom","model_provider_id":"magipe","workspace":"/private/tmp/evidence-ws.zOEydc","mode":"agent"```
+{"schema_version":2,"id":"thr_b7a6848f3623411badf25867ccd68967","created_at":"2026-11-18T22:06:56.766214Z","updated_at":"2026-11-18T22:06:56.766214Z","model":"auto/deepseek-v4.1-flash","model_provider":"custom","model_provider_id":"magipe","workspace":"/private/tmp/evidence-ws.DareNA","mode":"agent"```
 ### 4.3 档位（合法值被接受，非法值被拒绝并列出**全部**取值）
 ```
 reasoning_effort=low   -> 201
@@ -73,13 +77,13 @@ Unrecognized reasoning effort "bogus". Expected one of: auto, off, minimal, low,
 ```
 ### 4.4 事件流里真的有工具调用和用量
 ```
-事件种类: {'thread.started': 1, 'turn.started': 1, 'item.started': 3, 'item.completed': 4, 'turn.lifecycle': 1, 'turn.workspace_snapshot': 4, 'model.tools.snapshot': 3, 'turn.provider_request': 2, 'turn.usage': 2, 'operation.activity_started': 1, 'operation.activity_completed': 1, 'item.delta': 1, 'turn.completed': 1, 'turn.artifacts': 1}
+事件种类: {'thread.started': 1, 'turn.started': 1, 'item.started': 4, 'item.completed': 5, 'turn.lifecycle': 1, 'turn.workspace_snapshot': 4, 'model.tools.snapshot': 3, 'turn.provider_request': 2, 'turn.usage': 2, 'operation.activity_started': 1, 'operation.activity_completed': 1, 'item.delta': 2, 'turn.completed': 1, 'turn.artifacts': 1}
 工具调用: ['bash', 'bash']
-用量: {"input_tokens": 9223, "output_tokens": 32, "prompt_cache_hit_tokens": 9088, "prompt_cache_miss_tokens": 135, "reasoning_tokens": 0, "reasoning_replay_tokens": 4}
+用量: {"input_tokens": 9203, "output_tokens": 23, "prompt_cache_hit_tokens": 9088, "prompt_cache_miss_tokens": 115, "reasoning_tokens": 3, "reasoning_replay_tokens": 4}
 ```
 ### 4.5 fork 出新会话（接在一个已完成轮次的会话上——空会话没有可分的枝）
 ```
-n_observation":{"sessions_dir":"/tmp/evidence-home.HxT19A/sessions","session_id":"8a16e2d5-6411-4f32-8cc0-a93b0a1a4c58","document_sha256":"422d0d4ba800fdbc80511d3aca52b020258b7bc02ee9191c775be4203fc94c9b","checkpoint_sha256":null},"covered_turn_id":"turn_cac04da0679948258a4107c38c951300","messages_sha256":"3252fe5199a5a2bf72255aff5e2be7a3495762c17644a309e8bbcba4a1129257","messages_len":4}}
+n_observation":{"sessions_dir":"/tmp/evidence-home.hUfwHW/sessions","session_id":"cc5b93ea-877d-48e2-957f-a98a78572167","document_sha256":"3bc0ef2e052b04dddd7782fd5677f7cdabfc18da39cf70eac535a16c5cc13ab8","checkpoint_sha256":null},"covered_turn_id":"turn_7b0a2f1b987d410ba8fc0a86147291d4","messages_sha256":"167ad54fe49f56c8a59eb665151d8ea8a2b1cb3c26978676ef003e969c996b5c","messages_len":4}}
 -> 201
 ```
 ### 5. 审批通道：真引擎里 deny 一条命令，这一轮还能正常收尾
@@ -87,10 +91,33 @@ n_observation":{"sessions_dir":"/tmp/evidence-home.HxT19A/sessions","session_id"
 > 这条通道曾经整条是坏的（id 硬编码 0 / 命令没摊平 / 词表抄错 / 重复投递），
 > 而所有基线都跑在 `auto_approve:true` 上，所以没人发现。探针会自己起一个引擎去验。
 ```
-approval: id=approval_55b8fdd50bd74bab925d5e9b4f3e8c34 tool=bash command='echo hi'
-POST /v1/approvals/approval_55b8fdd50bd74bab925d5e9b4f3e8c34 {'decision':'deny'} → 200 ok
+approval: id=approval_2688bf7de2484568a56fa33c82e6f649 tool=bash command='echo hi'
+POST /v1/approvals/approval_2688bf7de2484568a56fa33c82e6f649 {'decision':'deny'} → 200 ok
 turn end: turn.completed
 PASS 审批通道：id 对、命令对、deny 被接受、这一轮正常收尾
+```
+## 6. 接缝① 真引擎（orbit 客户端 → harnessd → 引擎）
+
+`orbit-pi` 的渲染测试用的是假 pi 子进程。这一节用**真的**：orbit 自己的
+`PiClient` 拉起 harnessd（环境变量指定 HTTP 引擎，和界面走的是同一条路），
+发一句 prompt，要求它真的调用 bash，然后检查流式文本 / 工具名 / 收尾三件事。
+
+```
+warning: variable does not need to be mutable
+   --> /Users/mac_522/Desktop/personal-Agentharness/crates/cli/src/llm_transport.rs:192:13
+    |
+192 |         let mut options = self.build_options(tools)?;
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+文本长度: 20
+文本片段: "```\nseam1\n```\n\nDone."
+工具调用: ["bash"]
+agent_end: true
+PASS 接缝① 真引擎：orbit 客户端 → harnessd → 引擎，流式文本 + 工具调用 + 收尾都在
 ```
 
 > 上面每一条都是刚刚现场跑出来的；没有任何一步读仓库里的历史产物（基准 JSON 除外，它是跑分留下的事实记录）。
