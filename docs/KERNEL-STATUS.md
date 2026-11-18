@@ -344,31 +344,54 @@ GET /v1/sessions  → 真实会话列表（id/title/runtime_store/created_at…�
 
 ## 已知缺口（不粉饰）
 
-1. ~~工具执行还没接~~ **已接 HTTP 传输**（`crates/harnessd/src/http_engine.rs`）：
-   `POST /v1/threads` 建线程 → `POST /v1/threads/{id}/turns {prompt}` 起轮（工具/审批在这一面），
-   `GET /v1/threads/{id}/events` SSE 流式、`POST …/interrupt`、`…/steer`、`POST /v1/approvals/{id}` 审批。
-   模型目录走 `GET /v1/providers` + `/v1/providers/{id}/models`（没有 `/v1/models`，404 已实测）。
-2. ~~审批应答的字段名未对真引擎验证过~~ **已按源码对正**：
-   `CommandExecutionRequestApprovalResponse { decision }`，
-   取值 `accept / acceptForSession / acceptWithExecpolicyAmendment / applyNetworkPolicyAmendment / decline / cancel`
-   （`app-server-protocol/src/v2.rs:542-560`）；
-   请求侧是 `command` + `commandActions[]`（`read|listFiles|search|unknown`）+ `itemId`，
-   **没有 tool 字段**（同文件 `:584-608`）。
-   我们已把 `commandActions` 映射成守卫认识的 `read_file/list_dir/grep`，应答改用 `accept/decline/cancel`，
-   并由 `real_engine_payload_maps_command_actions_to_our_tool_names` 与
-   `approval_accepts_with_the_engines_own_wording` 两个测试钉住。
-3. **未跑过任何真实任务**。二进制能编、能握手、能列模型、能起轮；
-   起轮一路走到 provider 后返回 `400 DeepSeek API key not found`（错误原文已透传，不是假成功）。
-   缺 key 是唯一阻塞，`bench --solver` 因此仍无基线数字。
-4. **orbit 的 `client.rs` 还没指向 harnessd**。协议层已兼容（`--compat orbit`），
-   但 orbit 目前仍在进程内直接驱动旧内核；把它改成 spawn `harnessd serve --compat orbit` 是最后一步接线。
-5. 守卫的三级阶梯阈值沿用现项目 `harness-guards`，没有在 20 任务上标定过误杀率。
-6. `thread/message`（steer 与 HTTP 侧交互）的参数形状未验证：stdio 有这个方法，但没探到参数结构。
+按"是不是真的挡事"排序，每一条都写了为什么不挡。
+
+### 挡事的三条
+
+1. **界面排版没有人眼看过。** 机器能判的部分（流式文本、工具行、结束态、退出清理、
+   重连）已经有测试钉住（见上面 `render_tests`/1931 条）。剩下的只是"好不好看"，
+   需要一台醒着的机器点一次。
+2. **上游 `orbit-pi` 还有 6 条红。** 全部归类在上面那张表：`onboarding`×3 断言的是
+   外部 pi 安装那套旧产品模型、`git_accounts` 缺 git 身份、`backdrop` 长宽比、
+   `session_park` 停靠会话取消 UI。改它们等于改上游产品定义或环境假设，不属于内核。
+3. **引擎二进制不在本仓库。** D1 是进程依赖：`harnessd` 只通过 JSON-RPC/HTTP 跟它说话，
+   从不链接它的 crate（`check-engine.sh` 守着这条）。所以跑任何实测都要先
+   `HARNESS_ENGINE_BIN=/path/to/codewhale`。这是**设计**，不是遗漏；代价是部署时要多带一个二进制。
+
+### 不挡事、但要知道的
+
+4. **X（Twitter）那一路调研没做。** 候选池只来自 GitHub stars（670 个，含 dim/pi-jax/PIG 校验）
+   与手工对比。X 需要登录态，抓不了；结论因此只覆盖了一半来源。
+5. **方案原文 S0 写的是"git submodule + engine 作为 lib 路径依赖"**，实施改成了进程依赖。
+   原因写在 `KERNEL-FUSION-PLAN.md` §0.1：引擎是别人的代码，D4 禁改；链接进去等于把
+   "升级引擎"变成"重新编译我们的内核"。**这里文档与实现有张力，已标注，不改成一致是为了
+   保留当时的判断痕迹。**
+6. **档位只验证了"引擎接受并透传"**（9 个合法取值、非法值报错、`effort → reasoning_effort`
+   有单测）。没有一个模型宣称自己的 reasoning levels（DeepSeek 走代理时 `reasoning_effort_levels: []`），
+   所以"不同档位产出不同质量"这件事只能等一个有档位的模型来测。
+
+### 已经完全不是缺口的（之前记在这里，现已做掉）
+
+- ~~工具执行没接~~ → HTTP 传输全通，真模型 20/20 跑过。
+- ~~审批字段没对真引擎验证~~ → 按源码对正并有测试钉住。
+- ~~没跑过任何真实任务~~ → 跑了 20 题，1.0 通过率。
+- ~~orbit 的 client 还没指向 harnessd~~ → 已指向，`spawn_with_program` + `--compat orbit`，
+  界面层 1931 条测试就是走这条路。
+- ~~守卫阈值没有标定~~ → 10 个长任务误杀 0；同一条失败重复 12 次仍会被拦。
+- ~~steer 参数形状未知~~ → `{"prompt": …}`，实测 `steer_count=1`。
 
 ## 下一步（按顺序）
 
-1. 加 HTTP 传输（`app-server --http` → `/v1/*`，SSE），把工具、审批、流式事件真正接上；
-   已确认入口：`/healthz`、`/v1/sessions`，默认端口 7878，本地可用 `--insecure-no-auth`
-2. 配 provider key（`DEEPSEEK_API_KEY` 或 `codewhale auth`）→ 跑 `bench --solver` 出第一版基线
-2. orbit `client.rs` 换后端（SSE → app-server JSON-RPC），复用现有 `bridge.rs` 的事件映射
-3. 用基线数字标定守卫阈值（误杀率目标：合法长任务 0 误杀）
+上面 S0–S5 都收了，下面是把这套东西变成日常主力要做的四件事，按收益排序。
+
+1. **用 20 题以外的工作负载再测一次稳定性。** 现在的基线是自造 20 题（10 绿 + 10 棕地），
+   通过率 1.0 有天花板效应。要证明"不反复返工"，得拿真实仓库跑：一个已有测试的项目、
+   一个需要跨多文件改的 bug、一次依赖升级。
+2. **把返工率做成回归门禁。** 现在 `bench/run.py` 会算 `rework_rate / false_kill_rate`，
+   但它只在手跑。接进 CI（或 pre-push hook）才叫门禁：返工率超过 5% 或误杀率非 0 就挡。
+3. **插件层补第二个真插件。** 现在只有 `example-echo`（`echo.run` + `policy.check`）。
+   第二个应该是个**真守卫**：比如禁止 `git push --force`、禁止改 `.env`，用 Go 写，
+   走同一条 `tool.pre` 通道。
+4. **把 `session_park` 那条红的根因查掉。** 它是唯一一条"可能是我们接缝没接对"的红：
+   停靠会话里的取消请求没写到停靠进程。其余 5 条已经定性为上游/环境。
+
