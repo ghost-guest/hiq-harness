@@ -165,7 +165,7 @@ harnessd ──stdio JSON-RPC──▶ 插件进程（Go）
 | Sprint | 内容 | 改动深度 | 验收 | 工期 |
 |---|---|---|---|---|
 | **S0 地基** | codewhale 作为 git submodule + 一个空 harnessd crate 能 `cargo build`；engine 作为 lib 路径依赖 | D1 | 两仓独立构建，harnessd 能调 `ExecPolicyEngine` | 2 天 |
-| **S1 接缝① 打通** | 36 命令映射（Auth/Quota 诚实返回不适用）；SSE 事件流；`Prompt` 能真跑一轮 | D2 | orbit 界面能发一条消息，看到流式回复和工具调用 | 5 天 |
+| **S1 接缝① 打通** | 35 命令映射（`CommandBody` 实际变体数；Auth/Quota 诚实返回不适用）；SSE 事件流；`Prompt` 能真跑一轮 | D2 | orbit 界面能发一条消息，看到流式回复和工具调用 | 5 天 |
 | **S2 模型 + 会话** | model-router（DeepSeek + Magpie + 七档 effort）、`thread/fork`、`GetEntries`、session 持久化 | D2 | 切换模型/档位生效；fork 出新会话能跑到不同结论 | 4 天 |
 | **S3 融合件** | steer-gate、guards 三件、cache-guard、time-bus log | D2+D3 | 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | 6 天 |
 | **S4 插件层** | hook-host（Go stdio）、`plugin/hello` 握手、崩溃隔离、6 个事件 | D2 | 写一个 Go 插件，deny 一条命令，内核记录并继续 | 5 天 |

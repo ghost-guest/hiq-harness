@@ -114,7 +114,14 @@ class Handler(BaseHTTPRequestHandler):
             "object": "chat.completion",
             "model": req.get("model", "scripted"),
             "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+            # 带上缓存字段，好让「缓存命中率」的统计口径也被跑一遍。
+            # 注意：这些数字是脚本给的，量的是口径不是真实缓存；真数字要真 provider。
+            "usage": {
+                "prompt_tokens": 2000,
+                "completion_tokens": 50,
+                "total_tokens": 2050,
+                "prompt_tokens_details": {"cached_tokens": 1800},
+            },
         }
         if not req.get("stream"):
             self._send(payload)

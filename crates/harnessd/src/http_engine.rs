@@ -367,7 +367,14 @@ impl Engine for HttpEngine {
                                     f.id = Some(0);
                                     out.push(f);
                                 } else {
-                                    out.push(Frame::notification(method, v));
+                                    // 事件的内容在 `payload` 里，信封只是外壳。
+                                    // 把整个信封往下传，下游就永远看见 item=None，
+                                    // 工具调用一条也记不到——指标全绿但什么都没量。
+                                    let payload = v
+                                        .get("payload")
+                                        .cloned()
+                                        .unwrap_or_else(|| v.clone());
+                                    out.push(Frame::notification(method, payload));
                                 }
                             }
                         }

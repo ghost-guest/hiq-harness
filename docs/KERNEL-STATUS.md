@@ -96,7 +96,7 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 | S4 写一个 Go 插件，deny 一条命令，内核记录并继续 | **通过** | `go_plugin_can_deny_a_command_and_the_kernel_records_it`：线上回 decline、日志记 `guard.deny`（带 `source: plugin`）、下一问照常 accept |
 | S5 通过率/返工率/误杀率有基线数字 | 通过率+误杀率有，**返工率口径待定** | 20/20（脚本化）、0/20（1.5B）；误杀 0/10 |
 
-### 这一轮修掉的两个真缺陷
+### 这一轮修掉的四个真缺陷
 
 1. **守卫的阶梯被自己挡住**：`after_call` 在失败熔断命中时直接 `return Note`，
    于是「同一条命令失败 12 次」永远只拿到温馨提示，升不到拒跑/终止——守卫形同摆设，
@@ -105,6 +105,26 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 2. **插件只能看不能否**：`policy.check` 从来没被内核调用过，
    `guard.deny` 只是单向广播。现在审批前先问插件，插件 deny 即 `decline`；
    SDK 返回的 `{"content": {...}}` 包装层也一并解掉了。
+3. **HTTP 路径下的工具调用从来没进过日志**：SSE 把**整个信封**当参数往下传，
+   而 item 在 `payload` 里，于是 `item=None`、一条 `tool.call` 也不记。
+   20/20 的基线里「tools=0」本该是红灯，却没人看。修完真跑：每题 tools=1。
+4. **assistant 消息同样漏记**：stdio 叫 `agentMessage`、HTTP 叫 `agent_message`，
+   只认前者。现在两种都认。
+
+### 指标口径（这次真的能算了）
+
+`bench/run.py` 现在从 time-bus 日志直接算三个数：
+
+- **通过率**：`passed / total`
+- **返工率**：`repeats / tool_calls`，即「同一调用在一轮里被执行第二次」的占比。
+  首跑不算返工，重跑才算 —— 这是我能自证的口径，不是你定义的，随时可换。
+- **误杀率**：带 `guard.deny` 的任务占比
+- **缓存命中率**：`Σcached / Σinput`，来源是引擎的 usage 事件
+
+最近一次真跑（脚本化 provider，20 题，fresh `CODEWHALE_HOME`）：
+通过率 **1.0**、返工率 **0.0**、误杀率 **0.0**、平均 **3.49 s**、每题工具调用 **1**，
+缓存命中率 **null** —— 引擎对脚本化 provider 不上报 usage（`input_tokens=0`），
+这一格只能等真 provider 才能填。
 
 ### S5 基线：真管道、真工具、真改文件
 

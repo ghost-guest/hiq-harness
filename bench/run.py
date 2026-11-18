@@ -68,20 +68,38 @@ def read_log(d):
     p = d / ".harness" / "timebus.ndjson"
     if not p.exists():
         return {}
-    calls = denied = 0
+    calls = denied = repeats = 0
+    input_tokens = cached_tokens = 0
     blocked = False
     for line in p.read_text(encoding="utf-8").splitlines():
         try:
             e = json.loads(line)
         except json.JSONDecodeError:
             continue
+        payload = e.get("payload") or {}
         if e.get("kind") == "tool.call":
             calls += 1
-            if (e.get("payload") or {}).get("status") == "uncertain":
+            if payload.get("repeat"):
+                repeats += 1
+            if payload.get("status") == "uncertain":
                 blocked = True
         elif e.get("kind") == "guard.deny":
             denied += 1
-    return {"tool_calls": calls, "denials": denied, "blocked": blocked}
+        elif e.get("kind") == "usage":
+            input_tokens += int(payload.get("input_tokens") or 0)
+            cached_tokens += int(payload.get("cached_tokens") or 0)
+    # 返工率：一轮里同一调用被执行第二次，才算"重做"（首次执行不算）。
+    rework = round(repeats / calls, 3) if calls else 0.0
+    cache_hit = round(cached_tokens / input_tokens, 3) if input_tokens else None
+    return {
+        "tool_calls": calls,
+        "denials": denied,
+        "blocked": blocked,
+        "repeats": repeats,
+        "rework_rate": rework,
+        "input_tokens": input_tokens,
+        "cache_hit_rate": cache_hit,
+    }
 
 
 def selftest(tasks):
@@ -126,13 +144,21 @@ def run(tasks, solver, out_path):
                "duration_s": round(dt_solve + dt, 2), "detail": out[:400], **read_log(d)}
         results.append(res)
         print(f"{t['id']:<22} {t['kind']:<11} {'PASS' if ok else 'FAIL':<4} {res['duration_s']:>6}s "
-              f"tools={res.get('tool_calls', 0)} denied={res.get('denials', 0)}")
+              f"tools={res.get('tool_calls', 0)} denied={res.get('denials', 0)} "
+              f"rework={res.get('rework_rate', 0)}")
         shutil.rmtree(d, ignore_errors=True)
 
     n = len(results)
     passed = sum(1 for r in results if r["pass"])
     summary = {
         "total": n,
+        "rework_rate": round(sum(r.get("rework_rate", 0) for r in results) / n, 3),
+        "false_kill_rate": round(sum(1 for r in results if r.get("denials")) / n, 3),
+        "cache_hit_rate": (round(
+            sum(r.get("input_tokens", 0) for r in results) and
+            sum(r["input_tokens"] * (r.get("cache_hit_rate") or 0) for r in results)
+            / sum(r.get("input_tokens", 0) for r in results), 3)
+            if sum(r.get("input_tokens", 0) for r in results) else None),
         "passed": passed,
         "pass_rate": round(passed / n, 3) if n else 0.0,
         "greenfield_pass_rate": round(

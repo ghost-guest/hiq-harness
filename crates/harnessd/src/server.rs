@@ -26,6 +26,9 @@ pub struct Supervisor<E: Engine> {
     pub plugins: PluginHost,
     pub state: SessionState,
     text_buffer: String,
+    /// 本轮内出现过的工具调用签名 → 次数。返工率就是从这里量的：
+    /// 同一条命令在一轮里被执行两次，才是真的"重做"。
+    tool_seen: std::collections::HashMap<String, u32>,
     approvals: u64,
     denials: u64,
 }
@@ -41,6 +44,7 @@ impl<E: Engine> Supervisor<E> {
             plugins: PluginHost::new(),
             state: SessionState::default(),
             text_buffer: String::new(),
+            tool_seen: std::collections::HashMap::new(),
             approvals: 0,
             denials: 0,
         }
@@ -94,6 +98,7 @@ impl<E: Engine> Supervisor<E> {
                 if method == "turn/start" || method.starts_with("prompt/") {
                     self.guards.begin_turn();
                     self.text_buffer.clear();
+                    self.tool_seen.clear();
                     self.log.append("turn.start", json!({ "thread": self.state.thread_id }))?;
                     self.plugins.broadcast("turn.start", json!({ "thread": self.state.thread_id }));
                 }
@@ -253,20 +258,33 @@ impl<E: Engine> Supervisor<E> {
             "item/completed" => {
                 let item = params.get("item").cloned().unwrap_or(Value::Null);
                 let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
-                if kind.contains("agentMessage") && !self.text_buffer.is_empty() {
+                // stdio 叫 agentMessage，HTTP/SSE 叫 agent_message——两种都认。
+                if (kind.contains("agentMessage") || kind == "agent_message")
+                    && !self.text_buffer.is_empty()
+                {
                     let text = std::mem::take(&mut self.text_buffer);
                     self.log.append("message", json!({ "role": "assistant", "text": text }))?;
                 }
-                if kind.contains("commandExecution") || kind.contains("mcpToolCall") {
+                // 两种方言：stdio 的 item.type 是 commandExecution/mcpToolCall，
+                // HTTP/SSE 的 item.kind 是 tool_call 且名字在 metadata.tool_name。
+                // 只认前者会让 HTTP 跑分永远是 tools=0——指标看着绿，其实没量。
+                let http_tool = item.get("kind").and_then(Value::as_str) == Some("tool_call");
+                if kind.contains("commandExecution") || kind.contains("mcpToolCall") || http_tool {
                     let call_id = item
                         .get("id")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown")
                         .to_string();
                     let tool = item
-                        .get("command")
+                        .pointer("/metadata/tool_name")
                         .and_then(Value::as_str)
-                        .unwrap_or(kind)
+                        .or_else(|| item.get("command").and_then(Value::as_str))
+                        .unwrap_or(if http_tool { "tool" } else { kind })
+                        .to_string();
+                    let input = item
+                        .pointer("/metadata/tool_input")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
                         .to_string();
                     // Rule 5 of the time-bus: an effect we did not observe is
                     // `uncertain` and blocks, it is never assumed to have happened.
@@ -275,8 +293,20 @@ impl<E: Engine> Supervisor<E> {
                         Some("failed") => "committed",
                         _ => "uncertain",
                     };
-                    self.log
-                        .append("tool.call", json!({ "call_id": call_id, "tool": tool, "status": status }))?;
+                    let signature = format!("{tool}\u{0}{input}");
+                    let seen = self.tool_seen.entry(signature).or_insert(0);
+                    *seen += 1;
+                    let repeat = *seen > 1;
+                    self.log.append(
+                        "tool.call",
+                        json!({
+                            "call_id": call_id,
+                            "tool": tool,
+                            "status": status,
+                            "repeat": repeat,
+                            "digest": digest(&input),
+                        }),
+                    )?;
                     self.plugins.broadcast("tool.post", json!({ "tool": tool, "status": status }));
                 }
                 // Steer releases at an item boundary, never mid-token.
@@ -307,7 +337,25 @@ impl<E: Engine> Supervisor<E> {
                     }
                 }
             }
-            "thread/tokenUsage/updated" => {
+            "thread/tokenUsage/updated" | "usage" | "turn/usage" => {
+                // 缓存命中率只能从引擎报的 usage 里量：input 与 cached。
+                // 两种命名都认（stdio 驼峰，HTTP/SSE 蛇形）。
+                let input = params
+                    .get("input_tokens")
+                    .or_else(|| params.get("promptTokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let cached = params
+                    .get("cached_tokens")
+                    .or_else(|| params.get("cachedTokens"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if input > 0 {
+                    self.log.append(
+                        "usage",
+                        json!({ "input_tokens": input, "cached_tokens": cached }),
+                    )?;
+                }
                 let prompt = params.get("promptTokens").and_then(Value::as_u64).unwrap_or(0);
                 let cached = params.get("cachedTokens").and_then(Value::as_u64).unwrap_or(0);
                 self.cache.observe(prompt, cached);
