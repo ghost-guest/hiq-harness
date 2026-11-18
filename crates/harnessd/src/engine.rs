@@ -32,6 +32,10 @@ pub struct JsonRpcEngine {
     inbox: VecDeque<Frame>,
     next_id: u64,
     timeout: Duration,
+    /// How long to wait for the first notification after a reply. A response and
+    /// the notifications that follow it arrive as separate lines; draining
+    /// non-blockingly would strand every one of them.
+    notify_grace: Duration,
 }
 
 impl JsonRpcEngine {
@@ -62,7 +66,15 @@ impl JsonRpcEngine {
                 }
             })?;
 
-        Ok(Self { child, stdin, rx, inbox: VecDeque::new(), next_id: 1, timeout: Duration::from_secs(600) })
+        Ok(Self {
+            child,
+            stdin,
+            rx,
+            inbox: VecDeque::new(),
+            next_id: 1,
+            timeout: Duration::from_secs(600),
+            notify_grace: Duration::from_millis(50),
+        })
     }
 
     pub fn with_timeout(mut self, t: Duration) -> Self {
@@ -109,6 +121,21 @@ impl Engine for JsonRpcEngine {
     }
 
     fn notifications(&mut self) -> Vec<Frame> {
+        // Anything the engine wrote after the response we were waiting for is
+        // still in the pipe. Wait once (bounded) so a reply's trailing events are
+        // not lost, then drain whatever else is ready.
+        if self.inbox.is_empty() {
+            if let Ok(line) = self.rx.recv_timeout(self.notify_grace) {
+                if let Ok(frame) = protocol::decode(&line) {
+                    self.inbox.push_back(frame);
+                }
+            }
+        }
+        while let Ok(line) = self.rx.try_recv() {
+            if let Ok(frame) = protocol::decode(&line) {
+                self.inbox.push_back(frame);
+            }
+        }
         self.inbox.drain(..).collect()
     }
 

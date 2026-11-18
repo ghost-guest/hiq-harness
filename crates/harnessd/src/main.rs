@@ -89,7 +89,7 @@ fn serve(args: &[String]) -> Result<()> {
         let frame = match harnessd::protocol::decode(&line) {
             Ok(f) => f,
             Err(e) => {
-                writeln!(out, "{}", encode(&Frame::error_response(0, -32700, e.to_string())))?;
+                write!(out, "{}", encode(&Frame::error_response(0, -32700, e.to_string())))?;
                 out.flush()?;
                 continue;
             }
@@ -98,13 +98,13 @@ fn serve(args: &[String]) -> Result<()> {
         let method = frame.method.clone().unwrap_or_default();
         match sup.handle(&method, frame.params.unwrap_or(Value::Null)) {
             Ok((reply, events)) => {
-                writeln!(out, "{}", encode(&Frame::response(id, reply)))?;
+                write!(out, "{}", encode(&Frame::response(id, reply)))?;
                 for e in events {
-                    writeln!(out, "{}", encode(&Frame::notification("event", serde_json::to_value(e)?)))?;
+                    write!(out, "{}", encode(&Frame::notification("event", serde_json::to_value(e)?)))?;
                 }
             }
             Err(e) => {
-                writeln!(out, "{}", encode(&Frame::error_response(id, -32601, e.to_string())))?;
+                write!(out, "{}", encode(&Frame::error_response(id, -32601, e.to_string())))?;
             }
         }
         out.flush()?;
