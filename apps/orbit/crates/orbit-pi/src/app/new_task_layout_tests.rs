@@ -267,7 +267,7 @@ fn first_send_slides_the_composer_to_the_bottom(cx: &mut gpui::TestAppContext) {
     cx.simulate_resize(gpui::size(px(1200.), px(760.)));
     cx.update(|_, cx| {
         app.update(cx, |app, cx| {
-            let client = PiClient::spawn_with_bin(bin.to_str().unwrap(), fake.path(), None)
+            let client = PiClient::spawn_with_program(bin.to_str().unwrap(), fake.path(), None)
                 .expect("spawn fake pi");
             app.adopt_client(client);
             app.input

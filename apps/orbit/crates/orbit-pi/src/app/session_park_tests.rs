@@ -84,7 +84,7 @@ fn spawn_fake(app: &mut OrbitApp, fake: &FakePi) -> PiClient {
         .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
+    PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
         .expect("spawn fake pi")
 }
 

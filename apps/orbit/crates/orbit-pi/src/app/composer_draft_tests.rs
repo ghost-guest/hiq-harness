@@ -149,7 +149,7 @@ impl FakePi {
 
 #[cfg(unix)]
 fn adopt_fake_pi(app: &mut OrbitApp, fake: &FakePi) {
-    let client = PiClient::spawn_with_bin(
+    let client = PiClient::spawn_with_program(
         fake.bin.to_str().expect("utf-8 path"),
         fake._dir.path(),
         None,

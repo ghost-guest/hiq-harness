@@ -91,7 +91,7 @@ fn die_with_extension_state(app: &Entity<OrbitApp>, cx: &mut gpui::TestAppContex
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let client = PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8"), &workspace, None)
+        let client = PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8"), &workspace, None)
             .expect("spawn dying pi");
         app.adopt_client(client);
         app.busy = true;
@@ -201,7 +201,7 @@ fn stopping_the_process_drops_its_dialog_and_queue(cx: &mut gpui::TestAppContext
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
             let client =
-                PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8"), &workspace, None)
+                PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8"), &workspace, None)
                     .expect("spawn asking pi");
             app.adopt_client(client);
             app.busy = true;

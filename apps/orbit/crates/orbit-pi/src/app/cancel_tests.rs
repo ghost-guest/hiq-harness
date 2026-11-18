@@ -143,7 +143,7 @@ fn adopt_fake_pi(app: &mut OrbitApp, fake: &FakePi) {
         .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let client = PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
+    let client = PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
         .expect("spawn fake pi");
     app.adopt_client(client);
 }
@@ -392,7 +392,7 @@ fn a_command_pi_handled_stops_the_working_row(cx: &mut gpui::TestAppContext) {
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
             let client =
-                PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8"), &workspace, None)
+                PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8"), &workspace, None)
                     .expect("spawn quiet pi");
             app.adopt_client(client);
             // What `submit` leaves behind: the clock starts at the send, and the
@@ -446,7 +446,7 @@ fn a_started_turn_keeps_the_working_row(cx: &mut gpui::TestAppContext) {
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
             let client =
-                PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8"), &workspace, None)
+                PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8"), &workspace, None)
                     .expect("spawn quiet pi");
             app.adopt_client(client);
             app.transcript.expect_reply();
@@ -547,7 +547,7 @@ fn the_cancel_retry_button_does_not_report_a_failure(cx: &mut gpui::TestAppConte
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
             let client =
-                PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8"), &workspace, None)
+                PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8"), &workspace, None)
                     .expect("spawn retrying pi");
             app.adopt_client(client);
             app.send(
@@ -644,7 +644,7 @@ fn a_recovered_retry_does_not_report_a_failure(cx: &mut gpui::TestAppContext) {
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
             let client =
-                PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8"), &workspace, None)
+                PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8"), &workspace, None)
                     .expect("spawn recovering pi");
             app.adopt_client(client);
             app.transcript.expect_reply();

@@ -243,7 +243,7 @@ fn a_restart_points_the_new_process_back_at_the_session(cx: &mut gpui::TestAppCo
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
             let client =
-                PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8"), &workspace, None)
+                PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8"), &workspace, None)
                     .expect("spawn logging pi");
             app.adopt_client(client);
             app.current_session_path = Some(session.clone());
@@ -321,7 +321,7 @@ fn an_exhausted_budget_names_the_process_stderr(cx: &mut gpui::TestAppContext) {
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
             let client =
-                PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8"), &workspace, None)
+                PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8"), &workspace, None)
                     .expect("spawn stderr pi");
             app.client = Some(client);
             // The stderr drain thread reads off-thread; wait for its line.

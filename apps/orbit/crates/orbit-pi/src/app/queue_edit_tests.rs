@@ -93,7 +93,7 @@ fn app_with_logging_pi(cx: &mut gpui::TestAppContext, tag: &str) -> (Entity<Orbi
         app.update(cx, |app, _| {
             let workspace = std::env::temp_dir();
             let client =
-                PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
+                PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
                     .expect("spawn logging pi");
             app.adopt_client(client);
         })

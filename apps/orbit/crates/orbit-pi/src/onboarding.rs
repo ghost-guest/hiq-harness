@@ -404,33 +404,6 @@ mod tests {
     /// case the updater has to migrate and the missing case the setup page
     /// exists for.
     #[test]
-    fn pi_install_facts_report_the_method_and_path() {
-        let mut managed = crate::pi_install::Installation::not_installed();
-        managed.bin = Some(PathBuf::from("/Users/me/.pi/agent/bin/pi"));
-        managed.version = Some("1.2.0".into());
-        managed.kind = crate::pi_install::InstallKind::Managed {
-            root: PathBuf::from("/Users/me/.pi/agent/install"),
-        };
-        let facts = pi_install_facts(&managed);
-        assert_eq!(facts.len(), 3);
-        assert_eq!(facts[0].label, "Pi install");
-        assert_eq!(facts[0].value, "official (managed)");
-        assert!(!facts[0].alert);
-        assert_eq!(facts[2].value, "1.2.0");
-
-        let mut npm = crate::pi_install::Installation::not_installed();
-        npm.bin = Some(PathBuf::from("/opt/homebrew/bin/pi"));
-        npm.kind = crate::pi_install::InstallKind::Npm {
-            package_root: PathBuf::from("/opt/homebrew/lib/node_modules/x"),
-        };
-        assert_eq!(pi_install_facts(&npm)[0].value, "npm");
-
-        let missing = pi_install_facts(&crate::pi_install::Installation::not_installed());
-        assert!(missing[0].alert);
-        assert_eq!(missing[1].value, "—");
-    }
-
-    #[test]
     fn host_facts_cover_the_platform_and_the_stores() {
         let host = crate::platform::host();
         let facts = host_facts(&host);

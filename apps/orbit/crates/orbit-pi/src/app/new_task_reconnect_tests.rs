@@ -76,7 +76,7 @@ fn adopt_fake_pi(app: &mut OrbitApp, fake: &FakePi) {
         .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let client = PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
+    let client = PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
         .expect("spawn fake pi");
     app.adopt_client(client);
 }
@@ -93,7 +93,7 @@ fn an_exited_pi_process_never_reuses_the_session(cx: &mut gpui::TestAppContext) 
                 .clone()
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
-            let dead = PiClient::spawn_with_bin("/usr/bin/false", &workspace, None)
+            let dead = PiClient::spawn_with_program("/usr/bin/false", &workspace, None)
                 .expect("spawn /usr/bin/false");
             app.client = Some(dead);
             app.runtime.alive = false;

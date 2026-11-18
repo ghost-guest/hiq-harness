@@ -137,12 +137,22 @@ Mac
 （另一个坑：`orbit-pi` 用的是 GPUI 原生窗口，不是终端 TUI，`tmux capture-pane`
 抓到的永远是空白——我第一次的判断也错了。）
 
-### 一个不是我造成、但我得说清楚的坑
+### 界面层测试：从「编译不过」到「1904 通过 / 32 失败」
 
-`apps/orbit` 里 `orbit-pi`（TUI 二进制）的 19 个测试文件仍按老签名
-`spawn_with_bin(bin, workspace, session)` 三参调用，而 `orbit-rpc` 的签名是两参
-——**在我接手之前就编译不过**（`84425a2` 那版已是两参）。`orbit-rpc` 全绿，
-`orbit-pi` 待修；不要把它当绿。
+`apps/orbit` 里 `orbit-pi` 的测试在我接手前**根本编译不过**（19 个测试文件仍按
+三参调用 `spawn_with_bin(bin, ws, session)`，而签名早已是两参）。我做的：
+
+1. `orbit-rpc` 增加 `spawn_with_program(program, ws, session)` —— 测试能把假进程注入进来；
+2. 19 个测试文件改用它；
+3. 删掉两条测**已被移除功能**的用例（外部 Managed/Npm 安装方式、`restart_pi_for_catalog`）。
+
+结果：`cargo test -p orbit-pi` → **1904 passed / 32 failed / 9 ignored**（46 秒）。
+
+32 个失败全部是 app 层状态断言（"the app never reached the state"），集中在
+rewind / session_park / process_exit 这类交互流。传输层已单独验证过：
+`program_injection`（脚本后端 → 事件到客户端）+ 两段真会话回放都通过，
+所以不是接缝① 断了，是这些用例对进程语义的假设早于 harnessd 这次替换。
+**修它们要动上游 app 逻辑，不在内核范围内**——记为已知红，不粉饰。
 
 ### 指标口径（这次真的能算了）
 

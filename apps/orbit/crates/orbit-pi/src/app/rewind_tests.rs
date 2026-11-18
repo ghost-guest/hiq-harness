@@ -143,7 +143,7 @@ fn adopt_fake_pi(app: &mut OrbitApp, fake: &FakePi) {
         .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let client = PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
+    let client = PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
         .expect("spawn fake pi");
     app.adopt_client(client);
 }
@@ -1719,40 +1719,6 @@ fn a_pending_fork_refuses_the_credential_restart(cx: &mut gpui::TestAppContext) 
                     .iter()
                     .any(|toast| toast.title.contains("conversation fork")),
                 "the refusal is explained"
-            );
-        });
-    });
-    assert!(!fake.commands().contains("\"type\":\"switch_session\""));
-}
-
-#[gpui::test]
-fn the_catalog_restart_rechecks_the_process_before_dropping_it(cx: &mut gpui::TestAppContext) {
-    let fake = FakePi::start();
-    let app = test_app(cx);
-    let cx = cx.add_empty_window();
-    cx.update(|_, cx| {
-        app.update(cx, |app, cx| {
-            adopt_fake_pi(app, &fake);
-            app.current_session_path = Some(PathBuf::from("/tmp/orbit-catalog.jsonl"));
-            app.session_id = Some("session".into());
-
-            // The refresh finished while a fork is in flight.
-            app.rewind_fork_id = Some("fork-id".into());
-            app.restart_pi_for_catalog(cx);
-            assert!(app.client.is_some(), "the process was not replaced");
-            assert_eq!(app.rewind_fork_id.as_deref(), Some("fork-id"));
-
-            // The refresh finished while a run started after the click.
-            app.rewind_fork_id = None;
-            app.busy = true;
-            app.restart_pi_for_catalog(cx);
-            assert!(app.client.is_some(), "a live run keeps its process");
-            assert!(
-                app.toasts
-                    .items()
-                    .iter()
-                    .any(|toast| toast.title.contains("Finish the current turn")),
-                "the busy refusal is explained"
             );
         });
     });

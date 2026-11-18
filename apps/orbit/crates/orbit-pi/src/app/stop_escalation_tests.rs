@@ -56,7 +56,7 @@ fn app_with_silent_pi(cx: &mut gpui::TestAppContext) -> (Entity<OrbitApp>, Silen
         app.update(cx, |app, _| {
             let workspace = std::env::temp_dir();
             let client =
-                PiClient::spawn_with_bin(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
+                PiClient::spawn_with_program(fake.bin.to_str().expect("utf-8 path"), &workspace, None)
                     .expect("spawn silent pi");
             app.adopt_client(client);
         })
