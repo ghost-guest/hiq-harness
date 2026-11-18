@@ -405,8 +405,9 @@ GET /v1/sessions  → 真实会话列表（id/title/runtime_store/created_at…�
 1. **用 20 题以外的工作负载再测一次稳定性。** 现在的基线是自造 20 题（10 绿 + 10 棕地），
    通过率 1.0 有天花板效应。要证明"不反复返工"，得拿真实仓库跑：一个已有测试的项目、
    一个需要跨多文件改的 bug、一次依赖升级。
-2. **把返工率做成回归门禁。** 现在 `bench/run.py` 会算 `rework_rate / false_kill_rate`，
-   但它只在手跑。接进 CI（或 pre-push hook）才叫门禁：返工率超过 5% 或误杀率非 0 就挡。
+2. ~~把返工率做成回归门禁~~ **已做**：`scripts/gate.sh`（通过率 ≥0.95、返工率 ≤0.05、
+   误杀率 ==0），`--run` 可先重跑基线；`scripts/install-hooks.sh` 把它装成 pre-push 钩子，
+   不达标就推不上去。**门禁本身验过会红**：把基线里的返工率改成 0.2，`gate.sh` 退出码 1。
 3. ~~插件层补第二个真插件~~ **已做**：`plugins/guard-safety`（禁 force push / 改 `.env` /
    删根 / fork 炸弹），Go 单测 + Rust 集成测试，理由会写进 `guard.deny` 日志。
    下一步可以是给它加配置（规则开关从文件读，而不是写死在代码里）。
