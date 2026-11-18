@@ -354,14 +354,19 @@ impl<E: Engine> Supervisor<E> {
             "thread/tokenUsage/updated" | "usage" | "turn/usage" => {
                 // 缓存命中率只能从引擎报的 usage 里量：input 与 cached。
                 // 两种命名都认（stdio 驼峰，HTTP/SSE 蛇形）。
-                let input = params
+                // turn.usage 的形状是 {"usage": {...}}，老形状是平铺的；
+                // 两种都认，否则缓存命中率永远是 null。
+                let inner = params.get("usage").unwrap_or(&params);
+                let input = inner
                     .get("input_tokens")
-                    .or_else(|| params.get("promptTokens"))
+                    .or_else(|| inner.get("promptTokens"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
-                let cached = params
+                let cached = inner
                     .get("cached_tokens")
-                    .or_else(|| params.get("cachedTokens"))
+                    .or_else(|| inner.get("cachedTokens"))
+                    // 引擎对 DeepSeek 系报的是这个字段名（实测 turn.usage）。
+                    .or_else(|| inner.get("prompt_cache_hit_tokens"))
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
                 if input > 0 {

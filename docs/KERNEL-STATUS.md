@@ -91,10 +91,10 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 |---|---|---|
 | S0 两仓独立构建，harnessd 能调 `ExecPolicyEngine` | 改为进程依赖（§0.1） | `check-engine.sh` exit 0；`JsonRpcEngine` 只走 JSON-RPC，从不链接引擎 crate |
 | S1 orbit 界面能发一条消息，看到流式回复和工具调用 | 数据层已验证，**界面仍需人眼看一次** | 真跑输出回放：`a_real_session_parses_into_the_events_the_ui_renders` 解析出文本增量 + tool_execution_start/end + agent_end |
-| S2 切换模型/档位生效；fork 出新会话能跑到不同结论 | 模型/分叉实测，**档位只到单测** | `POST /v1/providers/ollama/switch` 200；`POST /v1/threads/{id}/fork` → 201 新 id；`effort_is_sent_as_reasoning_effort` 单测 |
-| S3 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | 前两条通过，**缓存命中未测** | steer 实测 `steer_count=1`（轮次跑动中插话）；`ten_long_tasks_are_not_falsely_killed` 0/10；缓存命中要真 provider 的 usage 字段 |
+| S2 切换模型/档位生效；fork 出新会话能跑到不同结论 | **通过** | 真模型路由切换 200；`fork` → 201 新 id；档位实测：`low`/`high` → 201，非法值 → 400 并列出全部取值（`auto, off, minimal, low, medium, high, xhigh, ultra, max`，实测 9 档，不是方案里写的 7 档） |
+| S3 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | **通过** | steer 实测 `steer_count=1`；误杀 0/10；真模型 20 题测得缓存命中 **95.6%**（`prompt_cache_hit_tokens / input_tokens`） |
 | S4 写一个 Go 插件，deny 一条命令，内核记录并继续 | **通过** | `go_plugin_can_deny_a_command_and_the_kernel_records_it`：线上回 decline、日志记 `guard.deny`（带 `source: plugin`）、下一问照常 accept |
-| S5 通过率/返工率/误杀率有基线数字 | 通过率+误杀率有，**返工率口径待定** | 20/20（脚本化）、0/20（1.5B）；误杀 0/10 |
+| S5 通过率/返工率/误杀率有基线数字 | **通过** | 真模型（DeepSeek V4.1 Flash）20/20 = 1.0；返工率 1.3%；误杀率 0.0%；缓存命中 95.6%；平均 20.0s |
 
 ### 这一轮修掉的六个真缺陷
 
@@ -144,7 +144,38 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 - **误杀率**：带 `guard.deny` 的任务占比
 - **缓存命中率**：`Σcached / Σinput`，来源是引擎的 usage 事件
 
-最近一次真跑（脚本化 provider，20 题，fresh `CODEWHALE_HOME`）：
+### 真模型基线（这一格终于有真数了）
+
+本机 3425 是 magipe 的 OpenAI 兼容代理（`alma providers` 里的 custom 路由），
+把它配成引擎的一个 provider 就能跑真模型，**不需要外部 key**：
+
+```toml
+[providers.magipe]
+kind = "openai-compatible"
+model = "auto/deepseek-v4.1-flash"
+api_key = "local-proxy"          # 代理不校验
+base_url = "http://127.0.0.1:3425/v1"
+context_window = 256000
+```
+
+起轮时要带 `model_provider_id = "magipe"`（`/v1/providers/magipe/switch` 会被
+引擎拒绝并明确告诉你用这个字段）。
+
+| 模型 | 通过率 | 返工率 | 误杀率 | 缓存命中 | 平均耗时 |
+|---|---|---|---|---|---|
+| DeepSeek V4.1 Flash（本地代理） | **20/20 = 1.0** | **1.3%** | 0.0% | **95.6%** | 20.0 s |
+| 脚本化 provider（人工金标） | 20/20 = 1.0 | 0.0% | 0.0% | null（无 usage） | 3.5 s |
+| qwen2.5-coder:1.5b（本地 ollama） | 0/20 | 0.0% | 0.0% | null | 7.3 s |
+
+真模型每题工具调用 2–4 次（`tools=2..4`），返工率 1.3% 意味着约 76 次调用里有 1 次
+是同一调用重跑。**这三行合起来读**：管道本身能满分，弱模型一分不得，强模型也能满分
+——瓶颈在模型，不在内核。
+
+> 又一条踩出来的教训：`CODEWHALE_HOME` 不能复制。把带 `state.db`/receipt 的目录
+> 拷一份会得到 `error: selected owner receipt is invalid`，20 题全 21.5s 失败，
+> 而且基线数字看起来「像模型不行」。**只复制 `config.toml`。**
+
+最近一次脚本化真跑（20 题，fresh `CODEWHALE_HOME`）：
 通过率 **1.0**、返工率 **0.0**、误杀率 **0.0**、平均 **3.49 s**、每题工具调用 **1**，
 缓存命中率 **null** —— 引擎对脚本化 provider 不上报 usage（`input_tokens=0`），
 这一格只能等真 provider 才能填。
