@@ -489,6 +489,29 @@ self.cache.observe(prompt, cached);
 修法就一行（用已经解析好的值），另加了一个测试 `the_cache_guard_reads_the_http_usage_dialect`
 把它钉住。修完立刻就能触发，说明之前不是"条件苛刻"，是根本没在判断。
 
+### 改完之后重跑真仓库（回归确认）
+
+这一夜改了事件平铺、工具字段方言、缓存守卫、测试等待预算。改完必须在**真仓库**上确认
+成功率没被带坏，而不是只看单测绿。`scripts/real-task.sh` 重跑结果：
+
+```text
+== 任务 A：单文件加一个方法 + 测试 ==
+ crates/guards/src/lib.rs | 17 +++++++++++++++++
+ test result: ok. 15 passed; 0 failed        (harness-guards)
+
+== 任务 B：跨 crate 接线 + 全量测试 ==
+ crates/cli/src/main.rs   |  2 ++
+ crates/guards/src/lib.rs | 31 +++++++++++++++++++++++++++++++
+ workspace: 399 passed, 0 failed
+
+== 指标（从 timebus 算，不看模型自述） ==
+{"tool_calls": 35, "repeats": 0, "rework_rate": 0.0}
+```
+
+两道题都一次过、零返工，全量测试 399 条全绿。**注意任务 B 的 35 次工具调用**（上一轮同题是 15 次）：
+题目没变，模型自己决定多跑了几轮测试——这才是"返工率"该量的东西（重复同一调用），
+而不是"调用次数多"。所以口径保持不变：`repeats: 0`。
+
 ### 假红的两个真实来源（都不是产品 bug）
 
 `compact.pre` 通了之后，连续两次证据跑出了**不一样的失败集**：一次多出
