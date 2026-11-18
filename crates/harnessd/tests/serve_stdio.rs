@@ -24,6 +24,15 @@ for line in sys.stdin:
         reply({"serverInfo": {"name": "fake"}})
     elif method == "thread/start":
         reply({"thread": {"id": "thr_fake"}})
+    elif method in ("prompt/run", "prompt/request"):
+        reply({"output": "hello", "model": "deepseek-flash", "events": []})
+        print(json.dumps({"id": 9000, "method": "item/commandExecution/requestApproval",
+                          "params": {"tool": "list_dir"}}), flush=True)
+        print(json.dumps({"method": "item/agentMessage/delta",
+                          "params": {"delta": "hello"}}), flush=True)
+        print(json.dumps({"method": "item/completed",
+                          "params": {"item": {"type": "agentMessage", "id": "i1"}}}), flush=True)
+        print(json.dumps({"method": "turn/completed", "params": {}}), flush=True)
     elif method == "turn/start":
         reply({"turn": {"id": "turn_1"}})
         print(json.dumps({"id": 9000, "method": "item/commandExecution/requestApproval",
@@ -119,7 +128,7 @@ fn serve_binary_streams_events_for_one_prompt() {
 
     let parsed: Vec<Value> = lines.iter().filter_map(|l| serde_json::from_str(l.trim()).ok()).collect();
     assert!(parsed.iter().any(|f| f["result"]["thread"]["id"] == "thr_fake"), "no thread reply: {lines:?}");
-    assert!(parsed.iter().any(|f| f["result"]["turn"]["id"] == "turn_1"), "no turn reply: {lines:?}");
+    assert!(parsed.iter().any(|f| f["result"]["output"] == "hello"), "no prompt output: {lines:?}");
     assert!(
         parsed.iter().any(|f| f["method"] == "event" && f["params"]["kind"] == "text_delta"),
         "no text delta reached the client: {lines:?}"

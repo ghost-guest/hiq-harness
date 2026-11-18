@@ -46,19 +46,58 @@ impl<E: Engine> Supervisor<E> {
         }
     }
 
+    /// Handshake. The shipped app-server answers everything with "Not initialized"
+    /// until `initialize` carries `clientInfo`, and its capability endpoints are
+    /// the only truthful description of what this build can do.
+    pub fn prepare(&mut self) -> Result<()> {
+        let version = env!("CARGO_PKG_VERSION");
+        self.engine.request(
+            "initialize",
+            json!({ "clientInfo": { "name": "harnessd", "version": version } }),
+        )?;
+
+        let mut methods = std::collections::BTreeSet::new();
+        for probe in ["app/capabilities", "thread/capabilities", "prompt/capabilities"] {
+            let Ok(v) = self.engine.request(probe, json!({})) else { continue };
+            if let Some(list) = v.get("methods").and_then(Value::as_array) {
+                for m in list.iter().filter_map(Value::as_str) {
+                    methods.insert(m.to_string());
+                }
+            }
+            if let Some(tf) = v.get("tool_free_turns").and_then(Value::as_bool) {
+                self.state.caps.tool_free = tf;
+            }
+            if let Some(fa) = v.get("full_api_entrypoint").and_then(Value::as_str) {
+                self.state.caps.full_api = Some(fa.to_string());
+            }
+        }
+        if !methods.is_empty() {
+            // The thread surface is not always advertised, but we need it.
+            for m in ["thread/start", "thread/read", "app/models"] {
+                methods.insert(m.to_string());
+            }
+            self.state.caps.methods = methods;
+        }
+        self.pump()?;
+        Ok(())
+    }
+
     /// One orbit command in, one reply plus any events the engine produced.
     pub fn handle(&mut self, cmd: &str, params: Value) -> Result<(Value, Vec<UiEvent>)> {
         match map(cmd, &params, &mut self.state) {
             Action::Local { reply } => Ok((reply, Vec::new())),
             Action::Unsupported { reason } => bail!("{reason}"),
             Action::Call { method, params } => {
-                if method == "turn/start" {
+                // A turn starts on either dialect: codex-style `turn/start` or the
+                // native `prompt/run`. Missing this line means the log has a turn
+                // that never opened — the projection would then be wrong.
+                if method == "turn/start" || method.starts_with("prompt/") {
                     self.guards.begin_turn();
                     self.text_buffer.clear();
                     self.log.append("turn.start", json!({ "thread": self.state.thread_id }))?;
                     self.plugins.broadcast("turn.start", json!({ "thread": self.state.thread_id }));
                 }
-                let reply = self.engine.request(&method, params)?;
+                let mut reply = self.engine.request(&method, params)?;
 
                 // thread/start is the only place a new thread id appears.
                 if method == "thread/start" {
@@ -68,6 +107,27 @@ impl<E: Engine> Supervisor<E> {
                         .and_then(Value::as_str)
                     {
                         self.state.thread_id = Some(id.to_string());
+                    }
+                }
+                // A prompt stashed while the thread was being created runs now,
+                // and its thread id is the one the caller gets back.
+                if let Some(text) = self.state.pending_prompt.take() {
+                    if let Some(thread) = self.state.thread_id.clone() {
+                        self.guards.begin_turn();
+                        self.text_buffer.clear();
+                        self.log.append("turn.start", json!({ "thread": thread }))?;
+                        self.plugins.broadcast("turn.start", json!({ "thread": thread }));
+                        let mut params =
+                            json!({ "prompt": text, "thread_id": thread, "allowed_tools": [] });
+                        if let Some(m) = self.state.model.clone() {
+                            params["model"] = json!(m);
+                        }
+                        let out = self.engine.request("prompt/run", params)?;
+                        reply = json!({
+                            "thread": { "id": thread },
+                            "output": out.get("output"),
+                            "model": out.get("model"),
+                        });
                     }
                 }
                 let events = self.pump()?;
@@ -324,6 +384,17 @@ mod tests {
         // replay: same projection from disk, no writes
         let replayed = crate::timebus::Log::open(&path).unwrap().project();
         assert_eq!(replayed.messages, proj.messages);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn native_prompt_opens_a_turn_in_the_log() {
+        let log = tmp_log("native-turn");
+        let path = log.path().to_path_buf();
+        let mut sup = Supervisor::new(MockEngine::default(), log, 128_000);
+        sup.handle("Prompt", json!({"text":"hi"})).unwrap();
+        let kinds: Vec<_> = sup.log.entries().iter().map(|e| e.kind.clone()).collect();
+        assert!(kinds.contains(&"turn.start".to_string()), "kinds: {kinds:?}");
         let _ = std::fs::remove_file(&path);
     }
 

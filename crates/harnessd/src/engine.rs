@@ -175,7 +175,9 @@ impl Default for MockEngine {
     fn default() -> Self {
         Self::new(|method, _params| match method {
             "thread/start" => json!({ "thread": { "id": "thr_mock" } }),
-            "turn/start" => json!({ "turn": { "id": "turn_mock" } }),
+            "thread/read" => json!({ "thread": { "id": "thr_mock", "turns": [] } }),
+            "prompt/run" | "prompt/request" => json!({ "output": "mock", "model": "deepseek-flash", "events": [] }),
+            "app/models" => json!({ "models": [ { "id": "deepseek-v4-pro" } ] }),
             "thread/fork" => json!({ "thread": { "id": "thr_fork" } }),
             "thread/items/list" => json!({ "items": [] }),
             "model/list" => json!({ "models": [ { "id": "deepseek-v4-pro" } ] }),

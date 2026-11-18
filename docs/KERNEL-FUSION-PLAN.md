@@ -6,6 +6,18 @@
 
 ---
 
+## 0.1 实施时的修正：D1 用进程，不用 lib
+
+原方案写的是「把 engine 当 crate 依赖引入」。落地时改成 **spawn app-server + JSON-RPC**，三个理由：
+
+1. **编译面**：engine 是单 crate 55.8 万行、无 feature gate。作为 lib 引进来，我们的 `cargo test` 就要为它付编译时间。
+2. **升级面**：进程依赖下，上游重构内部类型不影响我们；lib 依赖下，任何 `pub` 变动都要跟着改。
+3. **否决权不受影响**：审批是**反向 request**，客户端本来就是必须应答的一方——
+   我们回 `decline` 就是真拒绝，不需要进它的 `ExecPolicyEngine`。
+
+代价：拿不到 `set_exec_policy` 那种进程内钩子，守卫只能在「审批点」与「steer 点」生效。
+这已经覆盖三守卫的全部判定（都在工具调用边界），所以不构成功能缺口。
+
 ## 0. 一句话
 
 **codewhale 提供"骨头"（沙箱、快照、协议、审批），jcode 提供"神经"（steer 注入点、journal 重放），
@@ -45,7 +57,7 @@ dim 提供"记性"（time-bus 语义），codex 提供"语言规范"（协议形
 
 | 深度 | 含义 | 适用 | 改动风险 |
 |---|---|---|---|
-| **D1 依赖** | 把 codewhale 的 crate 当 lib 依赖，不改它一行 | engine / sandbox / snapshot / execpolicy / lsp | 零，升级 = 换 tag |
+| **D1 依赖** | **进程依赖**：spawn 它的 app-server，只走 JSON-RPC（实施时从 lib 依赖改成这个，理由见 §0.1） | engine 全部能力 | 零源码耦合，升级 = 换二进制 |
 | **D2 缝合** | 在我们自己的 crate 里写适配器，调它的 public API | steer / 协议映射 / model 路由 / 缓存守卫 | 低，只跟 public API |
 | **D3 移植** | 抄源码进来（带来源注释） | dim time-bus 语义、jcode injection point | 中，但要记来源 |
 

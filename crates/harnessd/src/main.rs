@@ -81,6 +81,14 @@ fn serve(args: &[String]) -> Result<()> {
         }
     }
 
+    sup.prepare()?;
+    eprintln!(
+        "engine ready: {} methods, tool_free={}, full_api={:?}",
+        sup.state.caps.methods.len(),
+        sup.state.caps.tool_free,
+        sup.state.caps.full_api
+    );
+
     if compat.as_deref() == Some("orbit") {
         return serve_orbit(&mut sup);
     }
