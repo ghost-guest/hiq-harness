@@ -35,7 +35,7 @@ ws=$(cargo test --workspace 2>&1 | grep -E "^test result" | awk '{p+=$4;f+=$6} E
 say "| \`cargo test --workspace\`（内核 9 个 crate） | $ws |"
 rpc=$(cd apps/orbit && cargo test -p orbit-rpc 2>&1 | grep -E "^test result" | awk '{p+=$4;f+=$6} END {print p" passed / "f" failed"}')
 say "| \`cargo test -p orbit-rpc\`（接缝① 客户端） | $rpc |"
-pi=$(cd apps/orbit && cargo test -p orbit-pi 2>&1 | grep -E "^test result" | tail -1 | sed -E 's/test result: (FAILED\. )?//; s/;.*//')
+pi=$(cd apps/orbit && cargo test -p orbit-pi 2>&1 | grep -E "^test result" | tail -1 | sed -E 's/^test result: (FAILED|ok)\. //; s/; [0-9]+ (ignored|measured)[^;]*//g')
 say "| \`cargo test -p orbit-pi\`（GPUI 界面，无头） | $pi |"
 say
 

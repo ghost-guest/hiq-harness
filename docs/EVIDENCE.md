@@ -23,7 +23,7 @@ HARNESS_ENGINE_BIN=/path/to/codewhale bash scripts/evidence.sh
 |---|---|
 | `cargo test --workspace`（内核 9 个 crate） | 386 passed / 0 failed |
 | `cargo test -p orbit-rpc`（接缝① 客户端） | 94 passed / 0 failed |
-| `cargo test -p orbit-pi`（GPUI 界面，无头） | 1930 passed |
+| `cargo test -p orbit-pi`（GPUI 界面，无头） | 1930 passed / 6 failed（剩 6 条见 `KERNEL-STATUS.md` 的分类） |
 
 ## 2. 基准自检（不花 token，不碰网络）
 
