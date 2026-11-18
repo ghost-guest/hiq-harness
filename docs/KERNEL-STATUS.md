@@ -463,10 +463,49 @@ PASS 接缝① 真引擎
 |---|---|---|
 | `turn.start` / `tool.pre` / `tool.post` / `turn.end` | ✅ 都在 | 探针实测 |
 | `guard.deny` | 条件触发 | `go_plugin_guard` 测试的真日志：`guard.deny {"reason":"git push --force rewrites shared history…","source":"plugin"}` |
-| `compact.pre` | 条件触发 | 新测试 `the_cache_guard_tells_plugins_before_it_compacts`：真插件进程，缓存守卫建议压缩时它收到 `compact.pre`。真引擎下还没触发过一次压缩（见缺口 #4） |
+| `compact.pre` | ✅ 端到端跑通了 | `scripts/probe-compact.sh`：真引擎 + 真 harnessd + 真插件，`compact.pre` 真的到达插件 |
 
-所以准确的表述是：**6 种事件都接好了，普通回合能看到 4 种；`guard.deny` 有真引擎的拒绝实测；
-`compact.pre` 有"真插件进程收到"的单测，但**没有**端到端跑过一次真压缩。**
+**6 种事件现在全部有运行证据**：4 种在普通回合里实测到，`guard.deny` 由真引擎的拒绝场景实测，
+`compact.pre` 由 `probe-compact.sh` 端到端实测。
+
+### 为什么 `compact.pre` 之前怎么都触发不了——是个真 bug
+
+缓存守卫的规则是"窗口占用 ≥85% **且** 前缀缓存命中 ≥90% 才建议压缩"。
+我把 `HARNESSD_WINDOW` 调到 9000、跑 1.2 万 token，它一声没吭。查下来：
+
+```rust
+let input  = inner.get("input_tokens").or(promptTokens)…;   // 方言容错，解析对了
+let cached = inner.get("cached_tokens").or(prompt_cache_hit_tokens)…;
+…
+let prompt = params.get("promptTokens")…;   // ← 又读了一遍驼峰键
+self.cache.observe(prompt, cached);
+```
+
+日志解析做了方言容错，**守卫看到的却是 0/0**——HTTP/SSE 报的是 `input_tokens`，
+驼峰键永远取不到。于是 `advise()` 永远返回 Ok：`cache_freeze` 和 `compact.pre`
+在 HTTP 传输下**整条是死的**，而它看起来一切正常。
+
+这和当初"HTTP 下 tools 永远是 0"是同一个病：**两种命名被当成了两种数据**。
+修法就一行（用已经解析好的值），另加了一个测试 `the_cache_guard_reads_the_http_usage_dialect`
+把它钉住。修完立刻就能触发，说明之前不是"条件苛刻"，是根本没在判断。
+
+### 假红的两个真实来源（都不是产品 bug）
+
+`compact.pre` 通了之后，连续两次证据跑出了**不一样的失败集**：一次多出
+`sidepane_full_width_tests`，一次 `orbit-rpc` 还多一个。查下来两条都不是产品问题：
+
+1. **残留引擎进程。** 探针脚本起了引擎但没收拾干净，机器上常驻 2–3 个
+   `app-server --http`，占着端口和 CPU。时序类测试（心跳重绘、布局）在这种环境下会间歇失败。
+   修法：`probe-compact.sh` 的 trap 改成按端口兜底清理；`evidence.sh` 在开头记下
+   "已在跑的引擎"、结束时只清**这次新起的**，并把残留数量打进报告。
+   现在跑完残留是 0。
+2. **测试自己依赖渲染顺序。** `expanding_review_opens_the_sessions_sidebar` 把
+   "侧栏初始是关的"这句断言写在 `draw()` **之后**，而侧栏的上升沿正是在 render 里处理的——
+   于是"这一帧算不算上升沿"变成了运气。断言初始状态就不该让一帧渲染夹在中间，
+   挪到 draw 之前，连跑 8 次全过。
+
+这两条加起来说明一件事：**红点检查（known-red）报出来的"未登记失败"，先别当成回归，
+但也别当成噪声——先确认机器是干净的、测试是不是自己没写稳。**
 
 ## 基线噪声：红点也分"红"和"抖"
 
@@ -541,11 +580,8 @@ grep 抓不到 `test result`，表格里就留一格空白，而脚本照样 exi
 
 ### 不挡事、但要知道的
 
-4. **`compact.pre` 没有端到端跑通过一次。** 现在的证据是两层：单测证明"缓存守卫判定
-   该压缩时，真插件进程确实收到了 `compact.pre`"；但真引擎下没触发过一次压缩。
-   试过了：把 `context_window` 调到 4000 / 32000 并开 `auto_compact`、喂 1.2 万 token 的
-   prompt，引擎照常跑完不压缩——压缩多半是**跨回合**在累积历史上判的，单回合逼不出来。
-   要真跑就得写个多回合驱动，比其它几条贵，先记着，不假装有。
+4. ~~`compact.pre` 没有端到端跑通过一次。~~ **已关**：先是查出缓存守卫在 HTTP 下
+   读不到用量（见上），修完 `probe-compact.sh` 一次就通。
 5. **X（Twitter）那一路调研没做。** 候选池只来自 GitHub stars（670 个，含 dim/pi-jax/PIG 校验）
    与手工对比。X 需要登录态，抓不了；结论因此只覆盖了一半来源。
 5. **方案原文 S0 写的是"git submodule + engine 作为 lib 路径依赖"**，实施改成了进程依赖。

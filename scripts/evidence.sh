@@ -63,6 +63,18 @@ need() {
   fi
 }
 
+# 跑之前先记下"已经在跑的引擎"，跑完只清理**这次新起的**。
+# 之前只按端口清，§6/§7/§8 各自起的引擎漏掉了——残留进程会占端口和 CPU，
+# 下一次跑测试就会出现"时序测试偶发红"，而那种红查起来极贵、且是假的。
+PRE_ENGINES="$(pgrep -f 'app-server --http' 2>/dev/null | sort | tr '\n' ' ')"
+sweep_engines() {
+  local pid
+  for pid in $(pgrep -f 'app-server --http' 2>/dev/null | sort); do
+    case " $PRE_ENGINES " in *" $pid "*) continue;; esac
+    kill "$pid" 2>/dev/null
+  done
+}
+
 say "# S0–S5 验收证据"
 say
 say "- 生成时间：$(date '+%Y-%m-%d %H:%M:%S %Z')"
@@ -215,6 +227,19 @@ code_block printf '%s\n' "$evt"
 need "事件探针" "$evt" '^PASS 常驻 4 事件'
 rm -rf "$EVT_HOME" 2>/dev/null || true
 
+say "## 8. 真压缩一次：compact.pre 端到端"
+say
+say '事件探针只跑普通回合，看不到 `compact.pre`。这一节把 `HARNESSD_WINDOW` 调到 9000，'
+say '跑一个 1.5 万 token 的回合，让缓存守卫判定"窗口满了且前缀还很热"，逼它真的请求压缩。'
+say
+CMP_HOME="$(mktemp -d /tmp/evidence-cmp.XXXXXX)"
+[ -f "$HOME_DIR/config.toml" ] && cp "$HOME_DIR/config.toml" "$CMP_HOME/" 2>/dev/null
+cmp=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" HARNESS_ENGINE_BIN="$ENGINE_BIN" \
+        CODEWHALE_HOME="$CMP_HOME" bash scripts/probe-compact.sh 2>&1)
+code_block printf '%s\n' "$cmp"
+need "真压缩探针" "$cmp" '^PASS compact.pre'
+rm -rf "$CMP_HOME" 2>/dev/null || true
+
 if [ ${#PROBLEMS[@]} -gt 0 ]; then
   say
   say "## !! 证据不完整"
@@ -231,6 +256,14 @@ fi
 
 kill "$(cat "$HOME_DIR/pid")" 2>/dev/null
 pkill -f "app-server --http --insecure-no-auth --port $PORT" 2>/dev/null
+sweep_engines
+left=""
+for p in $(pgrep -f 'app-server --http' 2>/dev/null); do
+  case " $PRE_ENGINES " in *" $p "*) continue;; esac
+  left="$left $p"
+done
+say
+say "- 本次起的引擎已清理；残留：${left:-无}"
 wait 2>/dev/null
 rm -rf "$HOME_DIR" "$WORK" 2>/dev/null || true
 say

@@ -25,11 +25,14 @@ fn expanding_review_opens_the_sessions_sidebar(cx: &mut gpui::TestAppContext) {
             app.sidepane.update(cx, |pane, cx| pane.toggle(cx));
         });
     });
-    let _ = cx.draw(gpui::point(px(0.), px(0.)), viewport, |_, _| app.clone());
+    // 断言要在**画之前**：侧栏的上升沿是在 render 里处理的，第一帧画完它就可能已经开了。
+    // 之前这条断言写在 draw 之后，于是"这一帧到底算不算上升沿"变成了运气——
+    // 单独跑 5/6 过、满载偶尔红。断言的是初始状态，就不该让一帧渲染夹在中间。
     assert!(
         !cx.update(|_, cx| app.read(cx).sidebar_visible),
         "the sidebar starts closed for this test"
     );
+    let _ = cx.draw(gpui::point(px(0.), px(0.)), viewport, |_, _| app.clone());
 
     // The rising edge is handled in the render, so expanding takes one draw.
     cx.update(|_, cx| {

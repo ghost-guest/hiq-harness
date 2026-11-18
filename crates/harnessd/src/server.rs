@@ -375,9 +375,12 @@ impl<E: Engine> Supervisor<E> {
                         json!({ "input_tokens": input, "cached_tokens": cached }),
                     )?;
                 }
-                let prompt = params.get("promptTokens").and_then(Value::as_u64).unwrap_or(0);
-                let cached = params.get("cachedTokens").and_then(Value::as_u64).unwrap_or(0);
-                self.cache.observe(prompt, cached);
+                // 用上面已经按方言解析好的值。**不要**在这里重新读驼峰键：
+                // HTTP/SSE 报的是 `input_tokens`/`cached_tokens`，驼峰永远取不到，
+                // 缓存守卫就会一直拿 0/0 判断（= 永远"没问题"），
+                // `cache_freeze` 和 `compact.pre` 在 HTTP 上等于死路。
+                // 这条和当年"HTTP 下 tools 永远是 0"是同一个病：命名不同 ≠ 没有数据。
+                self.cache.observe(input, cached);
                 match self.cache.advise() {
                     Advice::Ok => {}
                     Advice::FreezePrefix { reason } => {
@@ -655,6 +658,29 @@ for line in sys.stdin:
             got.contains("compact.pre"),
             "插件没有收到 compact.pre，实际收到：{got:?}"
         );
+    }
+
+    /// HTTP/SSE 报的是蛇形 `input_tokens` / `prompt_cache_hit_tokens`。
+    /// 缓存守卫如果只认驼峰，就会永远拿 0/0 判断——永远"没问题"，也就永远不压缩。
+    /// 这条不是理论：真机上把 window 调到 9000、跑 1.2 万 token 的回合，
+    /// 守卫一声没吭，查下来就是它读不到数。
+    #[test]
+    fn the_cache_guard_reads_the_http_usage_dialect() {
+        let log = tmp_log("compact-http");
+        let path = log.path().to_path_buf();
+        let mut sup = Supervisor::new(MockEngine::default(), log, 9_000);
+        sup.state.thread_id = Some("thr_1".into());
+        sup.state.auto_compact = true;
+        sup.engine.emit(
+            "turn/usage",
+            json!({"usage":{"input_tokens":12467,"prompt_cache_hit_tokens":11600}}),
+        );
+        sup.pump().unwrap();
+        assert!(
+            sup.engine.calls().iter().any(|c| c == "thread/compact/start"),
+            "HTTP 形状的 usage 也必须能推动缓存守卫请求压缩"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
