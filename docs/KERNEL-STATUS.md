@@ -91,7 +91,7 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 | 跑法 | 通过率 | 新建/维护 | 均值 | 含义 |
 |---|---|---|---|---|
 | 脚本化 provider（`bench/mock_provider.py`） | 20/20 = 1.0 | 10/10 · 10/10 | 3.74 s | **管道上限**：模型永远做对时，harness 能不能把活干完 |
-| 本地 qwen-coder-32k（ollama） | 见 `bench/baseline-local-model.json` | | | 模型+harness 的下限 |
+| 本地 qwen2.5-coder:1.5b（ollama，32k） | 0/20 = 0.0 | 0/10 · 0/10 | 7.34 s | **模型太弱**：它只回文本，从不发 tool_call，文件一个没改 |
 
 复跑：
 
@@ -104,6 +104,10 @@ python3 bench/run.py --solver "$PWD/scripts/bench-solve.sh"
 
 `mock_provider.py` 只做一件事：把 bench 的 gold 变成**真的 tool_call**（`cat > 文件`），
 让引擎自己执行、自己写盘。所以 20/20 证明的是接缝②③和评测器，不是模型能力。
+
+两条数字合起来读才对：管道能到 100%，1.5B 本地模型到 0%（它连工具都不肯调）。
+也就是说**瓶颈现在是模型，不是 harness**——这正是 S5 要的那个基线。
+换 7B 以上、会调工具的模型，数字才有意义；这一步需要一次性下载或一个 provider key。
 
 ### 这一轮实测到的三个硬事实（都写进代码注释了）
 

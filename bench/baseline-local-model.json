@@ -1,0 +1,214 @@
+{
+  "summary": {
+    "total": 20,
+    "passed": 0,
+    "pass_rate": 0.0,
+    "greenfield_pass_rate": 0.0,
+    "brownfield_pass_rate": 0.0,
+    "guard_denials": 0,
+    "blocked_turns": 0,
+    "mean_duration_s": 7.34
+  },
+  "results": [
+    {
+      "id": "b01_off_by_one",
+      "kind": "brownfield",
+      "pass": false,
+      "duration_s": 23.03,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-b01_off_by_one-4dwaqfko/check.py\", line 2, in <module>\n    assert mod.up_to(3)==[1,2,3],mod.up_to(3)\n           ^^^^^^^^^^^^^^^^^^^^^\nAssertionError: [1, 2]",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b02_empty_input",
+      "kind": "brownfield",
+      "pass": false,
+      "duration_s": 6.63,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-b02_empty_input-2c2hm9mv/check.py\", line 3, in <module>\n    assert mod.first_word('   ')=='',repr(mod.first_word('   '))\n           ~~~~~~~~~~~~~~^^^^^^^\n  File \"/Users/mac_522/.config/alma/scratch/bench-b02_empty_input-2c2hm9mv/mod.py\", line 2, in first_word\n    return s.split()[0]\n           ~~~~~~~~~^^^\nIndexEr",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b03_float_compare",
+      "kind": "brownfield",
+      "pass": false,
+      "duration_s": 12.89,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-b03_float_compare-zvhvp0jq/check.py\", line 3, in <module>\n    assert abs(r-0.3)<1e-9,r\n           ^^^^^^^^^^^^^^^\nAssertionError: 0.30000001192092896",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b04_mutable_default",
+      "kind": "brownfield",
+      "pass": false,
+      "duration_s": 7.1,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-b04_mutable_default-2i7lozt4/check.py\", line 3, in <module>\n    assert mod.add('b')==['b'],mod.add('b')\n           ^^^^^^^^^^^^^^^^^^^\nAssertionError: ['a', 'b', 'b']",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b05_early_return",
+      "kind": "brownfield",
+      "pass": false,
+      "duration_s": 5.55,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-b05_early_return-ny0wa4bs/check.py\", line 2, in <module>\n    assert mod.evens([1,2,3,4,6])==[2,4,6],mod.evens([1,2,3,4,6])\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: []",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b06_unflushed_file",
+      "kind": "brownfield",
+      "pass": false,
+      "duration_s": 4.83,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-b06_unflushed_file-w2wi2web/check.py\", line 6, in <module>\n    assert got == 'new', repr(got)\n           ^^^^^^^^^^^^\nAssertionError: 'oldnew'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b07_encoding",
+      "kind": "brownfield",
+      "pass": false,
+      "duration_s": 6.83,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-b07_encoding-3j8k25kd/check.py\", line 5, in <module>\n    assert got == '中文内容', repr(got)\n           ^^^^^^^^^^^^^^^^^\nAssertionError: 'ä¸\\xadæ\\x96\\x87å\\x86\\x85å®¹'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b08_timezone",
+      "kind": "brownfield",
+      "pass": false,
+      "duration_s": 5.47,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-b08_timezone-g3xszbtv/check.py\", line 4, in <module>\n    assert v.tzinfo is not None,'naive datetime'\n           ^^^^^^^^^^^^^^^^^^^^\nAssertionError: naive datetime",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b09_bare_except",
+      "kind": "brownfield",
+      "pass": false,
+      "duration_s": 5.33,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-b09_bare_except-mvxdo332/check.py\", line 8, in <module>\n    raise AssertionError('silently swallowed the error')\nAssertionError: silently swallowed the error",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "b10_memo",
+      "kind": "brownfield",
+      "pass": false,
+      "duration_s": 6.43,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-b10_memo-e3w3jhg9/check.py\", line 6, in <module>\n    assert dt < 0.02, f'too slow: {dt:.3f}s'\n           ^^^^^^^^^\nAssertionError: too slow: 0.110s",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g01_fizzbuzz",
+      "kind": "greenfield",
+      "pass": false,
+      "duration_s": 5.54,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-g01_fizzbuzz-rkdph2qu/check.py\", line 1, in <module>\n    import fizzbuzz\nModuleNotFoundError: No module named 'fizzbuzz'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g02_csv_totals",
+      "kind": "greenfield",
+      "pass": false,
+      "duration_s": 6.11,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-g02_csv_totals-zc_c37t6/check.py\", line 1, in <module>\n    import summary\nModuleNotFoundError: No module named 'summary'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g03_top_words",
+      "kind": "greenfield",
+      "pass": false,
+      "duration_s": 4.96,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-g03_top_words-o284wdsv/check.py\", line 1, in <module>\n    import wc\nModuleNotFoundError: No module named 'wc'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g04_flatten",
+      "kind": "greenfield",
+      "pass": false,
+      "duration_s": 8.49,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-g04_flatten-asjlwlz5/check.py\", line 1, in <module>\n    import flat\nModuleNotFoundError: No module named 'flat'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g05_backoff",
+      "kind": "greenfield",
+      "pass": false,
+      "duration_s": 6.38,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-g05_backoff-1y_hmab1/check.py\", line 1, in <module>\n    import backoff\nModuleNotFoundError: No module named 'backoff'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g06_lru",
+      "kind": "greenfield",
+      "pass": false,
+      "duration_s": 5.24,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-g06_lru-x9f2jfl0/check.py\", line 1, in <module>\n    import lru\nModuleNotFoundError: No module named 'lru'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g07_semver",
+      "kind": "greenfield",
+      "pass": false,
+      "duration_s": 4.84,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-g07_semver-p24xv040/check.py\", line 1, in <module>\n    import semver\nModuleNotFoundError: No module named 'semver'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g08_logparse",
+      "kind": "greenfield",
+      "pass": false,
+      "duration_s": 9.37,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-g08_logparse-s1hfe5lr/check.py\", line 1, in <module>\n    import logparse\nModuleNotFoundError: No module named 'logparse'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g09_args",
+      "kind": "greenfield",
+      "pass": false,
+      "duration_s": 6.01,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-g09_args-r6rek3_i/check.py\", line 1, in <module>\n    import args\nModuleNotFoundError: No module named 'args'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    },
+    {
+      "id": "g10_todo",
+      "kind": "greenfield",
+      "pass": false,
+      "duration_s": 5.73,
+      "detail": "Traceback (most recent call last):\n  File \"/Users/mac_522/.config/alma/scratch/bench-g10_todo-__lc2ytg/check.py\", line 1, in <module>\n    import todo,os,json\nModuleNotFoundError: No module named 'todo'",
+      "tool_calls": 0,
+      "denials": 0,
+      "blocked": false
+    }
+  ]
+}
