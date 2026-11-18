@@ -247,6 +247,15 @@ turn.end                                         ← 正常收尾，不是报错
 | A：给 `GuardSet` 加 `describe()` + 测试（单文件） | 1 文件 +18 行 | `cargo test -p harness-guards` **15 passed** | 3 | 0 |
 | B：加 `describe()` 并再接进 `crates/cli` 的自检输出（跨 crate） | 2 文件 +54 行 | `cargo test --workspace` **全绿**（83/76/47/14/10/15 …） | 20 | **0** |
 
+上面两组是**自动批**跑的。把默认改成走审批之后重跑了一遍，结果一样（`scripts/real-task.sh`）：
+
+| 任务（走策略） | 改动 | 验收 | 工具调用 | 返工 |
+|---|---|---|---|---|
+| A | 1 文件 +21 行 | `cargo test -p harness-guards` **15 passed** | — | 0 |
+| B | 2 文件 +106 行 | `cargo test --workspace` **396 passed / 0 failed** | 15（B 段） | **0** |
+
+走的每一轮都经过 `harnessd` 的策略判断（插件 → 守卫 → 决定），一条命令都没被误拦。
+
 两题都是一轮做完、没有返工、没有守卫拒绝。B 题值得单独说：它要跨两个 crate 读代码、
 找到 CLI 里合适的位置、再接上，最后自己跑全量测试——这是"维护旧项目"最典型的形状。
 
