@@ -3,6 +3,10 @@
 #
 # 格式：<套件>::<用例名>
 #
+# 有一条**故意不登记**：app::process_exit_cleanup_tests::a_custom_surface_closes_when_its_process_dies。
+# 单独跑 6/6 全过，只在 `cargo test -p orbit-pi` 满载时偶尔红——那叫抖，不叫红。
+# 登记它等于给抖动发免死金牌；不登记，它一抖就被判「未登记的失败」，正好逼我们去看。
+#
 # 分类原则：
 #   old-product-model  上游 pi 把 agent 装成外部依赖，我们的内核进程内跑——产品模型不同，测试的前提不成立
 #   design-diff        内核按设计拒绝这条路径（比如 Raw 直通），要变绿就得给内核加新协议
@@ -13,4 +17,3 @@ orbit-pi::onboarding::tests::install_hints_match_the_host
 orbit-pi::git_accounts::tests::workspace_local_identity_and_remotes_are_read_without_remote_access
 orbit-pi::backdrop::tests::mark_placement_and_small_fallback
 orbit-pi::app::session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag
-orbit-pi::app::process_exit_cleanup_tests::a_custom_surface_closes_when_its_process_dies
