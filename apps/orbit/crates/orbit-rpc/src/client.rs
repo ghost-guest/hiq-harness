@@ -1144,6 +1144,7 @@ fn spawn_harnessd_worker(
         .stderr(Stdio::piped());
     hide_console(&mut cmd);
 
+    let exit_tx = events_tx.clone();
     let mut child = cmd.spawn().map_err(|e| anyhow!("spawn {bin}: {e}"))?;
     let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
@@ -1166,12 +1167,14 @@ fn spawn_harnessd_worker(
                     eprintln!("[debug] <- {line}");
                 }
                 let event = Event::parse_line(line);
+                // 与进程内实现同一条规则：先投给按 id 等待的调用方，
+                // **再**投进共享流。只投前者会让 UI 永远看不见回执
+                // （`send_tracked` 丢掉了自己的 receiver，回执就被吞了）。
                 if let Event::Response { id, .. } = &event {
                     let waiter = pd.lock().unwrap_or_else(|p| p.into_inner()).remove(id);
                     if let Some(tx) = waiter {
-                        let _ = tx.send(event);
+                        let _ = tx.send(event.clone());
                     }
-                    continue;
                 }
                 let _ = ev.send(event);
             }
@@ -1218,11 +1221,14 @@ fn spawn_harnessd_worker(
         });
     }
 
-    // 子进程死了要让 `is_alive` 说实话，否则 UI 会一直转圈。
+    // 子进程死了要让 `is_alive` 说实话，**并且**把这件事作为事件告诉 UI：
+    // 只翻标志位的话，界面上那条「运行中」永远不结束（退出清理也就不发生）。
     let alive = writer_alive.clone();
+    let exit_events = exit_tx;
     thread::spawn(move || {
         let _ = child.wait();
         alive.store(false, Ordering::Relaxed);
+        let _ = exit_events.send(Event::ProcessExited);
     });
 
     Ok(())
