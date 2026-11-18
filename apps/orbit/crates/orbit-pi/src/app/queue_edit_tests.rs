@@ -57,7 +57,7 @@ impl LoggingPi {
     /// Block until pi has read `count` commands, then return them. Writes cross
     /// a pipe to a child process, so the first read cannot assume they landed.
     fn wait_for(&self, count: usize) -> Vec<Value> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + crate::app::test_wait::budget(Duration::from_secs(5));
         loop {
             let commands = self.commands();
             if commands.len() >= count {

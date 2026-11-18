@@ -4233,6 +4233,8 @@ mod popup_layout_tests;
 #[cfg(test)]
 mod process_exit_cleanup_tests;
 #[cfg(test)]
+mod test_wait;
+#[cfg(test)]
 mod queue_edit_tests;
 #[cfg(test)]
 mod refresh_tests;

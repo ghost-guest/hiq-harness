@@ -65,7 +65,7 @@ done
         );
     });
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::app::test_wait::budget(Duration::from_secs(5));
     loop {
         let settled = app.update(cx, |app, cx| {
             app.tick(cx);

@@ -49,7 +49,7 @@ fn pump_until(
     cx: &mut gpui::VisualTestContext,
     mut done: impl FnMut(&OrbitApp) -> bool,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::app::test_wait::budget(Duration::from_secs(5));
     loop {
         let reached = cx.update(|_, cx| {
             app.update(cx, |app, cx| {

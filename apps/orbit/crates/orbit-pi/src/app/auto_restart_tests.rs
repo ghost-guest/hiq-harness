@@ -253,7 +253,7 @@ fn a_restart_points_the_new_process_back_at_the_session(cx: &mut gpui::TestAppCo
     });
 
     let expected = session.to_string_lossy().into_owned();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::app::test_wait::budget(Duration::from_secs(5));
     loop {
         let log = std::fs::read_to_string(&fake.log).unwrap_or_default();
         if log.contains("switch_session") {
@@ -325,7 +325,7 @@ fn an_exhausted_budget_names_the_process_stderr(cx: &mut gpui::TestAppContext) {
                     .expect("spawn stderr pi");
             app.client = Some(client);
             // The stderr drain thread reads off-thread; wait for its line.
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + crate::app::test_wait::budget(Duration::from_secs(2));
             while app
                 .client
                 .as_ref()

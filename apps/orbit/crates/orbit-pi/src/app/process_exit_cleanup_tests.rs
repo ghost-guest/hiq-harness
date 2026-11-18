@@ -69,7 +69,7 @@ fn pump_until(
     cx: &mut gpui::TestAppContext,
     done: impl Fn(&OrbitApp) -> bool,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::app::test_wait::budget(Duration::from_secs(5));
     loop {
         let reached = app.update(cx, |app, cx| {
             app.tick(cx);

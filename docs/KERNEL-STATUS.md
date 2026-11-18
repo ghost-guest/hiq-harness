@@ -459,7 +459,14 @@ PASS 接缝① 真引擎
 | `parked_session_cancels_custom_ui_with_a_top_level_flag` | 6/6 FAIL | 确定性红（设计差异） |
 | `mark_placement_and_small_fallback` | 6/6 FAIL | 确定性红（字体度量） |
 
-所以它**没有**进 `bench/known-red.txt`：把抖动登记成"已知红"，等于给它发免死金牌，
+根因找到了：这些无头测试用"泵到某个状态出现"的循环，截止时间写死 5 秒（少数 2 秒）。
+单独跑够用，满载（十几路并行 + 每路起假进程）时不够——**慢被当成了坏**。
+修法不是逐个调数字，而是给所有等待一个统一预算：`app/test_wait.rs` 的 `budget()`
+默认 ×4，可用 `ORBIT_TEST_TIMEOUT_SCALE` 调。8 个文件、11 处截止统一走它。
+
+改完连跑两遍全量：`1932 passed; 6 failed` ×2，失败集**一字不差**就是那 6 条登记过的。
+
+所以那条抖动用例**没有**进 `bench/known-red.txt`：把抖动登记成"已知红"，等于给它发免死金牌，
 以后真出问题也不会有人知道。不登记，它一抖就被判"未登记的失败"。
 `known-red.txt` 里写了这段说明。
 

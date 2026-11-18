@@ -45,7 +45,7 @@ impl FakePi {
 
     /// The lines the app wrote to pi's stdin, once the writer thread flushes.
     fn stdin(&self) -> String {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + crate::app::test_wait::budget(Duration::from_secs(2));
         loop {
             let text = std::fs::read_to_string(&self.log).unwrap_or_default();
             if !text.is_empty() || Instant::now() > deadline {

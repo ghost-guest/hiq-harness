@@ -168,7 +168,7 @@ fn pump_until(
     cx: &mut gpui::VisualTestContext,
     mut done: impl FnMut(&OrbitApp) -> bool,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::app::test_wait::budget(Duration::from_secs(5));
     loop {
         let reached = cx.update(|_, cx| {
             app.update(cx, |app, cx| {
@@ -487,7 +487,7 @@ fn delayed_fork_exit_respawns_child(cx: &mut gpui::TestAppContext) {
             assert_eq!(app.current_session_path.as_ref(), Some(&source));
         })
     });
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::app::test_wait::budget(Duration::from_secs(10));
     loop {
         cx.run_until_parked();
         let reattached = cx.update(|_, cx| {
@@ -1121,7 +1121,7 @@ fn a_cancelled_fork_changes_nothing(cx: &mut gpui::TestAppContext) {
     });
     // The reply carries `cancelled`; wait for the fork line to be spoken, then
     // let the app drain it.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::app::test_wait::budget(Duration::from_secs(5));
     while !fake.commands().contains("\"type\":\"fork\"") {
         assert!(Instant::now() < deadline, "the fork never went out");
         std::thread::sleep(Duration::from_millis(10));
