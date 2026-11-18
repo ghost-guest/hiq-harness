@@ -463,10 +463,10 @@ PASS 接缝① 真引擎
 |---|---|---|
 | `turn.start` / `tool.pre` / `tool.post` / `turn.end` | ✅ 都在 | 探针实测 |
 | `guard.deny` | 条件触发 | `go_plugin_guard` 测试的真日志：`guard.deny {"reason":"git push --force rewrites shared history…","source":"plugin"}` |
-| `compact.pre` | 条件触发，**未观测到** | 没有触发过一次上下文压缩——这是缺口，不假装有 |
+| `compact.pre` | 条件触发 | 新测试 `the_cache_guard_tells_plugins_before_it_compacts`：真插件进程，缓存守卫建议压缩时它收到 `compact.pre`。真引擎下还没触发过一次压缩（见缺口 #4） |
 
-所以准确的表述是：**6 种事件都接好了，普通回合能看到 4 种，1 种有拒绝场景的实测证据，
-1 种（压缩）从来没有被真的触发过。** 最后那条记在下面的缺口里。
+所以准确的表述是：**6 种事件都接好了，普通回合能看到 4 种；`guard.deny` 有真引擎的拒绝实测；
+`compact.pre` 有"真插件进程收到"的单测，但**没有**端到端跑过一次真压缩。**
 
 ## 基线噪声：红点也分"红"和"抖"
 
@@ -541,9 +541,11 @@ grep 抓不到 `test result`，表格里就留一格空白，而脚本照样 exi
 
 ### 不挡事、但要知道的
 
-4. **`compact.pre` 从来没被真的触发过。** 事件接线在，但没跑过一次上下文压缩，
-   所以"压缩时插件能收到通知"只是读代码得出的结论。要补就得把 `context_window`
-   调到很小、喂一段长上下文，让它被迫压缩——比其它几条贵，先记着。
+4. **`compact.pre` 没有端到端跑通过一次。** 现在的证据是两层：单测证明"缓存守卫判定
+   该压缩时，真插件进程确实收到了 `compact.pre`"；但真引擎下没触发过一次压缩。
+   试过了：把 `context_window` 调到 4000 / 32000 并开 `auto_compact`、喂 1.2 万 token 的
+   prompt，引擎照常跑完不压缩——压缩多半是**跨回合**在累积历史上判的，单回合逼不出来。
+   要真跑就得写个多回合驱动，比其它几条贵，先记着，不假装有。
 5. **X（Twitter）那一路调研没做。** 候选池只来自 GitHub stars（670 个，含 dim/pi-jax/PIG 校验）
    与手工对比。X 需要登录态，抓不了；结论因此只覆盖了一半来源。
 5. **方案原文 S0 写的是"git submodule + engine 作为 lib 路径依赖"**，实施改成了进程依赖。

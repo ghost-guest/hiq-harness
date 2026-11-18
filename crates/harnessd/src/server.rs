@@ -598,6 +598,65 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// S4 里"6 个事件"包含 `compact.pre`，但这一条一直是**读代码**得出的结论：
+    /// 探针跑普通回合只看得见 4 种，压缩又很难在真机上凑出来。
+    /// 所以这里退一步，用真的插件进程验一次"广播确实到达插件"：
+    /// 插件把收到的方法名写文件，我们读回来。
+    #[test]
+    fn the_cache_guard_tells_plugins_before_it_compacts() {
+        let log = tmp_log("compact-plugin");
+        let path = log.path().to_path_buf();
+        let mut sup = Supervisor::new(MockEngine::default(), log, 100_000);
+        sup.state.thread_id = Some("thr_1".into());
+
+        let seen = std::env::temp_dir().join(format!(
+            "compact-plugin-seen-{}-{:?}.log",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&seen);
+        let script = format!(
+            r#"
+import json,sys
+out=open({seen:?},'a',buffering=1)
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    m=json.loads(line)
+    if m.get('method')=='plugin/hello':
+        print(json.dumps({{'id':m['id'],'result':{{'name':'tap','protocol':1,'tools':[],'caps':[]}}}}),flush=True)
+    elif 'method' in m:
+        out.write(m['method']+'\n')
+"#,
+            seen = seen.to_string_lossy()
+        );
+        sup.plugins
+            .load(&crate::plugins::PluginSpec::new("tap", "python3", vec!["-u".into(), "-c".into(), script]))
+            .expect("load tap plugin");
+
+        // 热前缀几乎全命中：缓存守卫会说"该压缩了"。
+        sup.engine
+            .emit("thread/tokenUsage/updated", json!({"promptTokens":95000,"cachedTokens":94000}));
+        sup.pump().unwrap();
+        assert!(sup.engine.calls().iter().any(|c| c == "thread/compact/start"));
+
+        // 插件是另一个进程：给它一点时间把行刷出来。
+        let mut got = String::new();
+        for _ in 0..50 {
+            got = std::fs::read_to_string(&seen).unwrap_or_default();
+            if got.contains("compact.pre") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_file(&seen);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            got.contains("compact.pre"),
+            "插件没有收到 compact.pre，实际收到：{got:?}"
+        );
+    }
+
     #[test]
     fn real_engine_payload_maps_command_actions_to_our_tool_names() {
         assert_eq!(
