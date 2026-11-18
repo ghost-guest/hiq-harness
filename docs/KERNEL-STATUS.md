@@ -80,6 +80,10 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
   `crates/harnessd/tests/go_plugin_guard.rs` 两条——一条验规则（含"正常命令必须放行"），
   一条验**拒绝理由真的走到内核日志里**（`guard.deny` 里带 `force` 字样）。
   第一个插件证明"插件能否决"，这一个证明"否决规则本身站得住"。
+- **插件可配置**：`PluginSpec` 新增 `env` / `with_env`（内核把环境变量送进插件进程），
+  guard-safety 用 `GUARD_SAFETY_CONFIG` 指向一个 JSON 就能关规则、加受保护文件，不用重编。
+  `a_plugin_can_be_configured_without_rebuilding_it` 验的是"内核真把它送进去了"：
+  关掉 force-push 后同一条命令从 deny 变 allow，而 `safety.rules` 从 4 条变 3 条。
 
 ## S5 评测集
 

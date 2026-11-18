@@ -35,11 +35,22 @@ pub struct PluginSpec {
     pub name: String,
     pub program: String,
     pub args: Vec<String>,
+    /// 给插件进程的环境变量。
+    ///
+    /// 插件要能配置（"这条规则先关掉"、"多保护几个文件"），最省事且最不容易
+    /// 出错的方式就是环境变量：不用发明配置协议，也不用把路径写进插件里。
+    pub env: Vec<(String, String)>,
 }
 
 impl PluginSpec {
     pub fn new(name: impl Into<String>, program: impl Into<String>, args: Vec<String>) -> Self {
-        Self { name: name.into(), program: program.into(), args }
+        Self { name: name.into(), program: program.into(), args, env: Vec::new() }
+    }
+
+    /// 带上一个环境变量（链式）。
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
     }
 }
 
@@ -58,6 +69,7 @@ impl Plugin {
     pub fn spawn(spec: &PluginSpec) -> Result<Self> {
         let mut child = Command::new(&spec.program)
             .args(&spec.args)
+            .envs(spec.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

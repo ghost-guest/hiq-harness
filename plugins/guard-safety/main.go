@@ -22,6 +22,46 @@ import (
 	"hiq/sdk/go/harnessplugin"
 )
 
+// Config lets an operator turn a rule off, or protect extra env files,
+// without rebuilding the plugin. Path comes from GUARD_SAFETY_CONFIG;
+// a missing file means "all rules on", so the zero case is safe.
+type Config struct {
+	Disabled     []string `json:"disabled"`
+	ProtectedEnv []string `json:"protected_env"`
+}
+
+func loadConfig() Config {
+	path := os.Getenv("GUARD_SAFETY_CONFIG")
+	if path == "" {
+		return Config{}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "guard-safety: %s: %v (all rules stay on)\n", path, err)
+		return Config{}
+	}
+	var cfg Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "guard-safety: %s is not valid JSON: %v (all rules stay on)\n", path, err)
+		return Config{}
+	}
+	return cfg
+}
+
+// enabled reports whether a rule still applies. A disabled rule is a
+// deliberate operator decision, so it is not an error.
+func (c Config) enabled(id string) bool {
+	for _, d := range c.Disabled {
+		if d == id {
+			return false
+		}
+	}
+	return true
+}
+
+// Policy is the rule set plus its configuration.
+type Policy struct{ cfg Config }
+
 // Rule is one enforced policy, named so a log line can point at it.
 type Rule struct {
 	ID  string `json:"id"`
@@ -79,45 +119,62 @@ func writesTo(cmd string, toks []string, path string) bool {
 
 // checkCommand is the whole policy: deny plus a human-readable reason, or a
 // zero Rule when the command passes.
-func checkCommand(cmd string) (Rule, bool) {
+func (p Policy) checkCommand(cmd string) (Rule, bool) {
 	toks := tokens(cmd)
 	lower := strings.ToLower(cmd)
 
 	// force push: `git push` anywhere, with a force flag.
-	if hasToken(toks, "push") && (hasToken(toks, "--force") || hasToken(toks, "-f") || hasToken(toks, "--force-with-lease")) {
+	if p.cfg.enabled("force-push") && hasToken(toks, "push") && (hasToken(toks, "--force") || hasToken(toks, "-f") || hasToken(toks, "--force-with-lease")) {
 		for _, t := range toks {
 			if t == "git" {
 				return rules[0], true
 			}
 		}
 	}
-	// dotenv writes (`.env`, `.env.local`, …)
+	// dotenv writes (`.env`, `.env.local`, …) plus anything the operator
+	// listed in protected_env.
+	protected := append([]string{".env"}, p.cfg.ProtectedEnv...)
 	for _, t := range toks {
-		if strings.HasPrefix(t, ".env") || strings.Contains(t, "/.env") {
+		if p.cfg.enabled("dotenv-write") && matchesProtected(t, protected) {
 			base := t[strings.LastIndex(t, "/")+1:]
 			if writesTo(cmd, toks, base) || writesTo(cmd, toks, t) {
 				return rules[1], true
 			}
 		}
 	}
-	if strings.Contains(cmd, "rm -rf /") && !strings.Contains(cmd, "rm -rf /tmp") && !strings.Contains(cmd, "rm -rf /var") {
+	if p.cfg.enabled("root-delete") && strings.Contains(cmd, "rm -rf /") && !strings.Contains(cmd, "rm -rf /tmp") && !strings.Contains(cmd, "rm -rf /var") {
 		return rules[2], true
 	}
-	if strings.Contains(lower, ":(){") || strings.Contains(lower, ":(){ :|:& };:") {
+	if p.cfg.enabled("fork-bomb") && (strings.Contains(lower, ":(){") || strings.Contains(lower, ":(){ :|:& };:")) {
 		return rules[3], true
 	}
 	return Rule{}, false
 }
 
+// matchesProtected reports whether a token names a protected env file,
+// with or without a directory in front of it.
+func matchesProtected(token string, protected []string) bool {
+	base := token[strings.LastIndex(token, "/")+1:]
+	for _, p := range protected {
+		// `.env` also covers `.env.local`, `.env.production` — the suffix form
+		// is how dotenv files are actually named.
+		if token == p || base == p || strings.HasPrefix(base, p+".") {
+			return true
+		}
+	}
+	return false
+}
+
 // explain is the tool body; kept separate so the test can call it directly.
-func explain(cmd string) map[string]any {
-	if rule, denied := checkCommand(cmd); denied {
+func (p Policy) explain(cmd string) map[string]any {
+	if rule, denied := p.checkCommand(cmd); denied {
 		return map[string]any{"decision": "deny", "reason": rule.Why, "rule": rule.ID}
 	}
 	return map[string]any{"decision": "allow"}
 }
 
 func main() {
+	policy := Policy{cfg: loadConfig()}
 	err := harnessplugin.Serve("guard-safety",
 		harnessplugin.WithTool(harnessplugin.Tool{
 			Name:        "policy.check",
@@ -127,14 +184,20 @@ func main() {
 					Command string `json:"command"`
 				}
 				_ = json.Unmarshal(in, &p)
-				return explain(p.Command), nil
+				return policy.explain(p.Command), nil
 			},
 		}),
 		harnessplugin.WithTool(harnessplugin.Tool{
 			Name:        "safety.rules",
 			Description: "List the enforced rules",
 			Handler: func(json.RawMessage) (any, error) {
-				return map[string]any{"rules": rules}, nil
+				active := make([]Rule, 0, len(rules))
+				for _, r := range rules {
+					if policy.cfg.enabled(r.ID) {
+						active = append(active, r)
+					}
+				}
+				return map[string]any{"rules": active, "protected_env": policy.cfg.ProtectedEnv}, nil
 			},
 		}),
 		harnessplugin.WithEvent("guard.deny", func(raw json.RawMessage) {

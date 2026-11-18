@@ -144,3 +144,43 @@ fn a_denial_reason_reaches_the_kernel_log() {
     let _ = std::fs::remove_file(&log_path);
     let _ = std::fs::remove_file(&bin);
 }
+
+/// 插件要能配置：一个跑起来的进程，换个环境变量就换一套规则。
+/// 这条测的是"内核把配置送进去了"这件事，而不是插件自己怎么读。
+#[test]
+fn a_plugin_can_be_configured_without_rebuilding_it() {
+    let Some(bin) = build_plugin() else { return };
+    let mut cfg_path = std::env::temp_dir();
+    cfg_path.push(format!("guard-safety-cfg-{}.json", std::process::id()));
+    std::fs::write(&cfg_path, r#"{"disabled":["force-push"],"protected_env":["secrets.yaml"]}"#)
+        .expect("write config");
+
+    let mut host = PluginHost::new();
+    host.load(
+        &PluginSpec::new("guard-safety", bin.to_string_lossy(), vec![])
+            .with_env("GUARD_SAFETY_CONFIG", cfg_path.to_string_lossy()),
+    )
+    .expect("plugin must load");
+
+    // 被关掉的规则不再拦。
+    let force = decide(&mut host, "git push --force origin main");
+    assert_eq!(force["content"]["decision"], "allow", "{force}");
+
+    // 没关的规则还在，新加的保护文件生效。
+    let dotenv = decide(&mut host, "echo x > secrets.yaml");
+    assert_eq!(dotenv["content"]["decision"], "deny", "{dotenv}");
+
+    // 规则清单也跟着变，操作员能看到"现在到底还拦什么"。
+    let rules = host
+        .call_tool("safety.rules", json!({}))
+        .expect("registered")
+        .expect("answers");
+    assert_eq!(rules["content"]["rules"].as_array().map(Vec::len), Some(3), "{rules}");
+    assert_eq!(
+        rules["content"]["protected_env"][0], "secrets.yaml",
+        "{rules}"
+    );
+
+    let _ = std::fs::remove_file(&cfg_path);
+    let _ = std::fs::remove_file(&bin);
+}
