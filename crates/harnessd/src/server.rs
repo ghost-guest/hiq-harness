@@ -683,6 +683,27 @@ for line in sys.stdin:
         let _ = std::fs::remove_file(&path);
     }
 
+    /// 和上面那条对称：窗口满了但**缓存命中率崩了**时，守卫必须说"冻结前缀"，
+    /// 而不是压缩（再压只会更贵）。这条路之前同样因为读不到用量而永远不会走。
+    #[test]
+    fn the_cache_guard_freezes_the_prefix_when_the_hit_rate_collapses() {
+        let log = tmp_log("freeze-http");
+        let path = log.path().to_path_buf();
+        let mut sup = Supervisor::new(MockEngine::default(), log, 9_000);
+        sup.state.thread_id = Some("thr_1".into());
+        sup.state.auto_compact = true;
+        sup.engine.emit(
+            "turn/usage",
+            json!({"usage":{"input_tokens":12467,"prompt_cache_hit_tokens":1200}}),
+        );
+        let events = sup.pump().unwrap();
+        let froze = events.iter().any(|e| e.kind == "cache_freeze");
+        let compressed = sup.engine.calls().iter().any(|c| c == "thread/compact/start");
+        let _ = std::fs::remove_file(&path);
+        assert!(froze, "命中率只有 9.6% 时必须冻结前缀，实际事件：{events:?}");
+        assert!(!compressed, "命中率崩了还去压缩，等于把最便宜的 token 扔了");
+    }
+
     #[test]
     fn real_engine_payload_maps_command_actions_to_our_tool_names() {
         assert_eq!(
