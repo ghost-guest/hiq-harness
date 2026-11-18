@@ -7,7 +7,8 @@
     "brownfield_pass_rate": 0.0,
     "guard_denials": 0,
     "blocked_turns": 0,
-    "mean_duration_s": 7.34
+    "mean_duration_s": 7.34,
+    "solver_failures": 0
   },
   "results": [
     {

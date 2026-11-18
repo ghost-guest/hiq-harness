@@ -128,6 +128,7 @@ def selftest(tasks):
 
 def run(tasks, solver, out_path):
     results = []
+    solver_failures = []
     for t in tasks:
         d = fresh_dir(t)
         if solver == "gold":
@@ -137,6 +138,16 @@ def run(tasks, solver, out_path):
         elif solver:
             ok_solve, solve_out, dt_solve = sh(solver, d, env={"TASK_PROMPT": t["prompt"]},
                                                timeout=t.get("timeout_s", 180) + 120)
+            if not ok_solve:
+                # solver 自己挂了和"模型没解出来"是两件事，分数上都显示 FAIL，
+                # 但只有后者说明模型不行。把前者单独记下来，别让它伪装成能力问题。
+                solver_failures.append({
+                    "id": t["id"],
+                    "seconds": round(dt_solve, 2),
+                    "output": solve_out.splitlines()[:3],
+                })
+                print(f"!! solver failed on {t['id']} after {dt_solve:.1f}s: "
+                      f"{(solve_out.splitlines() or ['(no output)'])[0][:160]}")
         else:
             ok_solve, solve_out, dt_solve = True, "no solver (check-only)", 0.0
         ok, out, dt = run_check(t, d)
@@ -169,11 +180,18 @@ def run(tasks, solver, out_path):
             max(1, sum(1 for r in results if r["kind"] == "brownfield")), 3),
         "guard_denials": sum(r.get("denials", 0) for r in results),
         "blocked_turns": sum(1 for r in results if r.get("blocked")),
+        "solver_failures": len(solver_failures),
         "mean_duration_s": round(sum(r["duration_s"] for r in results) / n, 2) if n else 0.0,
     }
+    if solver_failures:
+        print(f"\n!! {len(solver_failures)} 道题的 solver 自己失败了——"
+              f"这些分数不说明模型能力，先查 solver：")
+        for f in solver_failures[:3]:
+            print(f"   - {f['id']} ({f['seconds']}s): {f['output'][:1]}")
     print("\n" + json.dumps(summary, ensure_ascii=False, indent=2))
     if out_path:
-        Path(out_path).write_text(json.dumps({"summary": summary, "results": results},
+        Path(out_path).write_text(json.dumps({"summary": summary, "results": results,
+                                             "solver_failures": solver_failures},
                                              ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"written: {out_path}")
     return 0 if passed == n else 1

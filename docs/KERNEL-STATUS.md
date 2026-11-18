@@ -416,6 +416,18 @@ GET /v1/sessions  → 真实会话列表（id/title/runtime_store/created_at…�
 - `prompt` → 走到 provider 调用后返回 `-32603 Runtime owner 400`，因为本机 **没有配 provider key**
   （`codewhale auth status`：`not signed in`，provider 表为空）。这不是代码问题，是环境缺 key。
 
+## 会"绿得发空"的检查，全改成了会红
+
+这一类缺陷没有错误信号：检查照跑、结果照绿、什么都没验。一次只修一处，逐条改掉：
+
+| 原来 | 现在 |
+|---|---|
+| `check-engine.sh`：引擎没 vendored → `nothing to check`，exit 0 | 扫描全部 `Cargo.toml`：提到引擎 crate 或 path 逃出仓库就红（两个方向都验过） |
+| `evidence.sh`：某节没产出数字 → 表格空一格，exit 0 | 每格过形状检查，取不到就打印「证据不完整」+ 点名 + exit 1 |
+| Go 插件测试：没装 Go → `eprintln` 一句然后 return（算通过） | 默认 **panic**；要跳过必须 `HARNESS_SKIP_GO=1`，且输出留一行脚印 |
+| `bench/run.py`：solver 起不来 → 只显示 FAIL，看起来像模型不行 | 统计 `solver_failures`，打印那句真错误，并在结论里明说"这些分数不说明模型能力" |
+| `gate.sh`：基线缺 `solver_failures` 字段 → 当作 0，静默通过 | 字段缺失即红；三份历史基线已显式补 0 |
+
 ## 证据本身也有自检
 
 `evidence.sh` 产出的每一格现在都要过形状检查（`need`）：`cargo test` 的

@@ -17,6 +17,22 @@ fn go_available() -> bool {
         .unwrap_or(false)
 }
 
+/// 缺 Go 时**默认是失败**，不是跳过。
+///
+/// 这几个测试是 S4「插件层」唯一的机械证据。跳过 = 绿 = 没用装没装 Go 都显示通过，
+/// 而这正是最危险的一种绿：读的人会以为插件层验过了。要显式跳过必须设
+/// `HARNESS_SKIP_GO=1`，并且输出里会留一行脚印。
+fn require_go(test: &str) {
+    if go_available() {
+        return;
+    }
+    if std::env::var("HARNESS_SKIP_GO").as_deref() == Ok("1") {
+        eprintln!("[{test}] skipped on purpose: HARNESS_SKIP_GO=1 and no `go` in PATH");
+        return;
+    }
+    panic!("[{test}] needs `go` in PATH: S4 的插件层证据只能由真插件产出。确实要跳过请设 HARNESS_SKIP_GO=1");
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -26,9 +42,10 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn build_plugin() -> Option<PathBuf> {
+fn build_plugin(test: &str) -> Option<PathBuf> {
     if !go_available() {
-        eprintln!("go not installed — skipping");
+        // 缺 Go：默认 panic；只有显式 HARNESS_SKIP_GO=1 才安静地跳过。
+        require_go(test);
         return None;
     }
     let dir = repo_root().join("plugins/guard-safety");
@@ -58,7 +75,7 @@ fn decide(host: &mut PluginHost, command: &str) -> serde_json::Value {
 
 #[test]
 fn the_safety_guard_denies_the_four_dangerous_shapes() {
-    let Some(bin) = build_plugin() else { return };
+    let Some(bin) = build_plugin("go_plugin_guard") else { return };
     let mut host = PluginHost::new();
     host.load(&PluginSpec::new(
         "guard-safety",
@@ -118,7 +135,7 @@ fn the_safety_guard_denies_the_four_dangerous_shapes() {
 /// 拒绝理由要能走到内核日志里——否则用户只看到"被拦"，不知道为什么。
 #[test]
 fn a_denial_reason_reaches_the_kernel_log() {
-    let Some(bin) = build_plugin() else { return };
+    let Some(bin) = build_plugin("go_plugin_guard") else { return };
     use harnessd::engine::MockEngine;
     use harnessd::protocol::Frame;
     use harnessd::server::Supervisor;
@@ -166,7 +183,7 @@ fn a_denial_reason_reaches_the_kernel_log() {
 /// 这条测的是"内核把配置送进去了"这件事，而不是插件自己怎么读。
 #[test]
 fn a_plugin_can_be_configured_without_rebuilding_it() {
-    let Some(bin) = build_plugin() else { return };
+    let Some(bin) = build_plugin("go_plugin_guard") else { return };
     let mut cfg_path = std::env::temp_dir();
     cfg_path.push(format!("guard-safety-cfg-{}.json", std::process::id()));
     std::fs::write(&cfg_path, r#"{"disabled":["force-push"],"protected_env":["secrets.yaml"]}"#)

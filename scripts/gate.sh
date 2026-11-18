@@ -33,6 +33,9 @@ checks = [
     ("pass_rate",      s.get("pass_rate"),      lambda v: v >= 0.95, "通过率 >= 0.95"),
     ("rework_rate",    s.get("rework_rate"),    lambda v: v <= 0.05, "返工率 <= 0.05"),
     ("false_kill_rate",s.get("false_kill_rate"),lambda v: v == 0.0,  "误杀率 == 0"),
+    # solver 自己挂掉时，通过率也接近 0——但那不说明模型/内核退化。
+    # 基线里必须明确"没有 solver 失败"，否则这个基线不能当门禁的输入。
+    ("solver_failures",s.get("solver_failures"),lambda v: v == 0, "solver 失败数 == 0"),
 ]
 bad = []
 for name, value, ok, text in checks:

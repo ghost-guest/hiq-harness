@@ -11,16 +11,29 @@ fn go_available() -> bool {
     Command::new("go").arg("version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// 缺 Go 时**默认是失败**，不是跳过。
+///
+/// 这几个测试是 S4「插件层」唯一的机械证据。跳过 = 绿 = 没用装没装 Go 都显示通过，
+/// 而这正是最危险的一种绿：读的人会以为插件层验过了。要显式跳过必须设
+/// `HARNESS_SKIP_GO=1`，并且输出里会留一行脚印。
+fn require_go(test: &str) {
+    if go_available() {
+        return;
+    }
+    if std::env::var("HARNESS_SKIP_GO").as_deref() == Ok("1") {
+        eprintln!("[{test}] skipped on purpose: HARNESS_SKIP_GO=1 and no `go` in PATH");
+        return;
+    }
+    panic!("[{test}] needs `go` in PATH: S4 的插件层证据只能由真插件产出。确实要跳过请设 HARNESS_SKIP_GO=1");
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
 }
 
 #[test]
 fn go_plugin_handshakes_and_serves_tools() {
-    if !go_available() {
-        eprintln!("go not installed — skipping");
-        return;
-    }
+    require_go("go_plugin");
     let root = repo_root();
     let plugin_dir = root.join("plugins/example-echo");
     assert!(plugin_dir.exists(), "missing {}", plugin_dir.display());
@@ -66,9 +79,7 @@ fn go_plugin_handshakes_and_serves_tools() {
 
 #[test]
 fn unknown_tool_is_reported_not_panicked() {
-    if !go_available() {
-        return;
-    }
+    require_go("unknown_tool_case");
     assert!(PluginHost::new().call_tool("nope", json!({})).is_none());
 }
 
@@ -79,10 +90,7 @@ fn unknown_tool_is_reported_not_panicked() {
 /// ③广播给其它插件 ④这条命令之外的东西照常跑（不 panic、不中断）。
 #[test]
 fn go_plugin_can_deny_a_command_and_the_kernel_records_it() {
-    if !go_available() {
-        eprintln!("go not installed — skipping");
-        return;
-    }
+    require_go("go_plugin");
     use harnessd::engine::MockEngine;
     use harnessd::plugins::PluginSpec;
     use harnessd::server::Supervisor;
