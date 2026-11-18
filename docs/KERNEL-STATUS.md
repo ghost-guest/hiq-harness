@@ -90,7 +90,7 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 | 验收原文 | 状态 | 证据 |
 |---|---|---|
 | S0 两仓独立构建，harnessd 能调 `ExecPolicyEngine` | 改为进程依赖（§0.1） | `check-engine.sh` exit 0；`JsonRpcEngine` 只走 JSON-RPC，从不链接引擎 crate |
-| S1 orbit 界面能发一条消息，看到流式回复和工具调用 | 数据层已验证（含真模型会话），**界面仍需人眼看一次** | 两段真跑输出回放：`a_real_session_parses_into_the_events_the_ui_renders`（脚本化 + DeepSeek 真会话）都解析出文本增量、`tool_execution_start/end` 成对、`agent_end` |
+| S1 orbit 界面能发一条消息，看到流式回复和工具调用（`render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`：真子进程喂流式事件，断言**用户可见的那份对话导出**里有回复文本，工具行也进得了同一份投影） | 数据层已验证（含真模型会话），**界面仍需人眼看一次** | 两段真跑输出回放：`a_real_session_parses_into_the_events_the_ui_renders`（脚本化 + DeepSeek 真会话）都解析出文本增量、`tool_execution_start/end` 成对、`agent_end` |
 | S2 切换模型/档位生效；fork 出新会话能跑到不同结论 | **通过** | 真模型路由切换 200；`fork` → 201 新 id；档位实测：`low`/`high` → 201，非法值 → 400 并列出全部取值（`auto, off, minimal, low, medium, high, xhigh, ultra, max`，实测 9 档，不是方案里写的 7 档） |
 | S3 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | **通过** | steer 实测 `steer_count=1`；误杀 0/10；真模型 20 题测得缓存命中 **95.6%**（`prompt_cache_hit_tokens / input_tokens`） |
 | S4 写一个 Go 插件，deny 一条命令，内核记录并继续 | **通过** | `go_plugin_can_deny_a_command_and_the_kernel_records_it`：线上回 decline、日志记 `guard.deny`（带 `source: plugin`）、下一问照常 accept |
@@ -140,8 +140,13 @@ Mac
 一并抹掉。
 
 三种独立取法（全屏截图 / 唤醒后截图 / 窗口级抓图）结论一致：**不是代码没通，是机器锁着**。
-这一条只能等人开屏点一次。补一条旁证：界面进程确实连上了内核——
-`ps` 里能看到它拉起的 `harnessd serve --compat orbit` 子进程。
+这一条只能等人开屏点一次。补两条旁证：
+
+- 界面进程确实连上了内核：`ps` 里能看到它拉起的 `harnessd serve --compat orbit` 子进程。
+- **机器可判的那半已经判了**：`app::render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`
+  用一个真子进程把流式事件喂进 app，然后断言**用户可见的对话导出**
+  （`export_visible_markdown`）里确实有「这是流式回复」，工具行（`bash`）也进得了
+  同一份投影。剩下要人做的只有审美那一层（排版好不好看）。
 
 （另一个坑：`orbit-pi` 用的是 GPUI 原生窗口，不是终端 TUI，`tmux capture-pane`
 抓到的永远是空白——我第一次的判断也错了。）
@@ -202,8 +207,13 @@ Mac
 一并抹掉。
 
 三种独立取法（全屏截图 / 唤醒后截图 / 窗口级抓图）结论一致：**不是代码没通，是机器锁着**。
-这一条只能等人开屏点一次。补一条旁证：界面进程确实连上了内核——
-`ps` 里能看到它拉起的 `harnessd serve --compat orbit` 子进程。
+这一条只能等人开屏点一次。补两条旁证：
+
+- 界面进程确实连上了内核：`ps` 里能看到它拉起的 `harnessd serve --compat orbit` 子进程。
+- **机器可判的那半已经判了**：`app::render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`
+  用一个真子进程把流式事件喂进 app，然后断言**用户可见的对话导出**
+  （`export_visible_markdown`）里确实有「这是流式回复」，工具行（`bash`）也进得了
+  同一份投影。剩下要人做的只有审美那一层（排版好不好看）。
 
 （另一个坑：`orbit-pi` 用的是 GPUI 原生窗口，不是终端 TUI，`tmux capture-pane`
 抓到的永远是空白——我第一次的判断也错了。）
@@ -262,8 +272,13 @@ Mac
 一并抹掉。
 
 三种独立取法（全屏截图 / 唤醒后截图 / 窗口级抓图）结论一致：**不是代码没通，是机器锁着**。
-这一条只能等人开屏点一次。补一条旁证：界面进程确实连上了内核——
-`ps` 里能看到它拉起的 `harnessd serve --compat orbit` 子进程。
+这一条只能等人开屏点一次。补两条旁证：
+
+- 界面进程确实连上了内核：`ps` 里能看到它拉起的 `harnessd serve --compat orbit` 子进程。
+- **机器可判的那半已经判了**：`app::render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`
+  用一个真子进程把流式事件喂进 app，然后断言**用户可见的对话导出**
+  （`export_visible_markdown`）里确实有「这是流式回复」，工具行（`bash`）也进得了
+  同一份投影。剩下要人做的只有审美那一层（排版好不好看）。
 
 （另一个坑：`orbit-pi` 用的是 GPUI 原生窗口，不是终端 TUI，`tmux capture-pane`
 抓到的永远是空白——我第一次的判断也错了。）

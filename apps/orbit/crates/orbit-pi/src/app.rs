@@ -4197,6 +4197,8 @@ mod backdrop_layout_tests;
 #[cfg(test)]
 mod cancel_tests;
 #[cfg(test)]
+mod render_tests;
+#[cfg(test)]
 mod composer_chrome_tests;
 #[cfg(test)]
 mod composer_draft_tests;
