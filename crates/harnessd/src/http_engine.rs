@@ -18,7 +18,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -38,6 +38,19 @@ pub struct HttpEngine {
     last_turn: Option<String>,
     inbox: VecDeque<Frame>,
     sse: Option<(Child, Receiver<String>)>,
+    /// 合成 id → 引擎的 approval id。
+    ///
+    /// 反向请求在这个传输上不是真的"请求"：引擎把审批放在 SSE 事件里
+    /// （`approval.required`），我们只能给它编一个单调 id 交上去，答的时候
+    /// 再换回真 id 去 POST。没有这张表就只能回 `id = 0`，而 0 答不了任何东西。
+    pending_approvals: HashMap<u64, String>,
+    next_approval: u64,
+    /// 已经交出去的审批 id。
+    ///
+    /// 引擎会把同一个 `approval.required` 发**两次**（实测 seq 675 / 676 同一个
+    /// approval id）。答第二次时引擎回 404「no pending approval」——而这条错误
+    /// 会把整个 turn 打死。所以按 approval id 去重：见过就不再交，也不再答。
+    seen_approvals: HashSet<String>,
 }
 
 impl HttpEngine {
@@ -54,6 +67,9 @@ impl HttpEngine {
             last_turn: None,
             inbox: VecDeque::new(),
             sse: None,
+            pending_approvals: HashMap::new(),
+            next_approval: 0,
+            seen_approvals: HashSet::new(),
         }
     }
 
@@ -294,20 +310,24 @@ impl Engine for HttpEngine {
     fn respond(&mut self, id: u64, result: Value) -> Result<()> {
         let decision = result.get("decision").and_then(Value::as_str).unwrap_or("decline");
         let approval_id = self
-            .inbox
-            .iter()
-            .find(|f| f.id == Some(id))
-            .and_then(|f| f.params.as_ref())
-            .and_then(|p| p.get("approval_id").or_else(|| p.get("approvalId")))
-            .and_then(Value::as_str)
-            .map(str::to_string);
+            .pending_approvals
+            .remove(&id)
+            .or_else(|| {
+                self.inbox
+                    .iter()
+                    .find(|f| f.id == Some(id))
+                    .and_then(|f| f.params.as_ref())
+                    .and_then(|p| p.get("approval_id").or_else(|| p.get("approvalId")))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
         let Some(approval_id) = approval_id else {
             bail!("no approval {id} to answer");
         };
         self.curl(
             "POST",
             &format!("/v1/approvals/{approval_id}"),
-            Some(&json!({ "decision": decision })),
+            Some(&json!({ "decision": wire_decision(decision) })),
         )?;
         Ok(())
     }
@@ -354,18 +374,21 @@ impl Engine for HttpEngine {
                                     }
                                 };
                                 if kind.contains("approval") {
-                                    let approval_id = v
-                                        .get("approval_id")
-                                        .or_else(|| v.get("approvalId"))
-                                        .cloned()
-                                        .unwrap_or(Value::Null);
-                                    let mut f = Frame::request(
-                                        0,
-                                        "item/commandExecution/requestApproval",
-                                        json!({ "approval_id": approval_id, "raw": v }),
-                                    );
-                                    f.id = Some(0);
-                                    out.push(f);
+                                    self.next_approval += 1;
+                                    let id = self.next_approval;
+                                    let f = approval_frame(id, &v);
+                                    let aid = f
+                                        .params
+                                        .as_ref()
+                                        .and_then(|p| p.get("approval_id"))
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string);
+                                    if first_sighting(&mut self.seen_approvals, &aid) {
+                                        if let Some(aid) = aid {
+                                            self.pending_approvals.insert(id, aid);
+                                        }
+                                        out.push(f);
+                                    }
                                 } else {
                                     // 事件的内容在 `payload` 里，信封只是外壳。
                                     // 把整个信封往下传，下游就永远看见 item=None，
@@ -526,5 +549,162 @@ mod tests {
         let mut e = HttpEngine::new("http://127.0.0.1:1", None);
         let err = e.request("auth/login", json!({})).unwrap_err().to_string();
         assert!(err.contains("not mapped on the HTTP transport"), "{err}");
+    }
+}
+
+/// 把一个 `approval.required` 事件翻成内核认识的审批请求。
+///
+/// 真实形状（实测，不是猜的）：
+/// ```text
+/// {"event":"approval.required","payload":{
+///    "id":"approval_…","approval_id":"approval_…","tool_name":"bash",
+///    "input":{"command":"echo hi","description":"Run echo hi"},"summary":"…"}}
+/// ```
+/// 早先版本只搬 `approval_id`，结果内核看到 `tool:"unknown"`、命令也是一坨 JSON，
+/// 插件因此永远认不出"这是不是一条危险命令"。这里把 tool / command 摊平。
+pub fn approval_frame(id: u64, event: &Value) -> Frame {
+    let payload = event.get("payload").cloned().unwrap_or_else(|| event.clone());
+    let approval_id = payload
+        .get("approval_id")
+        .or_else(|| payload.get("approvalId"))
+        .or_else(|| payload.get("id"))
+        .or_else(|| event.get("approval_id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let tool = payload
+        .get("tool_name")
+        .or_else(|| payload.get("toolName"))
+        .or_else(|| payload.get("tool"))
+        .and_then(Value::as_str)
+        .unwrap_or("bash")
+        .to_string();
+    let command = payload
+        .get("input")
+        .and_then(|i| i.get("command").or_else(|| i.get("cmd")))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Frame::request(
+        id,
+        "item/commandExecution/requestApproval",
+        json!({
+            "approval_id": approval_id,
+            "tool": tool,
+            "command": command,
+            "raw": event,
+        }),
+    )
+}
+
+#[cfg(test)]
+mod approval_shape_tests {
+    use super::*;
+
+    /// 真事件（从引擎 SSE 里抓的），只裁掉了无关字段。
+    fn real_event() -> Value {
+        json!({
+            "schema_version": 1,
+            "seq": 10,
+            "event": "approval.required",
+            "kind": "approval.required",
+            "thread_id": "thr_x",
+            "payload": {
+                "id": "approval_2ad1dc5c21aa46b3b9a7094e88a383d1",
+                "approval_id": "approval_2ad1dc5c21aa46b3b9a7094e88a383d1",
+                "tool_call_id": "396be749",
+                "tool_name": "bash",
+                "input": { "command": "echo hi", "description": "Run echo hi" },
+                "summary": "Run `echo hi`"
+            }
+        })
+    }
+
+    #[test]
+    fn the_frame_carries_the_real_approval_id_tool_and_command() {
+        let f = approval_frame(3, &real_event());
+        assert_eq!(f.id, Some(3));
+        let p = f.params.clone().unwrap();
+        assert_eq!(p["approval_id"], "approval_2ad1dc5c21aa46b3b9a7094e88a383d1");
+        assert_eq!(p["tool"], "bash");
+        assert_eq!(p["command"], "echo hi");
+    }
+
+    /// 插件要看到的就是这串命令：多包一层 JSON 它就不认识了。
+    #[test]
+    fn the_command_is_flat_not_a_json_blob() {
+        let f = approval_frame(1, &real_event());
+        let cmd = f.params.as_ref().unwrap()["command"].as_str().unwrap().to_string();
+        assert_eq!(cmd, "echo hi");
+        assert!(!cmd.starts_with('{'), "command must not be the whole params: {cmd}");
+    }
+}
+
+/// 两种方言的审批词表不一样，抄错会被引擎当场骂回来（实测报错：
+/// `invalid decision 'decline'; expected "allow" or "deny"`）。
+///
+/// - stdio / 内核内部：`accept` / `decline` / `cancel`
+/// - HTTP `/v1/approvals/{id}`：`allow` / `deny`（只有这两个）
+///
+/// `cancel` 在 HTTP 面没有对应值，按 deny 处理最保守：宁可不动，也不要替用户
+/// 放行一个他自己取消掉的命令。
+pub fn wire_decision(decision: &str) -> &'static str {
+    match decision {
+        "accept" | "allow" | "acceptForSession" | "acceptWithExecpolicyAmendment" => "allow",
+        _ => "deny",
+    }
+}
+
+#[cfg(test)]
+mod decision_words_tests {
+    use super::*;
+
+    #[test]
+    fn the_two_dialects_are_translated() {
+        assert_eq!(wire_decision("accept"), "allow");
+        assert_eq!(wire_decision("allow"), "allow");
+        assert_eq!(wire_decision("decline"), "deny");
+        assert_eq!(wire_decision("deny"), "deny");
+        // 取消不能变成放行。
+        assert_eq!(wire_decision("cancel"), "deny");
+        assert_eq!(wire_decision(""), "deny");
+    }
+}
+
+/// 同一个审批只交一次。
+///
+/// 引擎实测会把同一个 `approval.required` 发两遍（seq 675 / 676 同一个 id）。
+/// 交两遍的后果不是"多问一次"，而是第二次应答 404 之后整个 turn 直接死掉。
+/// 没有 approval id 的事件（形状不认识的）一律放行，宁可多问也不要静默吞掉。
+fn first_sighting(seen: &mut HashSet<String>, aid: &Option<String>) -> bool {
+    match aid {
+        Some(id) => seen.insert(id.clone()),
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod approval_dedupe_tests {
+    use super::*;
+
+    #[test]
+    fn the_same_approval_is_delivered_once() {
+        let mut seen = HashSet::new();
+        let aid = Some("approval_x".to_string());
+        assert!(first_sighting(&mut seen, &aid), "第一次必须交上去");
+        assert!(!first_sighting(&mut seen, &aid), "同一条不能交第二遍");
+    }
+
+    #[test]
+    fn a_different_approval_still_gets_through() {
+        let mut seen = HashSet::new();
+        assert!(first_sighting(&mut seen, &Some("a".into())));
+        assert!(first_sighting(&mut seen, &Some("b".into())));
+    }
+
+    #[test]
+    fn an_unknown_shape_is_never_swallowed() {
+        let mut seen = HashSet::new();
+        assert!(first_sighting(&mut seen, &None));
+        assert!(first_sighting(&mut seen, &None));
     }
 }

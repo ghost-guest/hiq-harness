@@ -69,7 +69,7 @@ for _ in $(seq 1 40); do curl -sf -m 1 "http://127.0.0.1:$PORT/healthz" >/dev/nu
 say '### 4.1 健康检查'
 code_block sh -c "curl -s http://127.0.0.1:$PORT/healthz; echo"
 
-BODY='{"auto_approve":true,"model_provider_id":"magipe","model":"auto/deepseek-v4.1-flash"}'
+BODY='{"auto_approve":false,"model_provider_id":"magipe","model":"auto/deepseek-v4.1-flash"}'
 TID=$(curl -s -m 10 -X POST "http://127.0.0.1:$PORT/v1/threads" -H 'content-type: application/json' -d "$BODY" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
 say '### 4.2 建会话'
 code_block sh -c "curl -s -m 10 -X POST http://127.0.0.1:$PORT/v1/threads -H 'content-type: application/json' -d '$BODY' | head -c 300"

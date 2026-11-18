@@ -9,7 +9,14 @@ PROVIDER="${HARNESS_PROVIDER:-ollama}"
 WAIT="${HARNESS_TURN_WAIT:-200}"
 # 自定义路由（如本机 magipe 代理）要带 model_provider_id，靠这个变量传。
 BODY="${HARNESS_THREAD_BODY:-}"
-[ -z "$BODY" ] && BODY='{"auto_approve":true}'
+# 默认**不**让引擎自己批：auto_approve:true 会让引擎内部直接放行，
+# 审批请求根本不会发给我们，插件和守卫等于被拔掉。实测过：同一个
+# `git reset --hard` 在 true 下畅通无阻、在 false 下被 guard-safety 拦下。
+[ -z "$BODY" ] && BODY='{"auto_approve":false}'
+
+# 可选：挂一个插件（例如守卫），用来验证"真引擎下也真的拦"。
+PLUGIN_ARGS=()
+if [ -n "${HARNESS_PLUGIN:-}" ]; then PLUGIN_ARGS=(--plugin "$HARNESS_PLUGIN"); fi
 
 PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
 export CODEWHALE_HOME
@@ -39,5 +46,6 @@ PY
 # 所以这里不需要自己判定结束。
 printf '%s\n' "$JSON" | HARNESSD_THREAD_BODY="$BODY" \
   "$HARNESSD_BIN" serve --compat orbit --http-engine "http://127.0.0.1:$PORT" \
+    ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
     --log ./.harness/timebus.ndjson >/tmp/bench-harnessd.log 2>&1
 exit 0

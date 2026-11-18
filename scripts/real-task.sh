@@ -27,7 +27,7 @@ cd "$REPO"
 run_task() {
   local prompt="$1"
   rm -rf .harness
-  env HARNESS_THREAD_BODY='{"auto_approve":true,"model_provider_id":"magipe","model":"auto/deepseek-v4.1-flash"}' \
+  env HARNESS_THREAD_BODY='{"auto_approve":false,"model_provider_id":"magipe","model":"auto/deepseek-v4.1-flash"}' \
       TASK_PROMPT="$prompt" \
       HARNESS_PROVIDER=magipe \
       HARNESSD_BIN="$ROOT/target/debug/harnessd" \

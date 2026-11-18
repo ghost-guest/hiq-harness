@@ -196,6 +196,42 @@ message_update(text_delta) / message_end / agent_end`，然后断言**用户可�
 - **误杀率**：带 `guard.deny` 的任务占比
 - **缓存命中率**：`Σcached / Σinput`，来源是引擎的 usage 事件
 
+### 真引擎下的插件拦截（S4 的"真"验收）
+
+`auto_approve:true` 会让引擎**自己批**命令，审批请求根本不到内核——插件和守卫等于被拔掉。
+把默认改成 `false`（`scripts/bench-solve.sh`、`evidence.sh`、`real-task.sh` 都改了）之后，
+同一个审批通道暴露了三个真缺陷，全部修掉并用真事件复测：
+
+| 缺陷 | 现象 | 修法 |
+|---|---|---|
+| 审批帧硬编码 `id = 0`，且 `respond` 去 `inbox` 找一个从没进过 `inbox` 的帧 | `Error: no approval 0 to answer`，turn 直接死 | 单调合成 id + `pending_approvals` 表；按真事件形状摊平 `tool` / `command` |
+| 只搬 `approval_id`，命令塞在 `payload.input.command` 里没取出来 | 日志写 `tool:"unknown"`，插件认不出是什么命令 | `approval_frame()` 按实测形状取值，配两条单测（含"command 不能是整坨 JSON"） |
+| 审批词表抄 stdio 的 `accept/decline` | 引擎回 400 `expected "allow" or "deny"` | `wire_decision()` 翻译；`cancel` 按 deny 处理（宁可不动，不替用户放行） |
+| 同一个 `approval.required` 引擎发两遍 | 第二次应答 404，整个 turn 死 | 按 approval id 去重（`first_sighting`），三条单测 |
+
+修完的真引擎实测（`git reset --hard`）：
+
+```text
+guard.deny {"tool":"bash","reason":"git reset --hard discards uncommitted work without a copy","source":"plugin"}
+tool.call  {"tool":"bash","status":"committed"}   ← agent 被拒后继续跑 git log
+turn.end                                         ← 正常收尾，不是报错
+```
+
+这就是 S4 原文"插件 deny 一条命令，内核记录并继续"，第一次在 HTTP 传输上真的成立。
+
+修完又跑了一遍完整的 20 题，确认**走审批通道没有回归**：
+
+| | 旧（`auto_approve:true`，守卫被绕过） | 新（`auto_approve:false`，每步都过策略） |
+|---|---|---|
+| 通过率 | 20/20 = 1.0 | **20/20 = 1.0** |
+| 返工率 | 1.3% | **1.0%** |
+| 误杀率 | 0.0 | **0.0** |
+| 缓存命中 | 95.6% | **90.1%** |
+| 平均耗时 | 20.0 s | **20.05 s** |
+| 守卫拒绝次数 | 0（因为根本没被问） | **0**（问了 20 轮，一条都没拦——正常代码不该被拦） |
+
+延迟多了 0.05 秒，换来的是一条命令都不绕过策略。
+
 ### 真实仓库实测（不是自造题）
 
 20 题基线是自造的，天花板效应明显。所以又拿**本仓库自己**当维护对象跑了两题：
