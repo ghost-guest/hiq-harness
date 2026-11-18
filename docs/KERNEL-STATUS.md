@@ -75,6 +75,11 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 - 五条规则落地：协议版本不匹配→装载失败；`policy.bypass` cap 被内核剥离；崩溃三振出局；`uncertain`→阻塞；插件只返值不写状态。
 - 六个事件：`tool.pre/tool.post/turn.start/turn.end/compact.pre/guard.deny`。
 - 端到端：`crates/harnessd/tests/go_plugin.rs` 真编译 `plugins/example-echo` 并调用工具。
+- **第二个真插件 `plugins/guard-safety`**：禁 force push、禁改 `.env`、禁删根、禁 fork 炸弹。
+  规则是纯函数（`checkCommand`），Go 单测 12 个用例；Rust 侧
+  `crates/harnessd/tests/go_plugin_guard.rs` 两条——一条验规则（含"正常命令必须放行"），
+  一条验**拒绝理由真的走到内核日志里**（`guard.deny` 里带 `force` 字样）。
+  第一个插件证明"插件能否决"，这一个证明"否决规则本身站得住"。
 
 ## S5 评测集
 
@@ -402,9 +407,9 @@ GET /v1/sessions  → 真实会话列表（id/title/runtime_store/created_at…�
    一个需要跨多文件改的 bug、一次依赖升级。
 2. **把返工率做成回归门禁。** 现在 `bench/run.py` 会算 `rework_rate / false_kill_rate`，
    但它只在手跑。接进 CI（或 pre-push hook）才叫门禁：返工率超过 5% 或误杀率非 0 就挡。
-3. **插件层补第二个真插件。** 现在只有 `example-echo`（`echo.run` + `policy.check`）。
-   第二个应该是个**真守卫**：比如禁止 `git push --force`、禁止改 `.env`，用 Go 写，
-   走同一条 `tool.pre` 通道。
+3. ~~插件层补第二个真插件~~ **已做**：`plugins/guard-safety`（禁 force push / 改 `.env` /
+   删根 / fork 炸弹），Go 单测 + Rust 集成测试，理由会写进 `guard.deny` 日志。
+   下一步可以是给它加配置（规则开关从文件读，而不是写死在代码里）。
 4. **决定要不要给内核加"扩展 UI"协议。** `session_park` 那条红的原因已经查清：它不是接缝
    没接对，而是新内核按设计拒绝 Raw 直通，所以"取消一个扩展自定义 UI"没有对应语义。
    要不要补这套协议，取决于以后插件要不要弹原生对话框（Go 插件目前只走 `tool.pre`）。
