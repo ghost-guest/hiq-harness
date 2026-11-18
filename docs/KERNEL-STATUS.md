@@ -117,6 +117,16 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
    `assistantMessageEvent`（`types.rs:934`）——键名写错不报错，界面就是一片空白。
    已对齐，并用真跑输出回放钉住。
 
+### GUI 这一条为什么卡住（有证据）
+
+我试着把界面跑起来：`cargo build -p orbit-pi` 成功，进程能起、能连上 harnessd
+（`HARNESSD_BIN` + `HARNESSD_HTTP_ENGINE`），但取证失败——`screencapture` 拿到的是
+纯黑图（80×50 缩略图里**只有 1 种颜色**），因为这台机器此刻屏幕是休眠/锁屏的。
+所以「界面能不能看到流式回复」不是代码没通，是**没有能看的屏幕**。这一条只能醒着的人点一次。
+
+（另一个坑：`orbit-pi` 用的是 GPUI 原生窗口，不是终端 TUI，`tmux capture-pane`
+抓到的永远是空白——我第一次的判断也错了。）
+
 ### 一个不是我造成、但我得说清楚的坑
 
 `apps/orbit` 里 `orbit-pi`（TUI 二进制）的 19 个测试文件仍按老签名

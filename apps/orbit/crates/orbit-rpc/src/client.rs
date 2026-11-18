@@ -148,7 +148,24 @@ impl PiClient {
         Self::spawn_with_bin(workspace_dir, session_dir)
     }
 
+    /// 用指定程序当后端（测试注入假进程用）：等价于把 `HARNESSD_BIN` 写死。
+    pub fn spawn_with_program(
+        program: &str,
+        workspace_dir: &Path,
+        session_dir: Option<&Path>,
+    ) -> Result<Self> {
+        Self::spawn_impl(workspace_dir, session_dir, Some(program.to_string()))
+    }
+
     pub fn spawn_with_bin(workspace_dir: &Path, session_dir: Option<&Path>) -> Result<Self> {
+        Self::spawn_impl(workspace_dir, session_dir, None)
+    }
+
+    fn spawn_impl(
+        workspace_dir: &Path,
+        session_dir: Option<&Path>,
+        forced_program: Option<String>,
+    ) -> Result<Self> {
         // 会话库的根由 `session_store::sessions_root()` 决定：它是**全局唯一**
         // 的位置（`~/.orbit-pi/sessions`，可用 `HARNESS_SESSIONS_DIR` 覆盖），
         // 侧栏遍历它下面的每个 slug 子目录来按项目分组。
@@ -178,7 +195,7 @@ impl PiClient {
         // 否则退回进程内执行器。两者对 UI 完全等价：同一个 `CommandBody` 进、
         // 同一个 `Event` 出。走子进程的意义是内核可以单独重启、崩溃不带走 UI，
         // 而且 harnessd 那层守卫/time-bus/插件才有地方挂。
-        let harnessd_bin = std::env::var("HARNESSD_BIN")
+        let harnessd_bin = forced_program.or_else(|| std::env::var("HARNESSD_BIN")
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
@@ -188,7 +205,7 @@ impl PiClient {
                     eprintln!("HARNESSD_BIN={v} 找不到，退回进程内执行器");
                 }
                 ok
-            });
+            }));
         if let Some(bin) = harnessd_bin {
             match spawn_harnessd_worker(
                 &bin,
