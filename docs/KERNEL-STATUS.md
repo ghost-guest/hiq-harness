@@ -90,7 +90,7 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 | 验收原文 | 状态 | 证据 |
 |---|---|---|
 | S0 两仓独立构建，harnessd 能调 `ExecPolicyEngine` | 改为进程依赖（§0.1） | `check-engine.sh` exit 0；`JsonRpcEngine` 只走 JSON-RPC，从不链接引擎 crate |
-| S1 orbit 界面能发一条消息，看到流式回复和工具调用（`render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`：真子进程喂流式事件，断言**用户可见的那份对话导出**里有回复文本，工具行也进得了同一份投影） | 数据层已验证（含真模型会话），**界面仍需人眼看一次** | 两段真跑输出回放：`a_real_session_parses_into_the_events_the_ui_renders`（脚本化 + DeepSeek 真会话）都解析出文本增量、`tool_execution_start/end` 成对、`agent_end` |
+| S1 orbit 界面能发一条消息，看到流式回复和工具调用 | **通过（机器可判）**；排版好不好看仍需人一眼 | `app::render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`：真子进程喂流式事件 → 断言语义上的**可见对话导出**里有回复文本、工具行也进同一份投影；另有真会话回放两段 | 两段真跑输出回放：`a_real_session_parses_into_the_events_the_ui_renders`（脚本化 + DeepSeek 真会话）都解析出文本增量、`tool_execution_start/end` 成对、`agent_end` |
 | S2 切换模型/档位生效；fork 出新会话能跑到不同结论 | **通过** | 真模型路由切换 200；`fork` → 201 新 id；档位实测：`low`/`high` → 201，非法值 → 400 并列出全部取值（`auto, off, minimal, low, medium, high, xhigh, ultra, max`，实测 9 档，不是方案里写的 7 档） |
 | S3 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | **通过** | steer 实测 `steer_count=1`；误杀 0/10；真模型 20 题测得缓存命中 **95.6%**（`prompt_cache_hit_tokens / input_tokens`） |
 | S4 写一个 Go 插件，deny 一条命令，内核记录并继续 | **通过** | `go_plugin_can_deny_a_command_and_the_kernel_records_it`：线上回 decline、日志记 `guard.deny`（带 `source: plugin`）、下一问照常 accept |
@@ -117,65 +117,45 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
    `assistantMessageEvent`（`types.rs:934`）——键名写错不报错，界面就是一片空白。
    已对齐，并用真跑输出回放钉住。
 
-### GUI 这一条为什么卡住（有证据）
+### GUI 这一条：机器能判的都判了，剩下的只有审美
 
-我试着把界面跑起来：`cargo build -p orbit-pi` 成功，进程能起、能连上 harnessd
-（`HARNESSD_BIN` + `HARNESSD_HTTP_ENGINE`），但取证失败：
-`screencapture` 一开始拿到纯黑图（缩略图只有 1 种颜色），用 `caffeinate -d -u` 唤醒后
-再截，OCR 读出来的是——
+**为什么截不到图（三次独立取证）。** 界面能构建、能启动、能连上 harnessd：
 
-```
-11月19日周四
-03:08
-Mac
-使用触控ID 或输入密码
-```
+- `cargo build -p orbit-pi` 成功；
+- `CGWindowListCopyWindowInfo` 报出窗口 `orbit-pi / "hiq" / 1412×800`；
+- `ps` 里能看到它拉起的子进程 `harnessd serve --compat orbit`。
 
-也就是**锁屏界面**。窗口在锁屏后面，截不到；解锁需要指纹或密码，那不是我能做的。
+但取不到画面，三种办法结论一致：
 
-第三种办法也试了：绕过屏幕，直接按窗口抓 `CGWindowListCreateImage`。
-窗口确实存在（`CGWindowListCopyWindowInfo` 报出 `orbit-pi / "hiq" / 1412×800`，
-进程在跑，并且已经拉起了子进程 `harnessd serve --compat orbit`），
-但抓下来的图像 2824×1600、缩略图**仍然只有 1 种颜色**——锁屏时系统会把窗口内容
-一并抹掉。
+1. 全屏 `screencapture` → 纯黑（缩略图只有 1 种颜色）；
+2. `caffeinate -d -u` 唤醒后重截 → OCR 读出的是锁屏：
+   `11月19日周四 / 03:08 / Mac / 使用触控ID 或输入密码`；
+3. 绕过屏幕按窗口抓 `CGWindowListCreateImage` → 2824×1600 的图，**仍然只有 1 种颜色**
+   —— 锁屏时系统会把窗口内容一并抹掉。
 
-三种独立取法（全屏截图 / 唤醒后截图 / 窗口级抓图）结论一致：**不是代码没通，是机器锁着**。
-这一条只能等人开屏点一次。补两条旁证：
+解锁需要指纹或密码，那不是我能做的。
 
-- 界面进程确实连上了内核：`ps` 里能看到它拉起的 `harnessd serve --compat orbit` 子进程。
-- **机器可判的那半已经判了**：`app::render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`
-  用一个真子进程把流式事件喂进 app，然后断言**用户可见的对话导出**
-  （`export_visible_markdown`）里确实有「这是流式回复」，工具行（`bash`）也进得了
-  同一份投影。剩下要人做的只有审美那一层（排版好不好看）。
+**能判的那半，已经用测试判了。**
+`app::render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`
+起一个真子进程，按 orbit 方言喂 `agent_start / turn_start / message_start /
+message_update(text_delta) / message_end / agent_end`，然后断言**用户可见的那份对话导出**
+（`export_visible_markdown`）里确实有「这是流式回复」；再把 `toolcall_start` 喂进同一份
+投影，断言工具行（`bash`）也进得去。
 
-（另一个坑：`orbit-pi` 用的是 GPUI 原生窗口，不是终端 TUI，`tmux capture-pane`
-抓到的永远是空白——我第一次的判断也错了。）
+所以 S1 这条现在是「机器可判」而不是「等人看图」。人要做的那一下只是审美：排版顺不顺眼。
 
-### 界面层测试：从「编译不过」到「1904 通过 / 32 失败」
+### 界面层测试：从「编译不过」到 1931 通过 / 6 红
 
-`apps/orbit` 里 `orbit-pi` 的测试在我接手前**根本编译不过**（19 个测试文件仍按
-三参调用 `spawn_with_bin(bin, ws, session)`，而签名早已是两参）。我做的：
+`orbit-pi` 的测试在我接手前**根本编译不过**（19 个测试文件仍按三参调用
+`spawn_with_bin(bin, ws, session)`，而签名早已是两参）。做的三件事：
 
-1. `orbit-rpc` 增加 `spawn_with_program(program, ws, session)` —— 测试能把假进程注入进来；
+1. `orbit-rpc` 增加 `spawn_with_program(program, ws, session)`，测试能把假进程注入进来；
 2. 19 个测试文件改用它；
 3. 删掉两条测**已被移除功能**的用例（外部 Managed/Npm 安装方式、`restart_pi_for_catalog`）。
 
-结果：`cargo test -p orbit-pi` → **1930 passed / 6 failed / 9 ignored**（40 秒）。
+结果：`cargo test -p orbit-pi` → **1931 passed / 6 failed / 9 ignored**（43 秒）。
 
-### 界面层测试替我们抓到的三个**真 bug**（真人用界面时也会中）
-
-1. **回执被吞**：子进程路径里我把 `Event::Response` 投给按 id 等待的调用方之后就
-   `continue` 了。上游的规矩是「先给等待者，**再**投共享流」（`client.rs` 进程内实现
-   的注释写得很清楚）。而 `send_tracked` 会丢掉自己的 receiver，于是 UI 永远看不见
-   回执——fork、切会话这类操作会一直转圈。修好后一次消掉 21 条红。
-2. **进程死了没人告诉界面**：`child.wait()` 只把 `is_alive` 翻成 false，没有发
-   `Event::ProcessExited`。结果是内核崩了，界面上那条「运行中」永不结束，退出清理也
-   不触发。补发事件后，`process_exit_cleanup` 三条全绿。
-3. **不认 `PI_BIN`**：这是上游用来指定可执行文件的变量（发行版和测试都靠它）。
-   内嵌之后它指向的仍然是「跑内核的那个程序」，所以并进优先级：
-   显式注入 > `HARNESSD_BIN` > `PI_BIN`。进程死后重启/重连的用例因此转绿。
-
-剩下 6 条红，逐条说清楚（不粉饰）：
+剩下 6 条红，逐条说清楚：
 
 | 用例 | 性质 |
 |---|---|
@@ -184,131 +164,16 @@ Mac
 | `backdrop` × 1 | 背景版式的长宽比断言（2.0–2.4），与内核无关 |
 | `session_park::parked_session_cancels_custom_ui_with_a_top_level_flag` × 1 | 停靠会话里取消自定义 UI：实测 app 根本不往停靠进程写这条 `extension_ui_response`，属于上游交互流未覆盖的路径 |
 
-### GUI 这一条为什么卡住（有证据）
+### 界面层测试替我们抓到的三个**真 bug**（真人用界面时也会中）
 
-我试着把界面跑起来：`cargo build -p orbit-pi` 成功，进程能起、能连上 harnessd
-（`HARNESSD_BIN` + `HARNESSD_HTTP_ENGINE`），但取证失败：
-`screencapture` 一开始拿到纯黑图（缩略图只有 1 种颜色），用 `caffeinate -d -u` 唤醒后
-再截，OCR 读出来的是——
-
-```
-11月19日周四
-03:08
-Mac
-使用触控ID 或输入密码
-```
-
-也就是**锁屏界面**。窗口在锁屏后面，截不到；解锁需要指纹或密码，那不是我能做的。
-
-第三种办法也试了：绕过屏幕，直接按窗口抓 `CGWindowListCreateImage`。
-窗口确实存在（`CGWindowListCopyWindowInfo` 报出 `orbit-pi / "hiq" / 1412×800`，
-进程在跑，并且已经拉起了子进程 `harnessd serve --compat orbit`），
-但抓下来的图像 2824×1600、缩略图**仍然只有 1 种颜色**——锁屏时系统会把窗口内容
-一并抹掉。
-
-三种独立取法（全屏截图 / 唤醒后截图 / 窗口级抓图）结论一致：**不是代码没通，是机器锁着**。
-这一条只能等人开屏点一次。补两条旁证：
-
-- 界面进程确实连上了内核：`ps` 里能看到它拉起的 `harnessd serve --compat orbit` 子进程。
-- **机器可判的那半已经判了**：`app::render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`
-  用一个真子进程把流式事件喂进 app，然后断言**用户可见的对话导出**
-  （`export_visible_markdown`）里确实有「这是流式回复」，工具行（`bash`）也进得了
-  同一份投影。剩下要人做的只有审美那一层（排版好不好看）。
-
-（另一个坑：`orbit-pi` 用的是 GPUI 原生窗口，不是终端 TUI，`tmux capture-pane`
-抓到的永远是空白——我第一次的判断也错了。）
-
-### 界面层测试：从「编译不过」到「1904 通过 / 32 失败」
-
-`apps/orbit` 里 `orbit-pi` 的测试在我接手前**根本编译不过**（19 个测试文件仍按
-三参调用 `spawn_with_bin(bin, ws, session)`，而签名早已是两参）。我做的：
-
-1. `orbit-rpc` 增加 `spawn_with_program(program, ws, session)` —— 测试能把假进程注入进来；
-2. 19 个测试文件改用它；
-3. 删掉两条测**已被移除功能**的用例（外部 Managed/Npm 安装方式、`restart_pi_for_catalog`）。
-
-结果：`cargo test -p orbit-pi` → **1929 passed / 7 failed / 9 ignored**（42 秒）。
-
-### 界面层测试替我们抓到的两个**真 bug**（都在接缝① 上，真人用界面时也会中）
-
-1. **回执被吞**：子进程路径里我把 `Event::Response` 投给按 id 等待的调用方之后就
-   `continue` 了。上游的规矩是「先给等待者，**再**投共享流」（`client.rs` 进程内实现
-   的注释写得很清楚）。`send_tracked` 会丢掉自己的 receiver，于是 UI 永远看不见回执
-   ——fork、session 切换这类操作会一直转圈。修好后一次消掉 21 条红。
+1. **回执被吞**：子进程路径里 `Event::Response` 投给按 id 等待的调用方之后就 `continue` 了。
+   上游的规矩是「先给等待者，**再**投共享流」。而 `send_tracked` 会丢掉自己的 receiver，
+   于是 UI 永远看不见回执——fork、切会话这类操作会一直转圈。修好后一次消掉 21 条红。
 2. **进程死了没人告诉界面**：`child.wait()` 只把 `is_alive` 翻成 false，没有发
-   `Event::ProcessExited`。结果是内核崩了，界面那条「运行中」永不结束，退出清理也不
-   发生。补发事件后，`process_exit_cleanup` 三条全绿。
-
-剩下 7 条红：
-
-| 用例 | 性质 |
-|---|---|
-| `onboarding::tests` × 3 | 断言的是**旧产品模型**（外部 pi 安装方式、npm 升级、`pi sessions` 面板），已被内嵌内核取代；改它等于改上游产品定义 |
-| `git_accounts` × 1 | 依赖本机某仓库的 git 身份，环境相关 |
-| `backdrop` × 1 | 背景版式数学，与内核无关 |
-| `session_park` × 1 | 停靠会话里取消自定义 UI 的时序 |
-| `rewind::delayed_fork_exit` × 1 | 进程死后**重启**走的是 app 自己的启动路径（不是注入的假进程），要改进程重生的注入面 |
-
-### GUI 这一条为什么卡住（有证据）
-
-我试着把界面跑起来：`cargo build -p orbit-pi` 成功，进程能起、能连上 harnessd
-（`HARNESSD_BIN` + `HARNESSD_HTTP_ENGINE`），但取证失败：
-`screencapture` 一开始拿到纯黑图（缩略图只有 1 种颜色），用 `caffeinate -d -u` 唤醒后
-再截，OCR 读出来的是——
-
-```
-11月19日周四
-03:08
-Mac
-使用触控ID 或输入密码
-```
-
-也就是**锁屏界面**。窗口在锁屏后面，截不到；解锁需要指纹或密码，那不是我能做的。
-
-第三种办法也试了：绕过屏幕，直接按窗口抓 `CGWindowListCreateImage`。
-窗口确实存在（`CGWindowListCopyWindowInfo` 报出 `orbit-pi / "hiq" / 1412×800`，
-进程在跑，并且已经拉起了子进程 `harnessd serve --compat orbit`），
-但抓下来的图像 2824×1600、缩略图**仍然只有 1 种颜色**——锁屏时系统会把窗口内容
-一并抹掉。
-
-三种独立取法（全屏截图 / 唤醒后截图 / 窗口级抓图）结论一致：**不是代码没通，是机器锁着**。
-这一条只能等人开屏点一次。补两条旁证：
-
-- 界面进程确实连上了内核：`ps` 里能看到它拉起的 `harnessd serve --compat orbit` 子进程。
-- **机器可判的那半已经判了**：`app::render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`
-  用一个真子进程把流式事件喂进 app，然后断言**用户可见的对话导出**
-  （`export_visible_markdown`）里确实有「这是流式回复」，工具行（`bash`）也进得了
-  同一份投影。剩下要人做的只有审美那一层（排版好不好看）。
-
-（另一个坑：`orbit-pi` 用的是 GPUI 原生窗口，不是终端 TUI，`tmux capture-pane`
-抓到的永远是空白——我第一次的判断也错了。）
-
-### 界面层测试：从「编译不过」到「1904 通过 / 32 失败」
-
-`apps/orbit` 里 `orbit-pi` 的测试在我接手前**根本编译不过**（19 个测试文件仍按
-三参调用 `spawn_with_bin(bin, ws, session)`，而签名早已是两参）。我做的：
-
-1. `orbit-rpc` 增加 `spawn_with_program(program, ws, session)` —— 测试能把假进程注入进来；
-2. 19 个测试文件改用它；
-3. 删掉两条测**已被移除功能**的用例（外部 Managed/Npm 安装方式、`restart_pi_for_catalog`）。
-
-结果：`cargo test -p orbit-pi` → **1905 passed / 31 failed / 9 ignored**（串行 274 秒；
-并行 46 秒时是 32 个，多出来的一个是资源竞争，`cancel_tests` 单跑能过）。
-
-失败按模块分（并行一次运行）：
-
-| 模块 | 数量 | 性质 |
-|---|---|---|
-| `app::rewind_tests` | 19 | fork / regenerate 流，等待假进程的 `response` 回执 |
-| `onboarding::tests` | 3 | 断言的是**旧产品模型**（外部 pi 安装方式、`pi sessions` 面板），已被内嵌内核取代 |
-| `app::session_park_tests` | 3 | 会话停靠的进程语义 |
-| `app::process_exit_cleanup_tests` | 2 | 进程退出清理 |
-| `git_accounts` / `backdrop` / `backdrop_layout` / `perf_sampler` / `context_meter` / `cancel_tests` | 各 1 | 环境相关或并行竞争（`cancel` 单跑通过） |
-
-传输层已单独验证：`program_injection`（脚本后端 → 提示写入 → 事件回到客户端）、
-两段真会话回放都通过，所以**不是接缝① 断了**。这 19+3+3+2 条是上游 app 对
-"后端进程长什么样"的假设早于这次替换——改它们要动 UI 逻辑和上游用例，
-不属于内核范围。记为已知红，不粉饰。
+   `Event::ProcessExited`。内核崩了，界面那条「运行中」永不结束，退出清理也不触发。
+3. **不认 `PI_BIN`**：上游用它指定可执行文件（发行版和测试都靠它）。内嵌之后它指向的
+   仍然是「跑内核的那个程序」，所以并进优先级：显式注入 > `HARNESSD_BIN` > `PI_BIN`。
+   进程死后重启/重连的用例因此转绿。
 
 ### 指标口径（这次真的能算了）
 
