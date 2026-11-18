@@ -1,0 +1,20 @@
+[package]
+name = "harnessd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "harnessd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "harnessd"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+harness-guards = { path = "../guards" }
