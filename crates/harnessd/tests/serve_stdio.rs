@@ -129,3 +129,52 @@ fn serve_binary_streams_events_for_one_prompt() {
         "turn never completed: {lines:?}"
     );
 }
+
+#[test]
+fn orbit_dialect_end_to_end() {
+    let script = fake_script("orbit");
+    let log = std::env::temp_dir().join(format!("harnessd-orbit-{}.ndjson", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_harnessd"))
+        .args(["serve", "--compat", "orbit", "--engine", "python3", "-u"])
+        .arg(&script)
+        .arg("--log")
+        .arg(&log)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start harnessd");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    // orbit sends its own shape: id + type + message.
+    writeln!(stdin, r#"{{"id":"c1","type":"prompt","message":"hi"}}"#).unwrap();
+    writeln!(stdin, r#"{{"id":"c2","type":"prompt","message":"again"}}"#).unwrap();
+    stdin.flush().unwrap();
+    drop(stdin);
+
+    let mut lines = Vec::new();
+    for line in BufReader::new(stdout).lines() {
+        let Ok(line) = line else { break };
+        lines.push(line);
+        if lines.len() > 32 {
+            break;
+        }
+    }
+    let _ = child.wait();
+
+    let parsed: Vec<Value> = lines.iter().filter_map(|l| serde_json::from_str(l.trim()).ok()).collect();
+    let responses: Vec<&Value> = parsed.iter().filter(|v| v["type"] == "response").collect();
+    assert_eq!(responses.len(), 2, "one response per command: {lines:?}");
+    assert_eq!(responses[0]["id"], "c1");
+    assert_eq!(responses[0]["command"], "prompt");
+    assert_eq!(responses[0]["success"], true);
+
+    assert!(
+        parsed.iter().any(|v| v["type"] == "message_update" && v["assistant"]["text"] == "hello"),
+        "no streamed text in orbit's dialect: {lines:?}"
+    );
+    assert!(parsed.iter().any(|v| v["type"] == "agent_end"), "no agent_end: {lines:?}");
+}

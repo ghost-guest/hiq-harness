@@ -36,6 +36,9 @@ pub struct JsonRpcEngine {
     /// the notifications that follow it arrive as separate lines; draining
     /// non-blockingly would strand every one of them.
     notify_grace: Duration,
+    /// How long a gap ends the drain. Frames of one turn are written back to
+    /// back, but the last one still lands a few microseconds after the rest.
+    notify_idle: Duration,
 }
 
 impl JsonRpcEngine {
@@ -74,6 +77,7 @@ impl JsonRpcEngine {
             next_id: 1,
             timeout: Duration::from_secs(600),
             notify_grace: Duration::from_millis(50),
+            notify_idle: Duration::from_millis(20),
         })
     }
 
@@ -131,9 +135,16 @@ impl Engine for JsonRpcEngine {
                 }
             }
         }
-        while let Ok(line) = self.rx.try_recv() {
-            if let Ok(frame) = protocol::decode(&line) {
-                self.inbox.push_back(frame);
+        // Drain until the pipe goes quiet: one turn's events are several writes,
+        // and stopping after a single read loses the last of them.
+        while self.inbox.len() < 512 {
+            match self.rx.recv_timeout(self.notify_idle) {
+                Ok(line) => {
+                    if let Ok(frame) = protocol::decode(&line) {
+                        self.inbox.push_back(frame);
+                    }
+                }
+                Err(_) => break,
             }
         }
         self.inbox.drain(..).collect()

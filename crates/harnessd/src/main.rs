@@ -34,6 +34,7 @@ fn serve(args: &[String]) -> Result<()> {
     let mut log_path = std::env::var("HARNESSD_LOG").unwrap_or_else(|_| ".harness/timebus.ndjson".into());
     let mut window: u64 = std::env::var("HARNESSD_WINDOW").ok().and_then(|v| v.parse().ok()).unwrap_or(128_000);
     let mut plugin_paths: Vec<String> = Vec::new();
+    let mut compat: Option<String> = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -41,6 +42,7 @@ fn serve(args: &[String]) -> Result<()> {
             "--engine" => program = it.next().cloned(),
             "--log" => log_path = it.next().cloned().unwrap_or(log_path),
             "--window" => window = it.next().and_then(|v| v.parse().ok()).unwrap_or(window),
+            "--compat" => compat = it.next().cloned(),
             "--plugin" => {
                 if let Some(p) = it.next() {
                     plugin_paths.push(p.clone());
@@ -79,6 +81,10 @@ fn serve(args: &[String]) -> Result<()> {
         }
     }
 
+    if compat.as_deref() == Some("orbit") {
+        return serve_orbit(&mut sup);
+    }
+
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -105,6 +111,50 @@ fn serve(args: &[String]) -> Result<()> {
             }
             Err(e) => {
                 write!(out, "{}", encode(&Frame::error_response(id, -32601, e.to_string())))?;
+            }
+        }
+        out.flush()?;
+    }
+    Ok(())
+}
+
+/// orbit's JSONL dialect: `{"id","type",...}` in, `{"type",...}` out.
+fn serve_orbit<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<()> {
+    use harnessd::orbit_compat::{command_of, events_to_orbit, params_of, response_of};
+
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout().lock();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                write!(out, "{}\n", serde_json::to_string(&response_of("", "", false, Value::Null, Some(e.to_string())))?)?;
+                out.flush()?;
+                continue;
+            }
+        };
+        let id = v.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let kind = v.get("type").and_then(Value::as_str).unwrap_or("").to_string();
+
+        let Some(cmd) = command_of(&kind) else {
+            write!(out, "{}\n", serde_json::to_string(&response_of(&id, &kind, false, Value::Null, Some(format!("unsupported command `{kind}`"))))?)?;
+            out.flush()?;
+            continue;
+        };
+
+        match sup.handle(cmd, params_of(&v)) {
+            Ok((reply, events)) => {
+                write!(out, "{}\n", serde_json::to_string(&response_of(&id, &kind, true, reply, None))?)?;
+                for e in events_to_orbit(&events) {
+                    write!(out, "{}\n", serde_json::to_string(&e)?)?;
+                }
+            }
+            Err(e) => {
+                write!(out, "{}\n", serde_json::to_string(&response_of(&id, &kind, false, Value::Null, Some(e.to_string())))?)?;
             }
         }
         out.flush()?;

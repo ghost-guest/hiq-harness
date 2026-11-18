@@ -48,6 +48,16 @@
 | **缓存守卫** | 窗口 85% + 命中 90% 两阈值：热前缀→压缩，冷前缀→冻结 | `full_window_with_hot_prefix_triggers_compaction` |
 | **不确定即阻塞** | 工具结果无法确认时记 `Uncertain`，绝不重试 | `uncertain_tool_result_blocks_the_turn` |
 
+### S1 补充：orbit 零改动接入（`--compat orbit`）
+
+orbit 说的是 `pi --mode rpc` 的 JSONL 方言：`{"id","type":"prompt","message":…}` →
+`{"type":"response",…}` + `message_update` / `agent_end`
+（`apps/orbit/crates/orbit-rpc/src/types.rs:206`）。
+
+`crates/harnessd/src/orbit_compat.rs` 做双向翻译，`harnessd serve --compat orbit` 直接吃这套方言。
+**orbit 的 UI 与 client.rs 一行都不用改**，只要把后端进程指向 harnessd。
+端到端由 `orbit_dialect_end_to_end` 覆盖（真二进制、真帧格式、假引擎）。
+
 ## S4 插件层（Go）
 
 - `sdk/go/harnessplugin`：单文件 SDK，`Serve(name, WithTool(...), WithEvent(...))`。
@@ -91,7 +101,8 @@ harnessd doctor                             # 环境检查
    并由 `real_engine_payload_maps_command_actions_to_our_tool_names` 与
    `approval_accepts_with_the_engines_own_wording` 两个测试钉住。
 2. **未接真引擎跑过任何任务**。`bench --solver` 还没有基线数字，因为需要 codewhale 二进制 + provider key。
-3. **orbit 的 `client.rs` 尚未切到本协议**。S1 只保证了命令映射与事件形状，UI 侧改造还没做。
+3. **orbit 的 `client.rs` 还没指向 harnessd**。协议层已兼容（`--compat orbit`），
+   但 orbit 目前仍在进程内直接驱动旧内核；把它改成 spawn `harnessd serve --compat orbit` 是最后一步接线。
 4. 守卫的三级阶梯阈值沿用现项目 `harness-guards`，没有在 20 任务上标定过误杀率。
 
 ## 下一步（按顺序）
