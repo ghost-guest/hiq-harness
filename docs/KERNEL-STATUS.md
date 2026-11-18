@@ -125,6 +125,16 @@ thread/{archive,capabilities,create,fork,goal/clear,goal/get,goal/set,interrupt,
 - `GetAvailableModels` → `app/models`；`Abort` → `thread/interrupt`；`GetState` → `thread/read`；
   `Compact` / `Auth*` / `QuotaList` → 诚实不适用。
 
+HTTP 面（`app-server --http`，默认 127.0.0.1:7878）实测：
+
+```
+GET /healthz      → {"status":"ok","protocol":"v2","service":"deepseek-app-server"}
+GET /v1/sessions  → 真实会话列表（id/title/runtime_store/created_at…）
+```
+
+也就是说 **codex-v2 协议没错，它只是活在 HTTP 面**；stdio 是兼容控制面（tool-free）。
+工具、审批、流式事件都在 `/v1/*`（sessions / threads / turns / approvals / events / usage）。
+
 **活体验证**（`harnessd serve --compat orbit --engine <真二进制> app-server`）：
 
 - `get_available_models` → 真模型表（`deepseek-v4-pro`、`deepseek-flash`、`deepseek-v3.2` 等，带 aliases/capabilities）
@@ -154,7 +164,8 @@ thread/{archive,capabilities,create,fork,goal/clear,goal/get,goal/set,interrupt,
 
 ## 下一步（按顺序）
 
-1. 加 HTTP 传输（`app-server --http` + `/v1/chat/completions`），把工具与审批真正接上
+1. 加 HTTP 传输（`app-server --http` → `/v1/*`，SSE），把工具、审批、流式事件真正接上；
+   已确认入口：`/healthz`、`/v1/sessions`，默认端口 7878，本地可用 `--insecure-no-auth`
 2. 配 provider key（`DEEPSEEK_API_KEY` 或 `codewhale auth`）→ 跑 `bench --solver` 出第一版基线
 2. orbit `client.rs` 换后端（SSE → app-server JSON-RPC），复用现有 `bridge.rs` 的事件映射
 3. 用基线数字标定守卫阈值（误杀率目标：合法长任务 0 误杀）
