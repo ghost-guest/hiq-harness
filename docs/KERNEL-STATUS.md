@@ -146,13 +146,23 @@ Mac
 2. 19 个测试文件改用它；
 3. 删掉两条测**已被移除功能**的用例（外部 Managed/Npm 安装方式、`restart_pi_for_catalog`）。
 
-结果：`cargo test -p orbit-pi` → **1904 passed / 32 failed / 9 ignored**（46 秒）。
+结果：`cargo test -p orbit-pi` → **1905 passed / 31 failed / 9 ignored**（串行 274 秒；
+并行 46 秒时是 32 个，多出来的一个是资源竞争，`cancel_tests` 单跑能过）。
 
-32 个失败全部是 app 层状态断言（"the app never reached the state"），集中在
-rewind / session_park / process_exit 这类交互流。传输层已单独验证过：
-`program_injection`（脚本后端 → 事件到客户端）+ 两段真会话回放都通过，
-所以不是接缝① 断了，是这些用例对进程语义的假设早于 harnessd 这次替换。
-**修它们要动上游 app 逻辑，不在内核范围内**——记为已知红，不粉饰。
+失败按模块分（并行一次运行）：
+
+| 模块 | 数量 | 性质 |
+|---|---|---|
+| `app::rewind_tests` | 19 | fork / regenerate 流，等待假进程的 `response` 回执 |
+| `onboarding::tests` | 3 | 断言的是**旧产品模型**（外部 pi 安装方式、`pi sessions` 面板），已被内嵌内核取代 |
+| `app::session_park_tests` | 3 | 会话停靠的进程语义 |
+| `app::process_exit_cleanup_tests` | 2 | 进程退出清理 |
+| `git_accounts` / `backdrop` / `backdrop_layout` / `perf_sampler` / `context_meter` / `cancel_tests` | 各 1 | 环境相关或并行竞争（`cancel` 单跑通过） |
+
+传输层已单独验证：`program_injection`（脚本后端 → 提示写入 → 事件回到客户端）、
+两段真会话回放都通过，所以**不是接缝① 断了**。这 19+3+3+2 条是上游 app 对
+"后端进程长什么样"的假设早于这次替换——改它们要动 UI 逻辑和上游用例，
+不属于内核范围。记为已知红，不粉饰。
 
 ### 指标口径（这次真的能算了）
 

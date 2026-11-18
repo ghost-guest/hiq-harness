@@ -1162,6 +1162,9 @@ fn spawn_harnessd_worker(
                 }
                 // `Event::parse_line` 就是 orbit 自己的解析器：方言一致，
                 // 所以这里不需要再写一份翻译。
+                if std::env::var("HARNESS_DEBUG").is_ok() {
+                    eprintln!("[debug] <- {line}");
+                }
                 let event = Event::parse_line(line);
                 if let Event::Response { id, .. } = &event {
                     let waiter = pd.lock().unwrap_or_else(|p| p.into_inner()).remove(id);
@@ -1203,6 +1206,9 @@ fn spawn_harnessd_worker(
                 };
                 if let Some(obj) = value.as_object_mut() {
                     obj.insert("id".into(), json!(cmd.id));
+                }
+                if std::env::var("HARNESS_DEBUG").is_ok() {
+                    eprintln!("[debug] -> {value}");
                 }
                 if writeln!(stdin, "{value}").and_then(|_| stdin.flush()).is_err() {
                     break;
