@@ -162,7 +162,7 @@ message_update(text_delta) / message_end / agent_end`，然后断言**用户可�
 | `onboarding::tests` × 3 | 断言的是**旧产品模型**（外部 pi 安装方式、npm 升级、`pi sessions` 面板），已被内嵌内核取代；改它等于改上游产品定义 |
 | `git_accounts` × 1 | 临时目录里没有 git 身份，`State::Detected` 断言失败——环境相关 |
 | `backdrop` × 1 | 背景版式的长宽比断言（2.0–2.4），与内核无关 |
-| `session_park::parked_session_cancels_custom_ui_with_a_top_level_flag` × 1 | 停靠会话里取消自定义 UI：实测 app 根本不往停靠进程写这条 `extension_ui_response`，属于上游交互流未覆盖的路径 |
+| `session_park::parked_session_cancels_custom_ui_with_a_top_level_flag` × 1 | **设计差异**：它要求 app 往内核写 `extension_ui_response` 取消一个自定义 UI，而新内核**按设计拒绝 Raw 直通**（`mapping.rs:286`），`cancel_dialog` 明确返回「没有扩展 UI 机制」而不是假成功。要它绿就得给内核加一套扩展 UI 协议——那是产品决定，不是修 bug |
 
 ### 界面层测试替我们抓到的三个**真 bug**（真人用界面时也会中）
 
@@ -392,6 +392,7 @@ GET /v1/sessions  → 真实会话列表（id/title/runtime_store/created_at…�
 3. **插件层补第二个真插件。** 现在只有 `example-echo`（`echo.run` + `policy.check`）。
    第二个应该是个**真守卫**：比如禁止 `git push --force`、禁止改 `.env`，用 Go 写，
    走同一条 `tool.pre` 通道。
-4. **把 `session_park` 那条红的根因查掉。** 它是唯一一条"可能是我们接缝没接对"的红：
-   停靠会话里的取消请求没写到停靠进程。其余 5 条已经定性为上游/环境。
+4. **决定要不要给内核加"扩展 UI"协议。** `session_park` 那条红的原因已经查清：它不是接缝
+   没接对，而是新内核按设计拒绝 Raw 直通，所以"取消一个扩展自定义 UI"没有对应语义。
+   要不要补这套协议，取决于以后插件要不要弹原生对话框（Go 插件目前只走 `tool.pre`）。
 
