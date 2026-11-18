@@ -185,6 +185,19 @@ message_update(text_delta) / message_end / agent_end`，然后断言**用户可�
 - **误杀率**：带 `guard.deny` 的任务占比
 - **缓存命中率**：`Σcached / Σinput`，来源是引擎的 usage 事件
 
+### 真实仓库实测（不是自造题）
+
+20 题基线是自造的，天花板效应明显。所以又拿**本仓库自己**当维护对象跑了两题：
+克隆到 `/tmp`，让它改真文件，用 `cargo test` 当验收门。脚本：`scripts/real-task.sh`。
+
+| 任务 | 改动 | 验收 | 工具调用 | 返工 |
+|---|---|---|---|---|
+| A：给 `GuardSet` 加 `describe()` + 测试（单文件） | 1 文件 +18 行 | `cargo test -p harness-guards` **15 passed** | 3 | 0 |
+| B：加 `describe()` 并再接进 `crates/cli` 的自检输出（跨 crate） | 2 文件 +54 行 | `cargo test --workspace` **全绿**（83/76/47/14/10/15 …） | 20 | **0** |
+
+两题都是一轮做完、没有返工、没有守卫拒绝。B 题值得单独说：它要跨两个 crate 读代码、
+找到 CLI 里合适的位置、再接上，最后自己跑全量测试——这是"维护旧项目"最典型的形状。
+
 ### 真模型基线（这一格终于有真数了）
 
 本机 3425 是 magipe 的 OpenAI 兼容代理（`alma providers` 里的 custom 路由），
