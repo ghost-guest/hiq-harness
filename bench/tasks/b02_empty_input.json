@@ -1,0 +1,11 @@
+{
+  "id": "b02_empty_input",
+  "kind": "brownfield",
+  "prompt": "修复 mod.py 的 first_word(s)：空字符串或全空白应返回 ''，现在会抛异常。",
+  "fixture": "bench/fixtures/b02_empty_input",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "mod.py": "def first_word(s):\n    parts = s.split()\n    return parts[0] if parts else ''\n"
+  }
+}

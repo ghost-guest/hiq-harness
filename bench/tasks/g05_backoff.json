@@ -1,0 +1,11 @@
+{
+  "id": "g05_backoff",
+  "kind": "greenfield",
+  "prompt": "在当前目录创建 backoff.py，实现 delays(n, base=0.1, cap=1.0)：指数退避序列，第 i 个是 min(base*2**i, cap)。",
+  "fixture": "bench/fixtures/g05_backoff",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "__script__": "open('backoff.py','w').write('''def delays(n,base=0.1,cap=1.0):\n    return [min(base*(2**i),cap) for i in range(n)]\n''')"
+  }
+}

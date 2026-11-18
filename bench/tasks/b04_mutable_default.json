@@ -1,0 +1,11 @@
+{
+  "id": "b04_mutable_default",
+  "kind": "brownfield",
+  "prompt": "修复 mod.py 的 add(item, box=[])：连续两次调用不能共享同一个列表。",
+  "fixture": "bench/fixtures/b04_mutable_default",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "mod.py": "def add(item, box=None):\n    box = [] if box is None else box\n    box.append(item)\n    return box\n"
+  }
+}

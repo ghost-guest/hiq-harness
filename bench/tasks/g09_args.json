@@ -1,0 +1,11 @@
+{
+  "id": "g09_args",
+  "kind": "greenfield",
+  "prompt": "在当前目录创建 args.py，实现 parse(argv)：--key value 变键值，-x 变 True，其余位置参数放进 '_'。",
+  "fixture": "bench/fixtures/g09_args",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "__script__": "open('args.py','w').write('''def parse(argv):\n    out={\"_\":[]}; i=0\n    while i<len(argv):\n        a=argv[i]\n        if a.startswith(\"--\"):\n            out[a[2:]]=argv[i+1]; i+=2\n        elif a.startswith(\"-\"):\n            out[a[1:]]=True; i+=1\n        else:\n            out[\"_\"].append(a); i+=1\n    return out\n''')"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "id": "b06_unflushed_file",
+  "kind": "brownfield",
+  "prompt": "修复 mod.py 的 write(path, text)：写完立刻读回必须能看到内容，不能依赖进程退出。",
+  "fixture": "bench/fixtures/b06_unflushed_file",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "mod.py": "def write(path, text):\n    with open(path, 'w', encoding='utf-8') as f:\n        f.write(text)\n"
+  }
+}

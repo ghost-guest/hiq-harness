@@ -1,0 +1,21 @@
+name: kernel
+
+on:
+  push:
+    paths: ["crates/harnessd/**", "sdk/**", "plugins/**", "bench/**", "scripts/**", "vendor/**"]
+  pull_request:
+
+jobs:
+  harnessd:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: engine pin / no local edits
+        run: ./scripts/check-engine.sh
+      - name: rust tests
+        run: cargo test -p harnessd
+      - name: go plugin sdk
+        run: cd sdk/go && go test ./...
+      - name: bench checks are executable
+        run: python3 bench/run.py --selftest

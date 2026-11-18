@@ -1,0 +1,11 @@
+{
+  "id": "g02_csv_totals",
+  "kind": "greenfield",
+  "prompt": "在当前目录创建 summary.py，实现 column_totals(text)：解析两列 CSV（列名 key,value），返回 {key: sum(value)}。",
+  "fixture": "bench/fixtures/g02_csv_totals",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "summary.py": "import csv, io\ndef column_totals(text):\n    out = {}\n    for row in csv.DictReader(io.StringIO(text)):\n        k = row['key']\n        out[k] = out.get(k, 0) + int(row['value'])\n    return out\n"
+  }
+}

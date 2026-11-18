@@ -1,0 +1,11 @@
+{
+  "id": "g06_lru",
+  "kind": "greenfield",
+  "prompt": "在当前目录创建 lru.py，实现 LRU(capacity)，方法 get(key) 与 put(key,value)，满时淘汰最久未用。",
+  "fixture": "bench/fixtures/g06_lru",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "__script__": "open('lru.py','w').write('''from collections import OrderedDict\nclass LRU:\n    def __init__(self,cap):\n        self.cap=cap; self.d=OrderedDict()\n    def get(self,k):\n        if k not in self.d: return None\n        self.d.move_to_end(k)\n        return self.d[k]\n    def put(self,k,v):\n        self.d[k]=v; self.d.move_to_end(k)\n        while len(self.d)>self.cap: self.d.popitem(last=False)\n''')"
+  }
+}

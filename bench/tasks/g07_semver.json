@@ -1,0 +1,11 @@
+{
+  "id": "g07_semver",
+  "kind": "greenfield",
+  "prompt": "在当前目录创建 semver.py，实现 cmp(a, b)：比较两个语义化版本，返回 -1/0/1，数字段按数值比较。",
+  "fixture": "bench/fixtures/g07_semver",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "__script__": "open('semver.py','w').write('''def cmp(a,b):\n    pa=[int(x) for x in a.split(\".\")]\n    pb=[int(x) for x in b.split(\".\")]\n    return (pa>pb)-(pa<pb)\n''')"
+  }
+}

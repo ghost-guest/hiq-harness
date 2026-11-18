@@ -1,0 +1,11 @@
+{
+  "id": "b01_off_by_one",
+  "kind": "brownfield",
+  "prompt": "修复 mod.py 的 up_to(n)：应返回 1..n（含 n），现在多/少一个。",
+  "fixture": "bench/fixtures/b01_off_by_one",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "mod.py": "def up_to(n):\n    return list(range(1, n + 1))\n"
+  }
+}

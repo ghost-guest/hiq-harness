@@ -1,0 +1,11 @@
+{
+  "id": "b05_early_return",
+  "kind": "brownfield",
+  "prompt": "修复 mod.py 的 evens(xs)：应返回全部偶数，现在只返回第一个。",
+  "fixture": "bench/fixtures/b05_early_return",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "mod.py": "def evens(xs):\n    out = []\n    for x in xs:\n        if x % 2 == 0:\n            out.append(x)\n    return out\n"
+  }
+}

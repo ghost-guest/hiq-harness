@@ -1,0 +1,11 @@
+{
+  "id": "g04_flatten",
+  "kind": "greenfield",
+  "prompt": "在当前目录创建 flat.py，实现 flatten(obj)：把嵌套 dict/list 拍平成点号路径键，空容器保留为空 dict/list 值。",
+  "fixture": "bench/fixtures/g04_flatten",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "flat.py": "def flatten(o):\n    if o == {} or o == []:\n        return {}\n    out = {}\n    def walk(v, prefix):\n        if isinstance(v, dict):\n            for k, item in v.items():\n                walk(item, prefix + str(k) + '.')\n        elif isinstance(v, list):\n            for i, item in enumerate(v):\n                walk(item, prefix + str(i) + '.')\n        else:\n            out[prefix[:-1]] = v\n    walk(o, '')\n    return out\n"
+  }
+}

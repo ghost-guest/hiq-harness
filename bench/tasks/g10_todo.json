@@ -1,0 +1,11 @@
+{
+  "id": "g10_todo",
+  "kind": "greenfield",
+  "prompt": "在当前目录创建 todo.py，实现 Todo(path)：add(text)、done(index)、list() 返回 [{'text','done'}]，用 JSON 文件持久化。",
+  "fixture": "bench/fixtures/g10_todo",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "__script__": "open('todo.py','w').write('''import json,os\nclass Todo:\n    def __init__(self,path):\n        self.path=path\n        self.items=json.load(open(path)) if os.path.exists(path) else []\n    def save(self):\n        json.dump(self.items,open(self.path,\"w\"))\n    def add(self,text):\n        self.items.append({\"text\":text,\"done\":False}); self.save()\n    def done(self,i):\n        self.items[i][\"done\"]=True; self.save()\n    def list(self): return self.items\n''')"
+  }
+}

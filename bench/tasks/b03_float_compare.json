@@ -1,0 +1,11 @@
+{
+  "id": "b03_float_compare",
+  "kind": "brownfield",
+  "prompt": "修复 mod.py 的 total(prices)：0.1+0.2 必须算作 0.3，不能用浮点相等判断累加。",
+  "fixture": "bench/fixtures/b03_float_compare",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "mod.py": "def total(prices):\n    from math import fsum\n    return fsum(prices)\n"
+  }
+}

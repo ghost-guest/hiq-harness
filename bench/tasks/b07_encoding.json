@@ -1,0 +1,11 @@
+{
+  "id": "b07_encoding",
+  "kind": "brownfield",
+  "prompt": "修复 mod.py 的 read_text(path)：必须按 UTF-8 读取，中文不能乱码或报错。",
+  "fixture": "bench/fixtures/b07_encoding",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "mod.py": "def read_text(path):\n    with open(path, 'r', encoding='utf-8') as f:\n        return f.read()\n"
+  }
+}

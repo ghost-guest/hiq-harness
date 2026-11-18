@@ -1,0 +1,11 @@
+{
+  "id": "b09_bare_except",
+  "kind": "brownfield",
+  "prompt": "修复 mod.py 的 parse_int(s)：非法输入必须抛 ValueError，不能静默返回 0。",
+  "fixture": "bench/fixtures/b09_bare_except",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "mod.py": "def parse_int(s):\n    return int(s)\n"
+  }
+}

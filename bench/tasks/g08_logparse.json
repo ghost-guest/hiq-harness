@@ -1,0 +1,11 @@
+{
+  "id": "g08_logparse",
+  "kind": "greenfield",
+  "prompt": "在当前目录创建 logparse.py，实现 parse(line)：解析 '[2026-01-02 03:04:05] ERROR db: boom' 为 {'ts','level','source','message'}，格式不符返回 None。",
+  "fixture": "bench/fixtures/g08_logparse",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "__script__": "open('logparse.py','w').write('''import re\nP=re.compile(r\"^\\\\[(.+?)\\\\]\\\\s+(\\\\w+)\\\\s+(\\\\w+):\\\\s*(.*)$\")\ndef parse(line):\n    m=P.match(line.strip())\n    if not m: return None\n    ts,level,src,msg=m.groups()\n    return {\"ts\":ts,\"level\":level,\"source\":src,\"message\":msg}\n''')"
+  }
+}

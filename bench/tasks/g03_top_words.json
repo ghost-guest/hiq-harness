@@ -1,0 +1,11 @@
+{
+  "id": "g03_top_words",
+  "kind": "greenfield",
+  "prompt": "在当前目录创建 wc.py，实现 top_words(text, n)：按词频降序返回前 n 个 (word, count)，同频按字母序。",
+  "fixture": "bench/fixtures/g03_top_words",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "__script__": "open('wc.py','w').write('''from collections import Counter\ndef top_words(text,n):\n    c=Counter(text.split())\n    return sorted(c.items(), key=lambda kv:(-kv[1],kv[0]))[:n]\n''')"
+  }
+}

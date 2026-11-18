@@ -1,0 +1,11 @@
+{
+  "id": "b10_memo",
+  "kind": "brownfield",
+  "prompt": "修复 mod.py 的 fib(n)：fib(32) 必须在 2 秒内算完，不能是朴素递归。",
+  "fixture": "bench/fixtures/b10_memo",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "mod.py": "from functools import lru_cache\n\n@lru_cache(maxsize=None)\ndef fib(n):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n"
+  }
+}

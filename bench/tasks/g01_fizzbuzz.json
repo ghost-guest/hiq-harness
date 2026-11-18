@@ -1,0 +1,11 @@
+{
+  "id": "g01_fizzbuzz",
+  "kind": "greenfield",
+  "prompt": "在当前目录创建 fizzbuzz.py，实现 f(n)：3 的倍数返回 Fizz，5 的倍数返回 Buzz，15 的倍数返回 FizzBuzz，其余返回字符串形式的数字。",
+  "fixture": "bench/fixtures/g01_fizzbuzz",
+  "check": "python3 check.py",
+  "timeout_s": 180,
+  "gold": {
+    "__script__": "open('fizzbuzz.py','w').write('''def f(n):\n    if n%15==0: return \"FizzBuzz\"\n    if n%3==0: return \"Fizz\"\n    if n%5==0: return \"Buzz\"\n    return str(n)\n''')"
+  }
+}
