@@ -73,6 +73,9 @@ var rules = []Rule{
 	{"dotenv-write", "editing .env writes live secrets and is never what the task meant"},
 	{"root-delete", "deleting the filesystem root ends the machine, not the task"},
 	{"fork-bomb", "a fork bomb takes down the host for everyone"},
+	{"root-chmod", "chmod 777 on / or /etc removes the machine's last line of defence"},
+	{"etc-write", "writing under /etc changes the host for every project, not this one"},
+	{"hard-reset", "git reset --hard discards uncommitted work without a copy"},
 }
 
 // tokens splits a shell line on whitespace after dropping quotes, which is
@@ -148,7 +151,65 @@ func (p Policy) checkCommand(cmd string) (Rule, bool) {
 	if p.cfg.enabled("fork-bomb") && (strings.Contains(lower, ":(){") || strings.Contains(lower, ":(){ :|:& };:")) {
 		return rules[3], true
 	}
+	// chmod 777 on a system root (recursive or not).
+	if p.cfg.enabled("root-chmod") && hasToken(toks, "chmod") && (hasToken(toks, "777") || hasToken(toks, "0777")) {
+		for _, t := range toks {
+			if t == "/" || t == "/etc" || t == "/usr" || t == "/bin" || t == "/sbin" || t == "/System" {
+				return rules[4], true
+			}
+		}
+	}
+	// any write whose destination lives under /etc.
+	if p.cfg.enabled("etc-write") && writesUnder(toks, cmd, "/etc/") {
+		return rules[5], true
+	}
+	// git reset --hard throws away uncommitted work.
+	if p.cfg.enabled("hard-reset") && hasToken(toks, "reset") && hasToken(toks, "--hard") {
+		for _, t := range toks {
+			if t == "git" {
+				return rules[6], true
+			}
+		}
+	}
 	return Rule{}, false
+}
+
+// writesUnder reports whether the command writes somewhere under a directory
+// prefix: redirection, tee, cp/mv destination, sed -i, or a bare `install`.
+func writesUnder(toks []string, cmd, prefix string) bool {
+	if i := strings.Index(cmd, ">"+prefix); i >= 0 {
+		return true
+	}
+	if i := strings.Index(cmd, "> "+prefix); i >= 0 {
+		return true
+	}
+	for i, t := range toks {
+		if !strings.HasPrefix(t, prefix) {
+			continue
+		}
+		// This token is the path. Is it being written?
+		written := strings.Contains(cmd, ">"+t) || strings.Contains(cmd, "> "+t)
+		for j, u := range toks {
+			switch u {
+			case "tee", "install", "touch", "truncate":
+				if j+1 == i {
+					written = true
+				}
+			case "cp", "mv":
+				if i == len(toks)-1 {
+					written = true
+				}
+			case "-i":
+				if j > 0 && (toks[j-1] == "sed" || toks[j-1] == "perl") {
+					written = true
+				}
+			}
+		}
+		if written {
+			return true
+		}
+	}
+	return false
 }
 
 // matchesProtected reports whether a token names a protected env file,

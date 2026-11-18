@@ -83,8 +83,25 @@ fn the_safety_guard_denies_the_four_dangerous_shapes() {
     assert_eq!(bomb["content"]["decision"], "deny", "{bomb}");
     assert_eq!(bomb["content"]["rule"], "fork-bomb", "{bomb}");
 
+    let chmod = decide(&mut host, "sudo chmod -R 777 /");
+    assert_eq!(chmod["content"]["rule"], "root-chmod", "{chmod}");
+
+    let etc = decide(&mut host, "echo 'x' > /etc/hosts");
+    assert_eq!(etc["content"]["rule"], "etc-write", "{etc}");
+
+    let reset = decide(&mut host, "git reset --hard HEAD~1");
+    assert_eq!(reset["content"]["rule"], "hard-reset", "{reset}");
+
     // 正常命令必须放行：一个见谁都拦的守卫会把 agent 卡死。
-    for ok in ["cargo test --workspace", "git push origin main", "cat .env", "rm -rf /tmp/scratch"] {
+    for ok in [
+        "cargo test --workspace",
+        "git push origin main",
+        "cat .env",
+        "cat /etc/hosts",
+        "chmod 777 ./scripts",
+        "git reset --soft HEAD~1",
+        "rm -rf /tmp/scratch",
+    ] {
         let verdict = decide(&mut host, ok);
         assert_eq!(verdict["content"]["decision"], "allow", "{ok} → {verdict}");
     }
@@ -93,7 +110,7 @@ fn the_safety_guard_denies_the_four_dangerous_shapes() {
         .call_tool("safety.rules", json!({}))
         .expect("safety.rules is registered")
         .expect("safety.rules answers");
-    assert_eq!(rules["content"]["rules"].as_array().map(Vec::len), Some(4), "{rules}");
+    assert_eq!(rules["content"]["rules"].as_array().map(Vec::len), Some(7), "{rules}");
 
     let _ = std::fs::remove_file(&bin);
 }
@@ -175,7 +192,7 @@ fn a_plugin_can_be_configured_without_rebuilding_it() {
         .call_tool("safety.rules", json!({}))
         .expect("registered")
         .expect("answers");
-    assert_eq!(rules["content"]["rules"].as_array().map(Vec::len), Some(3), "{rules}");
+    assert_eq!(rules["content"]["rules"].as_array().map(Vec::len), Some(6), "{rules}");
     assert_eq!(
         rules["content"]["protected_env"][0], "secrets.yaml",
         "{rules}"

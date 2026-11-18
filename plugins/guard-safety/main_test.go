@@ -21,6 +21,15 @@ func TestCheckCommand(t *testing.T) {
 		{"rm -rf /", true, "root-delete"},
 		{":(){ :|:& };:", true, "fork-bomb"},
 		{"cargo test --workspace", false, ""},
+		{"chmod 777 /", true, "root-chmod"},
+		{"sudo chmod -R 0777 /etc", true, "root-chmod"},
+		{"chmod 777 ./scripts", false, ""},
+		{"echo 'x' > /etc/hosts", true, "etc-write"},
+		{"cat /etc/hosts", false, ""},
+		{"sudo cp conf.ini /etc/app/conf.ini", true, "etc-write"},
+		{"git reset --hard HEAD~1", true, "hard-reset"},
+		{"git reset --soft HEAD~1", false, ""},
+		{"git log --hard", false, ""},
 	}
 	for _, c := range cases {
 		got, denied := p.checkCommand(c.cmd)

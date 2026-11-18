@@ -75,8 +75,10 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 - 五条规则落地：协议版本不匹配→装载失败；`policy.bypass` cap 被内核剥离；崩溃三振出局；`uncertain`→阻塞；插件只返值不写状态。
 - 六个事件：`tool.pre/tool.post/turn.start/turn.end/compact.pre/guard.deny`。
 - 端到端：`crates/harnessd/tests/go_plugin.rs` 真编译 `plugins/example-echo` 并调用工具。
-- **第二个真插件 `plugins/guard-safety`**：禁 force push、禁改 `.env`、禁删根、禁 fork 炸弹。
-  规则是纯函数（`checkCommand`），Go 单测 12 个用例；Rust 侧
+- **第二个真插件 `plugins/guard-safety`**：禁 force push、禁改 `.env`、禁删根、禁 fork 炸弹，
+  外加三条 agent 真会干的事——`chmod 777 /`、往 `/etc` 写、`git reset --hard` 丢未提交改动（共 7 条）。
+  规则是纯函数（`checkCommand`），Go 单测 22 个用例（含"不该拦的必须放行"：`cat /etc/hosts`、
+  `chmod 777 ./scripts`、`git reset --soft`）；Rust 侧
   `crates/harnessd/tests/go_plugin_guard.rs` 两条——一条验规则（含"正常命令必须放行"），
   一条验**拒绝理由真的走到内核日志里**（`guard.deny` 里带 `force` 字样）。
   第一个插件证明"插件能否决"，这一个证明"否决规则本身站得住"。
