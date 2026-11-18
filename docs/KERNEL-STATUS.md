@@ -448,6 +448,26 @@ PASS 接缝① 真引擎
 `text.is_empty()` 和 `tools.is_empty()` 两个判断都会放它过去，而界面上是一行空白。
 现在探针会专门断言"工具名不能是 `?`"。
 
+## S4 的"6 个事件"到底几个
+
+方案里写插件层有 6 个事件。`grep broadcast` 能数出 6 种，但**接了线不等于发得出来**，
+所以写了个只会记录的插件（`plugins/event-tap`）真跑一轮，把它收到的每种事件打一行。
+`scripts/probe-events.sh` 就是这件事，跑出来是：
+
+```text
+收到的事件：tool.post tool.pre turn.end turn.start
+条件触发（这一轮没有发生，不是缺陷）：guard.deny（守卫拒绝时才发）、compact.pre（压缩时才发）
+```
+
+| 事件 | 一次普通回合 | 证据在哪 |
+|---|---|---|
+| `turn.start` / `tool.pre` / `tool.post` / `turn.end` | ✅ 都在 | 探针实测 |
+| `guard.deny` | 条件触发 | `go_plugin_guard` 测试的真日志：`guard.deny {"reason":"git push --force rewrites shared history…","source":"plugin"}` |
+| `compact.pre` | 条件触发，**未观测到** | 没有触发过一次上下文压缩——这是缺口，不假装有 |
+
+所以准确的表述是：**6 种事件都接好了，普通回合能看到 4 种，1 种有拒绝场景的实测证据，
+1 种（压缩）从来没有被真的触发过。** 最后那条记在下面的缺口里。
+
 ## 基线噪声：红点也分"红"和"抖"
 
 `orbit-pi` 有一次在满载下报了 32 个红（平时 6 个）。量了一下才知道区别在哪——
@@ -521,7 +541,10 @@ grep 抓不到 `test result`，表格里就留一格空白，而脚本照样 exi
 
 ### 不挡事、但要知道的
 
-4. **X（Twitter）那一路调研没做。** 候选池只来自 GitHub stars（670 个，含 dim/pi-jax/PIG 校验）
+4. **`compact.pre` 从来没被真的触发过。** 事件接线在，但没跑过一次上下文压缩，
+   所以"压缩时插件能收到通知"只是读代码得出的结论。要补就得把 `context_window`
+   调到很小、喂一段长上下文，让它被迫压缩——比其它几条贵，先记着。
+5. **X（Twitter）那一路调研没做。** 候选池只来自 GitHub stars（670 个，含 dim/pi-jax/PIG 校验）
    与手工对比。X 需要登录态，抓不了；结论因此只覆盖了一半来源。
 5. **方案原文 S0 写的是"git submodule + engine 作为 lib 路径依赖"**，实施改成了进程依赖。
    原因写在 `KERNEL-FUSION-PLAN.md` §0.1：引擎是别人的代码，D4 禁改；链接进去等于把

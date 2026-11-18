@@ -201,6 +201,20 @@ code_block printf '%s\n' "$seam"
 need "接缝① 真引擎" "$seam" '^PASS '
 rm -rf "$SEAM_HOME" 2>/dev/null || true
 
+say "## 7. S4 的 6 个事件：接线 ≠ 发得出来"
+say
+say '`grep broadcast` 只能证明接了线。这一节真跑一轮，让插件把收到的每种事件记一行，然后对账。'
+say '4 种常驻事件必须出现；`guard.deny` / `compact.pre` 是条件触发，只报告不判死——'
+say '含糊成"都有"比承认"这一轮没发生"危险得多。'
+say
+EVT_HOME="$(mktemp -d /tmp/evidence-evt.XXXXXX)"
+[ -f "$HOME_DIR/config.toml" ] && cp "$HOME_DIR/config.toml" "$EVT_HOME/" 2>/dev/null
+evt=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" HARNESS_ENGINE_BIN="$ENGINE_BIN" \
+        CODEWHALE_HOME="$EVT_HOME" bash scripts/probe-events.sh 2>&1)
+code_block printf '%s\n' "$evt"
+need "事件探针" "$evt" '^PASS 常驻 4 事件'
+rm -rf "$EVT_HOME" 2>/dev/null || true
+
 if [ ${#PROBLEMS[@]} -gt 0 ]; then
   say
   say "## !! 证据不完整"
