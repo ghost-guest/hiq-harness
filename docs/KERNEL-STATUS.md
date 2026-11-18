@@ -100,7 +100,7 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 
 | 验收原文 | 状态 | 证据 |
 |---|---|---|
-| S0 两仓独立构建，harnessd 能调 `ExecPolicyEngine` | 改为进程依赖（§0.1） | `check-engine.sh` exit 0；`JsonRpcEngine` 只走 JSON-RPC，从不链接引擎 crate |
+| S0 两仓独立构建，harnessd 能调 `ExecPolicyEngine` | 改为进程依赖（§0.1 / 方案 §7） | `check-engine.sh`：扫描全部 `Cargo.toml`，任何地方提到引擎 crate 或 path 依赖逃出仓库就红（**两个方向都验过会红**），已并进 `gate.sh` |
 | S1 orbit 界面能发一条消息，看到流式回复和工具调用 | **通过（机器可判）**；排版好不好看仍需人一眼 | `app::render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`：真子进程喂流式事件 → 断言语义上的**可见对话导出**里有回复文本、工具行也进同一份投影；另有真会话回放两段 | 两段真跑输出回放：`a_real_session_parses_into_the_events_the_ui_renders`（脚本化 + DeepSeek 真会话）都解析出文本增量、`tool_execution_start/end` 成对、`agent_end` |
 | S2 切换模型/档位生效；fork 出新会话能跑到不同结论 | **通过** | 真模型路由切换 200；`fork` → 201 新 id；档位实测：`low`/`high` → 201，非法值 → 400 并列出全部取值（`auto, off, minimal, low, medium, high, xhigh, ultra, max`，实测 9 档，不是方案里写的 7 档） |
 | S3 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | **通过** | steer 实测 `steer_count=1`；误杀 0/10；真模型 20 题测得缓存命中 **95.6%**（`prompt_cache_hit_tokens / input_tokens`） |

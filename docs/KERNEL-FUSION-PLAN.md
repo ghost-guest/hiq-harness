@@ -75,7 +75,7 @@ dim 提供"记性"（time-bus 语义），codex 提供"语言规范"（协议形
 | **codex** | **协议语言规范**（JSON-RPC 无 `jsonrpc` 字段、反向 request、通知 vs 应答）、`item/*` 的 delta 粒度、execpolicy DSL 语义、apply_patch 格式 | codewhale 的协议本来就是它的分叉，直接沿用等于免费拿到生态兼容 |
 | **openhuman** | **PromptCacheGuardMiddleware**（缓存前缀冻结 + miss 归因）、TokenJuice 压缩思路 | 缓存命中是本项目实测 96.9% 的关键，它的 guard 是唯一把"何时不能压缩"写进中间件的实现 |
 | **grok-build** | 两遍压缩（先摘要再重写）、逐子进程 seccomp 的思路 | 压缩质量明显高于单遍；但仓库已停更，只抄算法 |
-| **现项目** | 三守卫（失败熔断 / 阶梯 / 只读螺旋）、收据与 uncertain 阻塞、七档 effort 与 Magpie 映射 | 这些是已经在真机上跑出来的，`crates/guards` 可直接搬 |
+| **现项目** | 三守卫（失败熔断 / 阶梯 / 只读螺旋）、收据与 uncertain 阻塞、七档 effort 与 Magpie 映射（**实测引擎是 9 档**：`auto, off, minimal, low, medium, high, xhigh, ultra, max`，见 §7） | 这些是已经在真机上跑出来的，`crates/guards` 可直接搬 |
 | **Go 插件层** | 工具、集成、hooks、审批判定 | 你的语言偏好；进程外，崩溃隔离，跨平台单二进制 |
 
 ---
@@ -99,7 +99,7 @@ Fork, CloneSession, AuthList, AuthStatus, AuthLogin, AuthLogout, AuthCancel, Quo
 | `Steer` / `FollowUp` | `turn/steer` | 直接对应 |
 | `Abort` | `turn/interrupt` | 直接对应 |
 | `SetModel` / `CycleModel` | 我们自己的 `model-router` | 记在 harnessd 状态里，下次 `turn/start` 带上 |
-| `SetThinkingLevel` / `SetAutoRetry` | `turn/start.effort` | 七档 → `ReasoningEffort` 映射表 |
+| `SetThinkingLevel` / `SetAutoRetry` | `turn/start.effort` | 档位 → `ReasoningEffort` 映射表（实测 9 档，不是 7 档） |
 | `GetMessages` / `GetEntries` | `thread/items/list` | 加一层 item→orbit message 的形状转换 |
 | `Fork` / `CloneSession` | `thread/fork` | 直接对应 |
 | `Compact` / `SetAutoCompaction` | `thread/compact/start` + 本地开关 | 自动压缩开关由 harnessd 持有 |
@@ -132,7 +132,7 @@ turn/start { model, effort, input }
         ↓
 model-router（harnessd）
   ├─ provider: deepseek / magpie / anthropic / openai  （复用现有 llm_transport.rs 的 aimux 实现）
-  ├─ effort 七档 → ReasoningEffort（codewhale 已有枚举）
+  ├─ effort 档位 → ReasoningEffort（实测 9 档；codewhale 已有枚举）
   └─ 缓存前缀守卫（openhuman 的 guard 逻辑）
         ↓
 engine 内部原有的 provider trait（codewhale 已支持 deepseek-v4-pro / deepseek-flash）
@@ -164,9 +164,9 @@ harnessd ──stdio JSON-RPC──▶ 插件进程（Go）
 
 | Sprint | 内容 | 改动深度 | 验收 | 工期 |
 |---|---|---|---|---|
-| **S0 地基** | codewhale 作为 git submodule + 一个空 harnessd crate 能 `cargo build`；engine 作为 lib 路径依赖 | D1 | 两仓独立构建，harnessd 能调 `ExecPolicyEngine` | 2 天 |
+| **S0 地基** | codewhale 作为 git submodule + 一个空 harnessd crate 能 `cargo build`；engine 作为 lib 路径依赖<br>**实施修订**：改为 D1 进程依赖——引擎是外部二进制，只走 `app-server` 的 JSON-RPC / HTTP，不链接它的任何 crate | D1 | 两仓独立构建，harnessd 能调 `ExecPolicyEngine`<br>**修订后**：两仓独立构建，`harnessd` 通过协议调到同一个策略判断（`approval.required` → 我们决定 → `POST /v1/approvals`） | 2 天 |
 | **S1 接缝① 打通** | 35 命令映射（`CommandBody` 实际变体数；Auth/Quota 诚实返回不适用）；SSE 事件流；`Prompt` 能真跑一轮 | D2 | orbit 界面能发一条消息，看到流式回复和工具调用 | 5 天 |
-| **S2 模型 + 会话** | model-router（DeepSeek + Magpie + 七档 effort）、`thread/fork`、`GetEntries`、session 持久化 | D2 | 切换模型/档位生效；fork 出新会话能跑到不同结论 | 4 天 |
+| **S2 模型 + 会话** | model-router（DeepSeek + Magpie + 档位 effort，实测 9 档）、`thread/fork`、`GetEntries`、session 持久化 | D2 | 切换模型/档位生效；fork 出新会话能跑到不同结论 | 4 天 |
 | **S3 融合件** | steer-gate、guards 三件、cache-guard、time-bus log | D2+D3 | 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | 6 天 |
 | **S4 插件层** | hook-host（Go stdio）、`plugin/hello` 握手、崩溃隔离、6 个事件 | D2 | 写一个 Go 插件，deny 一条命令，内核记录并继续 | 5 天 |
 | **S5 评测与固化** | V3 的 20 任务评测集 + 跑分器 + 回归门 | — | 通过率/返工率/误杀率有基线数字 | 4 天 |
@@ -176,6 +176,12 @@ harnessd ──stdio JSON-RPC──▶ 插件进程（Go）
 **S0 的一个决定性细节**：把 codewhale 放成 **git submodule（或 vendored 但只读，配一个 `PATCH-LOG.md`）**，
 并用 CI 检查「我们有没有改过 submodule 里的文件」。有 diff 就红。
 这条 CI 检查是"不返工"的物理保障——比任何纪律都有效。
+
+> **实施修订（2026-11-19）**：最终没有用 submodule，改成了**外部二进制 + 协议依赖**。
+> 原因不是省事，而是这条 CI 检查有个更硬的等价物：只要引擎不在 `Cargo.toml` 里，
+> 就**不可能**改到它的源码——编译期就不存在这个依赖。`scripts/check-engine.sh` 守的就是
+> 「工作区里没有任何 crate 依赖引擎」。submodule 反而留了个口子：有人把它加进依赖就悄悄越界了。
+> 代价写在 `KERNEL-STATUS.md` 的「已知缺口」第 3 条：部署时得多带一个二进制。
 
 ---
 
@@ -218,3 +224,20 @@ Go 插件 ──6 事件─────┘        │ D2 缝合
                              ▼
                         orbit（UI 不改）
 ```
+
+---
+
+## 7. 实施后的修订（原文保留，改动在此说明）
+
+方案是纸上的判断，实施是地面上的证据。凡是原文与实测不符的地方，**不在原文上改数字**，
+在这里记一笔——保留当时的判断痕迹，比"看起来一致"更有用。
+
+| 原文 | 实测 / 实施 | 为什么 |
+|---|---|---|
+| S0：引擎作为 git submodule + lib 路径依赖 | **外部二进制 + 协议依赖**（`check-engine.sh` 守"没有 crate 依赖引擎"） | 见 §4 的修订注 |
+| 档位 7 档 | **9 档**：`auto, off, minimal, low, medium, high, xhigh, ultra, max` | 引擎自己的 400 报错列出了全部取值（`S2` 验收里跑出来的） |
+| 36 条 / 35 条命令 | `CommandBody` 实际 **35** 个变体 | 数出来的，不是估的 |
+| 守卫阈值沿用现项目 | 沿用了，但**标定过**：20 题 + 10 个长任务，误杀 0 | `S3` 验收 |
+| 审批通道"握手即可" | 实际是四个缺陷叠在一起（id / 命令摊平 / 词表 / 重复投递） | 详见 `KERNEL-STATUS.md`「真引擎下的插件拦截」 |
+| `auto_approve` 默认无所谓 | **默认必须 false**：true 时引擎自己批，插件与守卫整条被绕过 | 见同章节；这条差点让所有基线都白跑 |
+| X（Twitter）作为候选来源之一 | **没做成**：需要登录态，只覆盖了 GitHub stars 这一半来源 | 记在「已知缺口」第 4 条，不假装覆盖过 |

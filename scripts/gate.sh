@@ -11,6 +11,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 BASELINE="${BASELINE:-bench/baseline-deepseek.json}"
 
+# D4 红线：任何 crate 依赖引擎、或 path 依赖逃出仓库 → 直接挡。
+if [ -x scripts/check-engine.sh ]; then
+  bash scripts/check-engine.sh || { echo "门禁未通过：D4 检查红了"; exit 1; }
+fi
+
 if [ "${1:-}" = "--run" ]; then
   shift
   if [ $# -eq 0 ]; then echo "用法: bash scripts/gate.sh --run '<solver 命令>'"; exit 2; fi
