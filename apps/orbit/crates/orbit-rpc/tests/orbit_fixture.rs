@@ -6,14 +6,23 @@
 use orbit_rpc::types::Event;
 use std::path::PathBuf;
 
-fn fixture() -> PathBuf {
+fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../bench/fixtures/orbit-session.ndjson")
+        .join("../../../../bench/fixtures")
+        .join(name)
 }
 
+/// 两段都是真跑留下的：一段来自脚本化 provider，一段来自真模型
+/// （DeepSeek V4.1 Flash，2–4 次工具调用）。界面要用的东西两段都得解析得出来。
 #[test]
 fn a_real_session_parses_into_the_events_the_ui_renders() {
-    let path = fixture();
+    for name in ["orbit-session.ndjson", "orbit-session-real.ndjson"] {
+        check(name);
+    }
+}
+
+fn check(name: &str) {
+    let path = fixture(name);
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("missing fixture {}: {e}", path.display()));
 
