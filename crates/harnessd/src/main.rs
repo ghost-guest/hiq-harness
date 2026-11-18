@@ -30,13 +30,19 @@ fn main() -> Result<()> {
 }
 
 fn serve(args: &[String]) -> Result<()> {
-    let mut program = None;
-    let mut engine_args: Vec<String> = Vec::new();
+    // Defaults come from the environment so an embedding app (orbit) can hand us
+    // an engine without building a command line.
+    let mut program = std::env::var("HARNESSD_ENGINE").ok().filter(|v| !v.trim().is_empty());
+    let mut engine_args: Vec<String> = std::env::var("HARNESSD_ENGINE_ARGS")
+        .ok()
+        .map(|v| v.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
     let mut log_path = std::env::var("HARNESSD_LOG").unwrap_or_else(|_| ".harness/timebus.ndjson".into());
     let mut window: u64 = std::env::var("HARNESSD_WINDOW").ok().and_then(|v| v.parse().ok()).unwrap_or(128_000);
     let mut plugin_paths: Vec<String> = Vec::new();
     let mut compat: Option<String> = None;
-    let mut http_base: Option<String> = None;
+    let mut http_base: Option<String> =
+        std::env::var("HARNESSD_HTTP_ENGINE").ok().filter(|v| !v.trim().is_empty());
 
     let mut it = args.iter();
     while let Some(a) = it.next() {

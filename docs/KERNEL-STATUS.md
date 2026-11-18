@@ -8,7 +8,7 @@
 ## 一句话
 
 **引擎作为进程通过 JSON-RPC 接入，融合层全在我们自己的 crate 里。**
-`cargo test -p harnessd` 37 项、Go SDK 3 项、20 个评测任务全部通过，零编译警告。
+`cargo test -p harnessd` 55 项（50 lib + 2 Go 插件 + 3 真进程 stdio）、基准集 `--selftest` 20/20 全部通过，零编译警告。
 
 ---
 
@@ -28,7 +28,10 @@
 ## S1 接缝①（orbit ⇄ kernel）
 
 - `mapping.rs`：orbit 的 **35 个命令全部映射**，`every_known_command_maps_to_something` 断言数量等于 35。
-- `Prompt` → `thread/start`（首次）/ `turn/start`（之后），`model`/`effort` 随 `turn/start` 透传（对应 codewhale `TurnStartParams`）。
+- 映射**不是**按文档写的，是按二进制探出来的：`initialize{clientInfo}` 必发，然后探
+  `app/capabilities`+`thread/capabilities`+`prompt/capabilities`，只把**对方声明过**的 method 记进 `caps`。
+- `Prompt` → `thread/start`（首次）→ `prompt/run{prompt, thread_id, allowed_tools: [], model}`。
+  文档里的 `turn/start` 在 0.10.3 上是 `-32601`，已废弃。
 - `protocol.rs`：`ui_kind_for` 把引擎通知翻译成 UI 事件；不可识别的走 `engine/<method>` **转发而不是丢弃**（静默丢弃是 UI bug 变隐形的根源）。
 - `Auth*` / `Quota*` 六条**诚实返回不适用**，不伪造 OAuth。
 
@@ -42,7 +45,7 @@
 
 | 融合件 | 机制 | 验证测试 |
 |---|---|---|
-| **守卫否决** | 引擎的审批反向 request（`item/commandExecution/requestApproval`）→ 守卫裁决 → 回 `denied` | `guard_veto_turns_into_a_denial_on_the_approval_channel` |
+| **守卫否决** | 引擎的审批反向 request（`item/commandExecution/requestApproval`）→ 守卫裁决 → 回 `accept` / `decline` / `cancel`（真实枚举） | `guard_veto_turns_into_a_denial_on_the_approval_channel` |
 | **time-bus 六条** | append-only + seq、投影纯函数、只记影响行为的事实、副作用不重放、uncertain 阻塞 | `timebus::tests`（6 项） |
 | **steer 安全点** | 只在 item/turn 边界注入，不打断飞行中的响应 | `steer_waits_for_item_boundary_then_reaches_the_engine` |
 | **缓存守卫** | 窗口 85% + 命中 90% 两阈值：热前缀→压缩，冷前缀→冻结 | `full_window_with_hot_prefix_triggers_compaction` |
@@ -55,7 +58,15 @@ orbit 说的是 `pi --mode rpc` 的 JSONL 方言：`{"id","type":"prompt","messa
 （`apps/orbit/crates/orbit-rpc/src/types.rs:206`）。
 
 `crates/harnessd/src/orbit_compat.rs` 做双向翻译，`harnessd serve --compat orbit` 直接吃这套方言。
-**orbit 的 UI 与 client.rs 一行都不用改**，只要把后端进程指向 harnessd。
+**orbit 的 UI 一行都不用改**，`client.rs` 的 spawn 点也已接上（`HARNESSD_BIN` 分支）：
+
+```
+HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-server \
+  cargo test -p orbit-rpc --test harnessd_backend     # 1 passed，1.56s，真进程真方言
+```
+
+`HARNESSD_BIN` 设置后命令走子进程（内核崩溃不带走 UI）；`HARNESSD_HTTP_ENGINE` 则把同一层
+接到工具/审批面。未设置时退回进程内执行器——两条路对 UI 等价，同一个 `CommandBody` 进、同一个 `Event` 出。
 端到端由 `orbit_dialect_end_to_end` 覆盖（真二进制、真帧格式、假引擎）。
 
 ## S4 插件层（Go）

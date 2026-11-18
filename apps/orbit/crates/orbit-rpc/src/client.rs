@@ -172,6 +172,57 @@ impl PiClient {
             Arc::new(Mutex::new((Vec::new(), Vec::new())));
 
         let workspace = workspace_dir.to_path_buf();
+
+        // ── 后端选择 ──────────────────────────────────────────────────
+        // 设了 `HARNESSD_BIN` 就把执行交给 harnessd 子进程（接缝①：orbit ⇄ kernel），
+        // 否则退回进程内执行器。两者对 UI 完全等价：同一个 `CommandBody` 进、
+        // 同一个 `Event` 出。走子进程的意义是内核可以单独重启、崩溃不带走 UI，
+        // 而且 harnessd 那层守卫/time-bus/插件才有地方挂。
+        let harnessd_bin = std::env::var("HARNESSD_BIN")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .filter(|v| {
+                let ok = Path::new(v).is_file() || !v.contains('/');
+                if !ok {
+                    eprintln!("HARNESSD_BIN={v} 找不到，退回进程内执行器");
+                }
+                ok
+            });
+        if let Some(bin) = harnessd_bin {
+            match spawn_harnessd_worker(
+                &bin,
+                &workspace,
+                &state_dir,
+                commands_rx,
+                events_tx.clone(),
+                pending.clone(),
+                stderr_ring.clone(),
+                writer_alive.clone(),
+            ) {
+                Ok(()) => {
+                    return Ok(Self {
+                        workspace,
+                        state_dir,
+                        commands_tx,
+                        events_rx,
+                        pending,
+                        stderr_ring,
+                        next_id: AtomicU64::new(1),
+                        writer_alive,
+                        abort,
+                        config,
+                        subagent_status_token: String::new(),
+                    });
+                }
+                Err(err) => {
+                    // 显式指定了 HARNESSD_BIN 却起不来，就大声失败：
+                    // 静默退回进程内会让人以为自己在跑内核，其实没有。
+                    return Err(anyhow!("harnessd 启动失败：{err}"));
+                }
+            }
+        }
+
         {
             let ws = workspace.clone();
             let sd = state_dir.clone();
@@ -1040,6 +1091,120 @@ impl std::io::Write for EventSink {
 }
 
 /// 命令的线上名字（与上游 `CommandBody` 的 serde 重命名一致）。
+/// 把命令转发给 `harnessd serve --compat orbit` 子进程，并把它的输出还原成 `Event`。
+///
+/// 协议就是 orbit 自己的 JSONL 方言：`{"id","type",...}` 进，`{"type",...}` 出。
+/// `harnessd/src/orbit_compat.rs` 是这条方言的实现与测试所在。
+fn spawn_harnessd_worker(
+    bin: &str,
+    workspace: &Path,
+    state_dir: &Path,
+    commands_rx: Receiver<Outgoing>,
+    events_tx: Sender<Event>,
+    pending: Arc<Mutex<HashMap<String, Sender<Event>>>>,
+    stderr_ring: Arc<Mutex<VecDequeCompat>>,
+    writer_alive: Arc<AtomicBool>,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write as _};
+    use std::process::{Command, Stdio};
+
+    let log_path = state_dir.join("timebus.ndjson");
+    let mut cmd = Command::new(bin);
+    cmd.arg("serve").args(["--compat", "orbit"]).arg("--log").arg(&log_path);
+    if let Ok(engine) = std::env::var("HARNESSD_ENGINE") {
+        if !engine.trim().is_empty() {
+            cmd.arg("--engine").arg(engine);
+        }
+    }
+    if let Ok(http) = std::env::var("HARNESSD_HTTP_ENGINE") {
+        if !http.trim().is_empty() {
+            cmd.arg("--http-engine").arg(http);
+        }
+    }
+    cmd.current_dir(workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_console(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|e| anyhow!("spawn {bin}: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    let stderr = child.stderr.take();
+
+    // 读：一行一个 Event。response 按 id 回给发起方，其余广播给 UI。
+    {
+        let pd = pending.clone();
+        let ev = events_tx;
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                // `Event::parse_line` 就是 orbit 自己的解析器：方言一致，
+                // 所以这里不需要再写一份翻译。
+                let event = Event::parse_line(line);
+                if let Event::Response { id, .. } = &event {
+                    let waiter = pd.lock().unwrap_or_else(|p| p.into_inner()).remove(id);
+                    if let Some(tx) = waiter {
+                        let _ = tx.send(event);
+                    }
+                    continue;
+                }
+                let _ = ev.send(event);
+            }
+        });
+    }
+
+    // 读 stderr：留环，不刷屏。
+    if let Some(err) = stderr {
+        let ring = stderr_ring;
+        thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                let mut r = ring.lock().unwrap_or_else(|p| p.into_inner());
+                r.push_back(line);
+                while r.len() > 200 {
+                    r.pop_front();
+                }
+            }
+        });
+    }
+
+    // 写：命令 → JSONL。子进程死了就关闸。
+    {
+        let alive = writer_alive.clone();
+        thread::spawn(move || {
+            for cmd in commands_rx.iter() {
+                let mut value = match serde_json::to_value(&cmd.body) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        eprintln!("命令序列化失败：{err}");
+                        continue;
+                    }
+                };
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("id".into(), json!(cmd.id));
+                }
+                if writeln!(stdin, "{value}").and_then(|_| stdin.flush()).is_err() {
+                    break;
+                }
+            }
+            alive.store(false, Ordering::Relaxed);
+        });
+    }
+
+    // 子进程死了要让 `is_alive` 说实话，否则 UI 会一直转圈。
+    let alive = writer_alive.clone();
+    thread::spawn(move || {
+        let _ = child.wait();
+        alive.store(false, Ordering::Relaxed);
+    });
+
+    Ok(())
+}
+
 fn command_name(body: &CommandBody) -> &'static str {
     match body {
         CommandBody::Prompt { .. } => "prompt",
