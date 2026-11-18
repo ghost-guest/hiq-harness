@@ -81,9 +81,15 @@ harnessd doctor                             # 环境检查
 
 ## 已知缺口（不粉饰）
 
-1. **审批应答的字段名未对真引擎验证过**。当前发 `{"decision":"approved"|"denied"}`；
-   接上 codewhale 二进制后第一件事就是核对 `requestApproval` 的 response schema。
-   位置：`crates/harnessd/src/server.rs` 的 `on_reverse_request`。
+1. ~~审批应答的字段名未对真引擎验证过~~ **已按源码对正（未跑二进制）**：
+   `CommandExecutionRequestApprovalResponse { decision }`，
+   取值 `accept / acceptForSession / acceptWithExecpolicyAmendment / applyNetworkPolicyAmendment / decline / cancel`
+   （`app-server-protocol/src/v2.rs:542-560`）；
+   请求侧是 `command` + `commandActions[]`（`read|listFiles|search|unknown`）+ `itemId`，
+   **没有 tool 字段**（同文件 `:584-608`）。
+   我们已把 `commandActions` 映射成守卫认识的 `read_file/list_dir/grep`，应答改用 `accept/decline/cancel`，
+   并由 `real_engine_payload_maps_command_actions_to_our_tool_names` 与
+   `approval_accepts_with_the_engines_own_wording` 两个测试钉住。
 2. **未接真引擎跑过任何任务**。`bench --solver` 还没有基线数字，因为需要 codewhale 二进制 + provider key。
 3. **orbit 的 `client.rs` 尚未切到本协议**。S1 只保证了命令映射与事件形状，UI 侧改造还没做。
 4. 守卫的三级阶梯阈值沿用现项目 `harness-guards`，没有在 20 任务上标定过误杀率。

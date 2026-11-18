@@ -101,14 +101,9 @@ impl<E: Engine> Supervisor<E> {
     /// a real refusal, not advice the model can ignore.
     fn on_reverse_request(&mut self, frame: Frame) -> Result<Option<(u64, Value)>> {
         let method = frame.method.clone().unwrap_or_default();
-        let tool = frame
-            .params
-            .as_ref()
-            .and_then(|p| p.get("tool").or_else(|| p.get("toolName")))
-            .and_then(Value::as_str)
-            .unwrap_or(&method)
-            .to_string();
-        let args = frame.params.clone().unwrap_or(Value::Null).to_string();
+        let params = frame.params.clone().unwrap_or(Value::Null);
+        let tool = tool_name(&params, &method);
+        let args = params.to_string();
 
         let verdict = self.guards.before(&tool, &args);
         let decision = match verdict {
@@ -119,17 +114,25 @@ impl<E: Engine> Supervisor<E> {
                     json!({ "tool": tool, "reason": reason, "digest": digest(&args) }),
                 )?;
                 self.plugins.broadcast("guard.deny", json!({ "tool": tool, "reason": reason }));
-                json!({ "decision": "denied", "reason": reason })
+                // Wire vocabulary is `accept` / `decline` / `cancel`, not approved/denied.
+                json!({ "decision": "decline" })
             }
             Verdict::AllowWithNote(note) => {
                 self.approvals += 1;
                 self.plugins.broadcast("tool.pre", json!({ "tool": tool, "note": note }));
-                json!({ "decision": "approved", "note": note })
+                // The note goes to the UI, not the wire: the engine's response
+                // struct carries `decision` only.
+                json!({ "decision": "accept" })
             }
-            Verdict::Allow | Verdict::Stop(_) => {
+            Verdict::Allow => {
                 self.approvals += 1;
                 self.plugins.broadcast("tool.pre", json!({ "tool": tool }));
-                json!({ "decision": "approved" })
+                json!({ "decision": "accept" })
+            }
+            Verdict::Stop(_) => {
+                self.approvals += 1;
+                self.plugins.broadcast("tool.pre", json!({ "tool": tool }));
+                json!({ "decision": "cancel" })
             }
         };
         Ok(frame.id.map(|id| (id, decision)))
@@ -247,6 +250,43 @@ impl<E: Engine> Supervisor<E> {
     }
 }
 
+
+/// The engine identifies a pending action by `command` + `commandActions`, not by a
+/// tool name. Map its vocabulary onto ours so the guards see the same words they
+/// were written against. (`CommandAction` variants: read / listFiles / search /
+/// unknown — crates/app-server-protocol/src/v2.rs:405.)
+fn tool_name(params: &Value, method: &str) -> String {
+    if let Some(t) = params
+        .get("tool")
+        .or_else(|| params.get("toolName"))
+        .and_then(Value::as_str)
+    {
+        return t.to_string();
+    }
+    if let Some(actions) = params.get("commandActions").and_then(Value::as_array) {
+        if let Some(kind) = actions
+            .first()
+            .and_then(|a| a.get("type"))
+            .and_then(Value::as_str)
+        {
+            return match kind {
+                "listFiles" => "list_dir",
+                "read" => "read_file",
+                "search" => "grep",
+                _ => "shell",
+            }
+            .to_string();
+        }
+    }
+    if method.contains("fileChange") {
+        return "apply_patch".to_string();
+    }
+    if params.get("command").is_some() || params.get("itemId").is_some() {
+        return "shell".to_string();
+    }
+    "unknown".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,7 +349,7 @@ mod tests {
         }
         assert!(denied, "spiral guard must eventually veto");
         let last = sup.engine.responses().last().cloned().expect("engine got an answer");
-        assert_eq!(last.1["decision"], "denied", "the veto must reach the engine as a denial");
+        assert_eq!(last.1["decision"], "decline", "wire vocabulary is accept/decline");
         assert!(sup.log.project().receipts.is_empty(), "a denied call is not an effect");
         let kinds: Vec<_> = sup.log.entries().iter().map(|e| e.kind.clone()).collect();
         assert!(kinds.iter().any(|k| k == "guard.deny"));
@@ -356,6 +396,37 @@ mod tests {
         sup.engine.emit("thread/tokenUsage/updated", json!({"promptTokens":95000,"cachedTokens":94000}));
         sup.pump().unwrap();
         assert!(sup.engine.calls().iter().any(|c| c == "thread/compact/start"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn real_engine_payload_maps_command_actions_to_our_tool_names() {
+        assert_eq!(
+            tool_name(&json!({"commandActions":[{"type":"listFiles"}]}), "item/commandExecution/requestApproval"),
+            "list_dir"
+        );
+        assert_eq!(
+            tool_name(&json!({"commandActions":[{"type":"search","query":"x"}]}), "item/commandExecution/requestApproval"),
+            "grep"
+        );
+        assert_eq!(tool_name(&json!({"command":"cargo test","itemId":"i1"}), ""), "shell");
+        assert_eq!(tool_name(&json!({"itemId":"i1"}), "item/fileChange/requestApproval"), "apply_patch");
+    }
+
+    #[test]
+    fn approval_accepts_with_the_engines_own_wording() {
+        let log = tmp_log("accept");
+        let path = log.path().to_path_buf();
+        let mut sup = Supervisor::new(MockEngine::default(), log, 128_000);
+        sup.engine.emit_request(
+            7,
+            "item/commandExecution/requestApproval",
+            json!({"command":"cargo test","itemId":"i1"}),
+        );
+        sup.pump().unwrap();
+        let (id, resp) = sup.engine.responses().last().cloned().unwrap();
+        assert_eq!(id, 7);
+        assert_eq!(resp, json!({"decision": "accept"}));
         let _ = std::fs::remove_file(&path);
     }
 }
