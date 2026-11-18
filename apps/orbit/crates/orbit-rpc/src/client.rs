@@ -195,8 +195,12 @@ impl PiClient {
         // 否则退回进程内执行器。两者对 UI 完全等价：同一个 `CommandBody` 进、
         // 同一个 `Event` 出。走子进程的意义是内核可以单独重启、崩溃不带走 UI，
         // 而且 harnessd 那层守卫/time-bus/插件才有地方挂。
-        let harnessd_bin = forced_program.or_else(|| std::env::var("HARNESSD_BIN")
-            .ok()
+        // 优先级：显式注入 > HARNESSD_BIN > PI_BIN。
+        // `PI_BIN` 是上游的变量（测试与发行版都靠它指定可执行文件），
+        // 内嵌之后它指向的仍然是"那个跑内核的程序"，所以继续认它。
+        let harnessd_bin = forced_program
+            .or_else(|| std::env::var("HARNESSD_BIN").ok())
+            .or_else(|| std::env::var("PI_BIN").ok())
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .filter(|v| {
@@ -205,7 +209,7 @@ impl PiClient {
                     eprintln!("HARNESSD_BIN={v} 找不到，退回进程内执行器");
                 }
                 ok
-            }));
+            });
         if let Some(bin) = harnessd_bin {
             match spawn_harnessd_worker(
                 &bin,
