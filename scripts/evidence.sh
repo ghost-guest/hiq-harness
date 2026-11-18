@@ -82,7 +82,12 @@ code_block sh -c "curl -s -o /dev/null -w 'reasoning_effort=low   -> %{http_code
 code_block sh -c "curl -s -X POST http://127.0.0.1:$PORT/v1/threads/$EFF_TID/turns -H 'content-type: application/json' -d '{\"prompt\":\"say ok\",\"reasoning_effort\":\"bogus\"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)[\"error\"][\"message\"])'"
 
 say '### 4.4 事件流里真的有工具调用和用量'
-TURN_TID=$(mkthread)
+# 这一节测的是「事件映射」，不是策略：这里让它自己批。
+# 否则工具调用会停在审批上（没人答），这一轮永远不完成，后面 fork 就 409。
+# 策略那条路在 §5 用 deny 单独验，两件事不要混在一起。
+TURN_TID=$(curl -s -m 10 -X POST "http://127.0.0.1:$PORT/v1/threads" -H 'content-type: application/json' \
+  -d '{"auto_approve":true,"model_provider_id":"magipe","model":"auto/deepseek-v4.1-flash"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
 ( curl -s -N -m 90 "http://127.0.0.1:$PORT/v1/threads/$TURN_TID/events" > "$HOME_DIR/sse.ndjson" & )
 sleep 1
 curl -s -m 10 -X POST "http://127.0.0.1:$PORT/v1/threads/$TURN_TID/turns" -H 'content-type: application/json' -d '{"prompt":"用 bash 工具执行 echo evidence，把输出贴出来，然后结束。"}' >/dev/null
@@ -106,6 +111,12 @@ PY
 
 say '### 4.5 fork 出新会话（接在一个已完成轮次的会话上——空会话没有可分的枝）'
 code_block sh -c "curl -s -m 15 -X POST http://127.0.0.1:$PORT/v1/threads/$TURN_TID/fork -H 'content-type: application/json' -d '{}' -w '\n-> %{http_code}\n' | tail -c 400"
+
+say '### 5. 审批通道：真引擎里 deny 一条命令，这一轮还能正常收尾'
+say
+say '> 这条通道曾经整条是坏的（id 硬编码 0 / 命令没摊平 / 词表抄错 / 重复投递），'
+say '> 而所有基线都跑在 `auto_approve:true` 上，所以没人发现。探针会自己起一个引擎去验。'
+code_block env CODEWHALE_HOME="$HOME_DIR" python3 scripts/probe-approval.py
 
 kill "$(cat "$HOME_DIR/pid")" 2>/dev/null
 pkill -f "app-server --http --insecure-no-auth --port $PORT" 2>/dev/null

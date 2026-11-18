@@ -198,6 +198,11 @@ message_update(text_delta) / message_end / agent_end`，然后断言**用户可�
 
 ### 真引擎下的插件拦截（S4 的"真"验收）
 
+一键复现：`python3 scripts/probe-approval.py`（需要 `HARNESS_ENGINE_BIN` 和一个干净的
+`CODEWHALE_HOME`）。它会自己起引擎、建线程、起轮、等审批、答 deny、检查这一轮正常收尾。
+**探针本身验过会红**：`PROBE_AUTO_APPROVE=1` 时它报
+`FAIL no approval.required arrived`、退出码 1。
+
 `auto_approve:true` 会让引擎**自己批**命令，审批请求根本不到内核——插件和守卫等于被拔掉。
 把默认改成 `false`（`scripts/bench-solve.sh`、`evidence.sh`、`real-task.sh` 都改了）之后，
 同一个审批通道暴露了三个真缺陷，全部修掉并用真事件复测：
