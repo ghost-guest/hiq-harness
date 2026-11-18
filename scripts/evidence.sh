@@ -20,6 +20,17 @@ PORT="${EVIDENCE_PORT:-$(pick_port)}"
 say() { printf '%s\n' "$*"; }
 code_block() { say '```'; "$@" 2>&1; say '```'; }
 
+# 这份脚本产出的是"证据"。证据最坏的失败不是红，是**空**——某一节没产出数字，
+# 表格里留下一格空白，而脚本照样 exit 0。所以每一格都要对照一个形状检查，
+# 跑完只要有一格不合格就整体退出非零，并在末尾点名。
+PROBLEMS=()
+need() {
+  local name="$1" value="$2" pattern="$3"
+  if ! printf '%s' "$value" | grep -Eq "$pattern"; then
+    PROBLEMS+=("$name → '$value'（期望匹配 /$pattern/）")
+  fi
+}
+
 say "# S0–S5 验收证据"
 say
 say "- 生成时间：$(date '+%Y-%m-%d %H:%M:%S %Z')"
@@ -32,10 +43,13 @@ say
 say '| 套件 | 结果 |'
 say '|---|---|'
 ws=$(cargo test --workspace 2>&1 | grep -E "^test result" | awk '{p+=$4;f+=$6} END {print p" passed / "f" failed"}')
+need "workspace 测试结果" "$ws" '^[0-9]+ passed / [0-9]+ failed$'
 say "| \`cargo test --workspace\`（内核 9 个 crate） | $ws |"
 rpc=$(cd apps/orbit && cargo test -p orbit-rpc 2>&1 | grep -E "^test result" | awk '{p+=$4;f+=$6} END {print p" passed / "f" failed"}')
+need "orbit-rpc 测试结果" "$rpc" '^[0-9]+ passed / [0-9]+ failed$'
 say "| \`cargo test -p orbit-rpc\`（接缝① 客户端） | $rpc |"
 pi=$(cd apps/orbit && cargo test -p orbit-pi 2>&1 | grep -E "^test result" | tail -1 | sed -E 's/^test result: (FAILED|ok)\. //; s/; [0-9]+ (ignored|measured)[^;]*//g')
+need "orbit-pi 测试结果" "$pi" 'passed; [0-9]+ failed'
 say "| \`cargo test -p orbit-pi\`（GPUI 界面，无头） | $pi |"
 say
 
@@ -47,6 +61,8 @@ say "## 3. 真模型基线（DeepSeek V4.1 Flash，经本机 3425 代理）"
 say
 if [ -f bench/baseline-deepseek.json ]; then
   code_block python3 -c "import json;d=json.load(open('bench/baseline-deepseek.json'));d=d.get('summary',d);print(json.dumps({k:d[k] for k in ('total','passed','pass_rate','rework_rate','false_kill_rate','cache_hit_rate','mean_duration_s')}, indent=2))"
+  base=$(python3 -c "import json;d=json.load(open('bench/baseline-deepseek.json'));d=d.get('summary',d);print(d.get('total'), d.get('passed'))" 2>/dev/null)
+  need "基线题数" "$base" '^20 20$'
 else
   say "（未找到 bench/baseline-deepseek.json）"
 fi
@@ -68,6 +84,8 @@ TOML
 for _ in $(seq 1 40); do curl -sf -m 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break; sleep 0.5; done
 say '### 4.1 健康检查'
 code_block sh -c "curl -s http://127.0.0.1:$PORT/healthz; echo"
+health=$(curl -s -m 3 "http://127.0.0.1:$PORT/healthz" 2>/dev/null)
+need "引擎 healthz" "$health" '"status"\s*:\s*"ok"' 
 
 BODY='{"auto_approve":false,"model_provider_id":"magipe","model":"auto/deepseek-v4.1-flash"}'
 TID=$(curl -s -m 10 -X POST "http://127.0.0.1:$PORT/v1/threads" -H 'content-type: application/json' -d "$BODY" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
@@ -116,7 +134,23 @@ say '### 5. 审批通道：真引擎里 deny 一条命令，这一轮还能正�
 say
 say '> 这条通道曾经整条是坏的（id 硬编码 0 / 命令没摊平 / 词表抄错 / 重复投递），'
 say '> 而所有基线都跑在 `auto_approve:true` 上，所以没人发现。探针会自己起一个引擎去验。'
-code_block env CODEWHALE_HOME="$HOME_DIR" python3 scripts/probe-approval.py
+probe=$(env CODEWHALE_HOME="$HOME_DIR" python3 scripts/probe-approval.py 2>&1)
+code_block printf '%s\n' "$probe"
+need "审批通道探针" "$probe" '^PASS ' 
+
+if [ ${#PROBLEMS[@]} -gt 0 ]; then
+  say
+  say "## !! 证据不完整"
+  say
+  for pb in "${PROBLEMS[@]}"; do say "- $pb"; done
+  say
+  say "上面每一格都是脚本现场取的；空的那几格说明那一步没跑出结果，不是"没问题"。"
+  kill "$(cat "$HOME_DIR/pid")" 2>/dev/null
+  pkill -f "app-server --http --insecure-no-auth --port $PORT" 2>/dev/null
+  wait 2>/dev/null
+  rm -rf "$HOME_DIR" "$WORK" 2>/dev/null || true
+  exit 1
+fi
 
 kill "$(cat "$HOME_DIR/pid")" 2>/dev/null
 pkill -f "app-server --http --insecure-no-auth --port $PORT" 2>/dev/null

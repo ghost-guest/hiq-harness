@@ -416,6 +416,23 @@ GET /v1/sessions  → 真实会话列表（id/title/runtime_store/created_at…�
 - `prompt` → 走到 provider 调用后返回 `-32603 Runtime owner 400`，因为本机 **没有配 provider key**
   （`codewhale auth status`：`not signed in`，provider 表为空）。这不是代码问题，是环境缺 key。
 
+## 证据本身也有自检
+
+`evidence.sh` 产出的每一格现在都要过形状检查（`need`）：`cargo test` 的
+`N passed / M failed`、基线必须是 `20 20`、`healthz` 必须是 `"status":"ok"`、
+探针必须打出 `PASS`。**任何一格取不到值，脚本打印「证据不完整」并点名，然后 exit 1。**
+
+验过会红：把 `HARNESS_ENGINE_BIN` 指向一个不存在的路径，输出是
+
+```text
+## !! 证据不完整
+- 引擎 healthz → ''（期望匹配 /"status"\s*:\s*"ok"/）
+- 审批通道探针 → 'need HARNESS_ENGINE_BIN'（期望匹配 /^PASS /）
+```
+
+为什么加这个：这份脚本以前是 `set -uo pipefail` 但没有 `-e`，某一节编译失败时
+grep 抓不到 `test result`，表格里就留一格空白，而脚本照样 exit 0——读的人会以为那一格"没问题"。
+
 ## 已知缺口（不粉饰）
 
 按"是不是真的挡事"排序，每一条都写了为什么不挡。
