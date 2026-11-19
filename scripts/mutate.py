@@ -91,6 +91,12 @@ MUTANTS = [
      "self.cache.observe(input, cached);",
      "self.cache.observe(0, 0);",
      "harnessd", "缓存守卫永远拿到 0/0（永远\"没问题\"）"),
+    # GetEntries：引擎返回 items，orbit 读 entries
+    ("history-items-entries", "crates/harnessd/src/http_engine.rs",
+     'obj.insert("entries".into(), entries);',
+     'let _ = entries;',
+     "harnessd", "items 不翻译成 entries（界面看到空历史）"),
+
     # steer 的数组方言：mapping.rs 产出 input 数组，不是字符串
     ("steer-array-dialect", "crates/harnessd/src/http_engine.rs",
      '        .or_else(|| {\n            params.get("input").and_then(Value::as_array).and_then(|a| {\n                a.iter()\n                    .filter_map(|i| i.get("text").and_then(Value::as_str))\n                    .next()\n            })\n        })\n',

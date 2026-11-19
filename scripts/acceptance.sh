@@ -17,6 +17,15 @@ pass() { row "$1" "$2" "$3" "PASS"; }
 fail() { row "$1" "$2" "$3" "**FAIL**"; PROBLEMS+=("$1：$3"); }
 skip() { row "$1" "$2" "$3" "SKIP"; }
 
+# 验收跑的是**当前源码**，不是上一次 build 留下的二进制。
+# 踩过：改完 GetEntries 的翻译直接跑矩阵，用的是旧 harnessd，
+# 矩阵红了而单跑 PASS——查了半天才发现是二进制没更新。
+# 矩阵里"现场跑"的前提就是先编译现场的代码。
+if ! cargo build -q -p harnessd 2>/dev/null; then
+  echo "!! 编译 harnessd 失败，验收没有意义"
+  exit 1
+fi
+
 # ---------- S0：进程依赖，不碰引擎源码 ----------
 out=$(bash scripts/check-engine.sh 2>&1)
 if printf '%s' "$out" | grep -q "^ok "; then
@@ -75,6 +84,23 @@ elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
   fi
 else
   skip "S1 多回合" "同一线程连续回合，每轮闭合、前缀复用" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
+# GetEntries：跑完回合后界面能不能读回历史。S2 的验收条件之一，
+# 之前矩阵里完全没有。真引擎上引擎返回 items、orbit 读 entries。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S2 会话历史" "GetEntries 在真引擎上读回非空历史" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  hi=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" \
+       HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       CODEWHALE_HOME="$CODEWHALE_HOME" bash scripts/probe-history.sh 2>&1)
+  if printf '%s' "$hi" | grep -q "^PASS "; then
+    pass "S2 会话历史" "GetEntries 在真引擎上读回非空历史" "$(printf '%s' "$hi" | grep '^PASS ' | head -1)"
+  else
+    fail "S2 会话历史" "GetEntries 在真引擎上读回非空历史" "$(printf '%s' "$hi" | tail -3 | tr '\n' ' ')"
+  fi
+else
+  skip "S2 会话历史" "GetEntries 在真引擎上读回非空历史" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
 # steer：验引擎 API 接受插话 + harnessd 的 body 翻译正确。

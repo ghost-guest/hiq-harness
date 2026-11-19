@@ -191,6 +191,19 @@ fn sse_method_for(kind: &str, v: &Value) -> String {
     }
 }
 
+/// 引擎把历史放在 `items`，orbit 的 GetEntries 读 `entries`。
+/// 不翻译的话，引擎明明返回了完整历史，界面却显示空——"数据在、投影错"。
+/// 原 `items` 字段保留，不破坏别的消费者。
+fn with_entries_from_items(mut v: Value) -> Value {
+    if let Some(obj) = v.as_object_mut() {
+        if !obj.contains_key("entries") {
+            let entries = obj.get("items").cloned().unwrap_or_else(|| json!([]));
+            obj.insert("entries".into(), entries);
+        }
+    }
+    v
+}
+
 /// 从各路方言里取出 steer 文本。
 ///
 /// 抽成纯函数是为了能直接测 body：`serve_expect` 只匹配**路径**，
@@ -273,7 +286,8 @@ impl Engine for HttpEngine {
                 let id = params.get("threadId").and_then(Value::as_str).map(str::to_string)
                     .or_else(|| self.thread_id.clone())
                     .context("thread/read without a thread id")?;
-                self.curl("GET", &format!("/v1/threads/{id}"), None)
+                let v = self.curl("GET", &format!("/v1/threads/{id}"), None)?;
+                Ok(with_entries_from_items(v))
             }
             // Tool-enabled turn: this is the whole reason the HTTP transport exists.
             "prompt/run" | "prompt/request" => {
@@ -679,6 +693,36 @@ mod tests {
     /// 只认 `as_str()` 的话，这里会变成 `{"prompt": ""}` → 引擎 400
     /// `prompt is required`。mock 里原来只有字符串那种，所以一直绿；
     /// 真引擎探针发数组方言才抓到。
+    /// 真引擎实测：GET /v1/threads/{id} 返回 `items`，没有 `entries`。
+    /// orbit 的 GetEntries 读 `entries` —— 不翻译就是空历史。
+    #[test]
+    fn thread_read_exposes_items_as_entries() {
+        let engine_shape = json!({
+            "thread": { "id": "thr_1" },
+            "items": [
+                { "id": "i1", "kind": "user_message" },
+                { "id": "i2", "kind": "agent_message" }
+            ],
+            "turns": []
+        });
+        let out = with_entries_from_items(engine_shape.clone());
+        let entries = out["entries"].as_array().expect("必须有 entries 数组");
+        assert_eq!(entries.len(), 2, "items 要翻译成 entries");
+        assert_eq!(entries[0]["id"], "i1");
+        // 原字段保留，别的消费者不受影响。
+        assert_eq!(out["items"], engine_shape["items"]);
+
+        // 引擎哪天真的返回 entries 了，不要覆盖它。
+        let both = with_entries_from_items(json!({
+            "items": [1], "entries": [2, 3]
+        }));
+        assert_eq!(both["entries"], json!([2, 3]), "已有 entries 不能被 items 盖掉");
+
+        // 连 items 都没有的空线程，也要给个空数组（orbit 要求 entries 是数组）。
+        let empty = with_entries_from_items(json!({ "thread": { "id": "t" } }));
+        assert_eq!(empty["entries"], json!([]));
+    }
+
     #[test]
     fn steer_text_understands_every_dialect() {
         // mapping.rs 的 `Steer` 产出的是数组，不是字符串。

@@ -5,6 +5,40 @@
 
 ---
 
+## 逐条核对 S0–S5：矩阵之前漏了 S2 的 GetEntries
+
+没有继续"再挖一个 bug"，而是回到 `KERNEL-FUSION-PLAN.md` 的 S0–S5 **原始定义**
+逐条核对验收矩阵覆盖。发现 S2 的一条从没验过：**`GetEntries` + session 持久化**。
+
+真引擎实测：引擎 `GET /v1/threads/{id}` 返回的是 `items`（完整历史，含我们的标记），
+但 orbit 的 `GetEntries` 读 `entries`。不翻译 → 引擎有历史、界面显示空。
+又一个"数据在、投影错"。修 `with_entries_from_items()`，单测 + 变异体 + 真引擎探针钉住。
+矩阵 17 → 18 行。
+
+### 矩阵自己也会用旧二进制
+
+改完 GetEntries 直接跑矩阵，S2 会话历史那行红了，单跑却 PASS。
+原因：矩阵假设二进制是最新的，**没有保证**。加了开头 `cargo build -q -p harnessd`——
+"现场跑"的前提是现场编译。这是矩阵自己第 N 次暴露自身缺陷。
+
+### S3 的"流式中途插话"——如实标为未达成
+
+`KERNEL-FUSION-PLAN.md` 的 S3 验收白纸黑字："**流式中途插话生效**"。
+上一轮我把 steer 标成 LIMIT 就算过了——这不诚实，它是**硬指标没达成**。
+
+查了根因，机制其实半条都在：
+- `SteerGate` + `sup.pump()` 安全点释放（`server.rs:365-371`）已经实现；
+- 但 orbit 的 `Steer` 命令走的是 `mapping.rs → thread/message` **另一条路**，
+  从没进 `SteerGate`；
+- 而且 stdin 在 `drain_async_events()` 期间阻塞，中途命令进不来。
+
+真正打通要把 orbit compat 主循环改成"读线程 + channel + drain 里 try_recv 注入
+SteerGate"。这动的是主协议循环——**返工高风险区**。按"稳定优先、不反复返工"
+的原则，不在没有充分设计的情况下深夜动它。
+
+**结论：S3 的 steer 硬指标当前未达成，标为已知缺口，不假装完成。**
+这需要用户决策：是接受这个限制，还是投入一次主循环改造。
+
 ## steer：两层问题，别混为一谈
 
 `steer_targets_the_live_turn` 一直是绿的。真引擎探针一跑，两个问题一起冒出来：
