@@ -103,6 +103,20 @@ MUTANTS = [
      '',
      "harnessd", "steer 数组方言读不到 → 引擎 400 prompt is required"),
 
+    # HTTP/SSE 的 item 把种类放 `kind`，stdio 放 `type`。只认 type，
+    # 每条 assistant 回答都不进日志——回放/分叉/压缩全都没有内容。
+    ("http-item-kind-not-a-message", "crates/harnessd/src/server.rs",
+     'kind_field == "agent_message"',
+     'false',
+     "harnessd", "HTTP 方言的 agent_message 不再被认成回答"),
+
+    # 不流式的 provider 只有成品文本、没有 delta。不补一条 text_delta，
+    # 界面按 delta 渲染就是一个字都不显示。
+    ("nonstreaming-answer-never-reaches-ui", "crates/harnessd/src/server.rs",
+     'if !detail.trim().is_empty() {\n                            out.insert(0, UiEvent::new("text_delta", json!({ "delta": detail })));',
+     'if false {\n                            out.insert(0, UiEvent::new("text_delta", json!({ "delta": detail })));',
+     "harnessd", "非流式回答不再发给界面"),
+
     # fork 之后当前线程必须跟着换。只认 thread/start 的话，fork 后
     # state.thread_id 还是旧线程：回合发到新线程，get_entries 却读旧线程。
     ("fork-thread-state-stale", "crates/harnessd/src/server.rs",

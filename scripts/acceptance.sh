@@ -136,6 +136,26 @@ else
   skip "S3 deferred 命令" "回合中非 steer 命令不丢、顺序不乱" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
+# 用户实测：问一句"你的内核是什么"，跑了一个命令，然后没有下文。
+# 根因是日志只认 item.type，HTTP/SSE 用的是 item.kind —— 每条 assistant 回答
+# 都没进日志；不流式的 provider 更是界面一个字都没有。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S1 工具后收尾" "工具跑完模型必须给出最终回答（进日志）" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  fu=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" \
+       HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       CODEWHALE_HOME="$CODEWHALE_HOME" bash scripts/probe-tool-followup.sh 2>&1)
+  if printf '%s' "$fu" | grep -q "^PASS "; then
+    pass "S1 工具后收尾" "工具跑完模型必须给出最终回答（进日志）" "$(printf '%s' "$fu" | grep '^PASS ' | head -1)"
+  elif printf '%s' "$fu" | grep -q "^SKIP "; then
+    skip "S1 工具后收尾" "工具跑完模型必须给出最终回答（进日志）" "$(printf '%s' "$fu" | grep '^SKIP ' | head -1)"
+  else
+    fail "S1 工具后收尾" "工具跑完模型必须给出最终回答（进日志）" "$(printf '%s' "$fu" | grep -E '^FAIL|时间线' | head -2 | tr '\n' ' ')"
+  fi
+else
+  skip "S1 工具后收尾" "工具跑完模型必须给出最终回答（进日志）" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
 # S2 原文："fork 出新会话能跑到不同结论"。probe-fork 只验了"新线程回合能闭合"，
 # 没验两条会话真的分叉。这条验数据隔离：新线程的消息不能漏回原线程历史。
 if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then

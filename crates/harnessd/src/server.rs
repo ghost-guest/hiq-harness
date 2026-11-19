@@ -323,12 +323,40 @@ impl<E: Engine> Supervisor<E> {
             "item/completed" => {
                 let item = params.get("item").cloned().unwrap_or(Value::Null);
                 let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
-                // stdio 叫 agentMessage，HTTP/SSE 叫 agent_message——两种都认。
-                if (kind.contains("agentMessage") || kind == "agent_message")
-                    && !self.text_buffer.is_empty()
-                {
-                    let text = std::mem::take(&mut self.text_buffer);
-                    self.log.append("message", json!({ "role": "assistant", "text": text }))?;
+                // 两种方言：stdio 把种类放在 `type`（agentMessage），
+                // HTTP/SSE 放在 `kind`（agent_message）。
+                //
+                // 以前这里只看 `type`。后果不是"少个字段"，是**HTTP 路径下
+                // 每一条 assistant 回答都不进日志**——而"日志是事实，其余都是
+                // 投影"是这个内核的第一条原则。日志里没有的东西，回放、分叉、
+                // 压缩、历史读回来全都没有。用户看到的就是：跑了一个命令，
+                // 然后没有下文。
+                let kind_field = item.get("kind").and_then(Value::as_str).unwrap_or_default();
+                let is_agent_message = kind.contains("agentMessage")
+                    || kind == "agent_message"
+                    || kind_field.contains("agentMessage")
+                    || kind_field == "agent_message";
+                if is_agent_message {
+                    let streamed = std::mem::take(&mut self.text_buffer);
+                    // 有的 provider 不流式：一条 delta 都没有，只有 item 里的
+                    // 成品文本。界面按 delta 渲染的话，这时一个字都不显示。
+                    // 所以 delta 为空时，用 item.detail 补一条 text_delta 出去。
+                    let detail = item
+                        .get("detail")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let text = if streamed.trim().is_empty() {
+                        if !detail.trim().is_empty() {
+                            out.insert(0, UiEvent::new("text_delta", json!({ "delta": detail })));
+                        }
+                        detail
+                    } else {
+                        streamed
+                    };
+                    if !text.trim().is_empty() {
+                        self.log.append("message", json!({ "role": "assistant", "text": text }))?;
+                    }
                 }
                 // 两种方言：stdio 的 item.type 是 commandExecution/mcpToolCall，
                 // HTTP/SSE 的 item.kind 是 tool_call 且名字在 metadata.tool_name。
@@ -623,6 +651,44 @@ mod tests {
             Some("thr_new"),
             "GetEntries 必须读新线程，实际读了：{reads:?}"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// HTTP/SSE 的 item 把种类放在 `kind`，stdio 放在 `type`。
+    ///
+    /// 只看 `type` 的后果不是"少个字段"：HTTP 路径下**每一条 assistant 回答
+    /// 都不进日志**。日志里没有，回放/分叉/压缩/历史全都没有，用户看到的就是
+    /// "跑了一个命令，然后没有下文"。
+    #[test]
+    fn http_shaped_agent_message_reaches_the_log() {
+        let mut engine = MockEngine::default();
+        // 没有任何 delta——模拟不流式的 provider，只有成品文本。
+        engine.emit(
+            "item/completed",
+            json!({ "item": { "kind": "agent_message", "id": "i9", "detail": "一共 19 项" } }),
+        );
+        let log = tmp_log("http-agent-message");
+        let path = log.path().to_path_buf();
+        let mut sup = Supervisor::new(engine, log, 128_000);
+
+        let (_reply, events) = sup.handle("Prompt", json!({ "text": "hi" })).unwrap();
+
+        let texts: Vec<String> = sup
+            .log
+            .entries()
+            .iter()
+            .filter(|e| e.kind == "message")
+            .filter_map(|e| e.payload.get("text").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert_eq!(texts, vec!["一共 19 项".to_string()], "assistant 回答没进日志");
+
+        // 不流式时界面也要能看到——按 delta 渲染的话这里会是空的。
+        let streamed: String = events
+            .iter()
+            .filter(|e| e.kind == "text_delta")
+            .filter_map(|e| e.data.get("delta").and_then(Value::as_str))
+            .collect();
+        assert_eq!(streamed, "一共 19 项", "非流式回答没有发给界面");
         let _ = std::fs::remove_file(&path);
     }
 

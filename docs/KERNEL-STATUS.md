@@ -89,6 +89,45 @@ fork 探针偶发红：`HTTP 409 Workspace already has an active turn`。
 改成重试 5 次（实测第 5 次才成功），而不是一次 409 就判红。
 这和"命中率改观察项"是同一个原则：**外部的不确定性，不该变成内核的红**。
 
+## "问一句就一个命令，然后没有下文" —— 两个方言的坑只修了一半
+
+用户实测：在界面里问"你的内核是什么？" → 跑了一个命令 → 回合结束，没有回答。
+
+复现（`probe-tool-followup.sh`，真引擎 + 真 harnessd）：
+
+```
+turn.start → usage → tool.call → usage → tool.call → usage → turn.end
+```
+
+**没有任何 assistant 文本**。而引擎侧其实发得好好的：
+
+```
+tool_execution_start → tool_execution_end → ... → text_delta → agent_end
+```
+
+所以内核接线是通的，坏在投影。两处，同一个根因：
+
+1. **日志只认 `item.type`**。stdio 方言写 `type: "agentMessage"`，HTTP/SSE 写
+   `kind: "agent_message"`。代码只看了前者，于是 HTTP 路径下**每一条 assistant
+   回答都不进日志**。而"日志是事实，其余都是投影"是这个内核的第一条原则——
+   日志里没有的，回放、分叉、压缩、历史读回来全都没有。
+2. **不流式的 provider 界面一个字都不显示**。界面按 `text_delta` 渲染，
+   但有的 provider 一条 delta 都不发，只在 `item.detail` 里给成品文本。
+   这种情况以前直接丢掉了。
+
+修法：`type`/`kind` 两种都认；delta 为空时用 `item.detail` 补一条 `text_delta`
+发给界面。单测 `http_shaped_agent_message_reaches_the_log` 同时钉住
+"进日志"和"发给界面"两件事，两条变异体对应，红方向验过。
+
+**教训**：文件上方那段注释自己写着"两种方言都认"，但它只改到了工具那一支，
+回答那一支没改。以后凡是"两种方言"，得把同一份数据的所有分支一起列出来对账。
+
+修复后的时间线：
+
+```
+turn.start → usage → tool.call → usage → message → turn.end
+```
+
 ## fork 的第二层：id 换了，但"当前线程"有两个真相
 
 `probe-fork.sh` 证明 fork 后新线程能跑完回合。但 S2 原文要的是
@@ -293,7 +332,7 @@ cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产�
 
 ## S0–S5 验收矩阵（现场跑，一条命令）
 
-`bash scripts/acceptance.sh` —— 21 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
+`bash scripts/acceptance.sh` —— 22 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
 下面是最近一次真跑的输出（`HARNESS_ENGINE_BIN` + `CODEWHALE_HOME` 都给了，含真引擎项）：
 
 | 验收项 | 期望 | 实际 | 判定 |
@@ -301,12 +340,13 @@ cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产�
 | S0 进程依赖 | 没有任何 crate 依赖引擎 | ok 没有任何 crate 依赖引擎（进程依赖成立）；path 依赖都在仓库内 | PASS |
 | S0 检查会红 | 越界的 path 依赖必须被判红 | 注入 ../../../acc-outside 后确实报错 | PASS |
 | S1 接缝① | 流式文本 + 工具调用 + 收尾 | PASS 接缝① 真引擎：orbit 客户端 → harnessd → 引擎，流式文本 + 工具调用 + 收尾都在 | PASS |
-| S1 多回合 | 同一线程连续回合，每轮闭合、前缀复用 | PASS 多回合：3 个回合都闭合 ｜ 前缀复用：0 83 84 | PASS |
-| S2 会话历史 | GetEntries 在真引擎上读回非空历史 | PASS GetEntries：entries 非空（3 条），历史里找到标记 HISTORY_MARK_20937 | PASS |
+| S1 多回合 | 同一线程连续回合，每轮闭合、前缀复用 | PASS 多回合：3 个回合都闭合 ｜ 前缀复用：69 84 84 | PASS |
+| S2 会话历史 | GetEntries 在真引擎上读回非空历史 | PASS GetEntries：entries 非空（2 条），历史里找到标记 HISTORY_MARK_16894 | PASS |
 | S2 steer | 引擎接受插话 + body 方言翻译正确 | 引擎 steer API：200 —— 回合进行中插话被接受 PASS steer：引擎侧接受 + harnessd body 翻译正确  | PASS |
 | S3 deferred 命令 | 回合中非 steer 命令不丢、顺序不乱 | PASS 回合中发的两条非 steer 命令都回来了，顺序 ['g1', 'g2'] | PASS |
+| S1 工具后收尾 | 工具跑完模型必须给出最终回答（进日志） | PASS 工具 2 次，之后模型给出了最终回答：顶层共有 9 个普通文件（含隐藏的 `.DS_Store`）和 15 个目录，合计 24 个条目。 | PASS |
 | S2 fork 真分叉 | 新线程的消息不漏进原线程历史 | PASS 分叉成立：新线程有自己的消息 MB，原线程历史干净（不含 MB） | PASS |
-| S3 中途插话 | 回合进行中插话，模型输出含插话标记 | PASS 中途插话：回合进行中注入 steer → 模型输出含插话标记（5 处） | PASS |
+| S3 中途插话 | 回合进行中插话，模型输出含插话标记 | PASS 中途插话：回合进行中注入 steer → 模型输出含插话标记（4 处） | PASS |
 | S2 fork 后回合 | fork 出新线程，新线程上回合闭合 | PASS fork：原线程跑完 → fork 出新线程 → 新线程上回合也闭合 | PASS |
 | S3 守卫跨回合 | auto_approve=false 下每轮工具真跑、回合闭合 | PASS 守卫跨回合：2 轮都闭合，每轮工具数一致（1 1），审批通道 2/2 都通 | PASS |
 | S1 命令覆盖 | orbit 声明的命令与事件都有映射 | every_orbit_command_maps_to_something + every_orbit_type_we_claim_is_mapped 都通过 | PASS |
@@ -315,7 +355,7 @@ cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产�
 | S3 守卫 | 三件守卫语义正确 | 17 条守卫测试通过 | PASS |
 | S3 缓存守卫 | 命中率与压力两条线都判对 | 5 条缓存测试通过 | PASS |
 | S3 回合闭合 | 压缩失败也要写 turn.end | a_failed_compaction_does_not_swallow_turn_end 通过 | PASS |
-| S4 插件 | 真 Go 插件能 deny 一条命令 | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s；test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s | PASS |
+| S4 插件 | 真 Go 插件能 deny 一条命令 | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s；test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s | PASS |
 | S4 不空转 | 没有 go 时必须红，不能静默跳过 | 插件测试 ignored=0 | PASS |
 | S5 基线 | 通过率/返工率/误杀率有基线数字 | pass 1.0 / rework 0.01 / false-kill 0.0 / solver_fail 0 / cache 0.901 | PASS |
 | S5 门禁 | 四条门禁同时成立 | 门禁通过 | PASS |
