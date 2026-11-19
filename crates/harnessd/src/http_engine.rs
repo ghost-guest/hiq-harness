@@ -191,6 +191,26 @@ fn sse_method_for(kind: &str, v: &Value) -> String {
     }
 }
 
+/// 从各路方言里取出 steer 文本。
+///
+/// 抽成纯函数是为了能直接测 body：`serve_expect` 只匹配**路径**，
+/// 所以 `{"prompt": ""}` 也能骗过 mock，回到真引擎才 400。
+fn steer_text(params: &Value) -> String {
+    params
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| params.get("input").and_then(Value::as_str))
+        .or_else(|| {
+            params.get("input").and_then(Value::as_array).and_then(|a| {
+                a.iter()
+                    .filter_map(|i| i.get("text").and_then(Value::as_str))
+                    .next()
+            })
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// 未知事件也要带名字转发（`engine/<kind>`），否则 UI 只能看到一团。
 fn out_method(kind: &str) -> String {
     match kind {
@@ -334,12 +354,15 @@ impl Engine for HttpEngine {
                     .clone()
                     .or_else(|| params.get("turnId").and_then(Value::as_str).map(str::to_string))
                     .context("steer without a turn")?;
-                let text = params
-                    .get("text")
-                    .or_else(|| params.get("input"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                // 三种方言都要认：
+                //   - orbit 直接发 `{"text": "..."}`；
+                //   - `mapping.rs` 的 Steer 把它翻成 `{"input":[{"type":"text","text":"..."}]}`
+                //     ——这是 **数组**，不是字符串；
+                //   - 老的 stdio 方言可能发 `{"input": "..."}`。
+                // 只认 `as_str()` 的话，数组那条拿到空串 → `{"prompt": ""}` →
+                // 引擎 400 `prompt is required`，而 steer 看着"发出去了"。
+                // （真引擎探针抓到的：steer 从没验过，mock 里只有字符串那一种。）
+                let text = steer_text(&params);
                 self.curl(
                     "POST",
                     &format!("/v1/threads/{thread}/turns/{turn}/steer"),
@@ -650,6 +673,27 @@ mod tests {
         e.last_turn = Some("turn_9".into());
         let v = e.request("thread/message", json!({"text":"wait, use the other file"})).unwrap();
         assert_eq!(v["ok"], true);
+    }
+
+    /// mapping.rs 的 Steer 把文本翻成 `input` **数组**，不是字符串。
+    /// 只认 `as_str()` 的话，这里会变成 `{"prompt": ""}` → 引擎 400
+    /// `prompt is required`。mock 里原来只有字符串那种，所以一直绿；
+    /// 真引擎探针发数组方言才抓到。
+    #[test]
+    fn steer_text_understands_every_dialect() {
+        // mapping.rs 的 `Steer` 产出的是数组，不是字符串。
+        let mapped = json!({
+            "threadId": "thr_1",
+            "input": [{ "type": "text", "text": "use the other file" }]
+        });
+        assert_eq!(steer_text(&mapped), "use the other file");
+
+        // orbit 直发 text、老 stdio 的字符串 input，都要继续认。
+        assert_eq!(steer_text(&json!({ "text": "direct" })), "direct");
+        assert_eq!(steer_text(&json!({ "input": "plain" })), "plain");
+
+        // 空数组不能变成空串骗过引擎（真引擎会回 400 prompt is required）。
+        assert_eq!(steer_text(&json!({ "input": [] })), "");
     }
 
     #[test]

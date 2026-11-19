@@ -70,13 +70,20 @@ for l in open('/tmp/fork-harnessd.log'):
     if d.get('type')=='response' and d.get('id')=='a1':
         print((d.get('data') or {}).get('thread',{}).get('id','')); break
 ")
-send '{"id":"a2","type":"fork"}'
+# fork 要求引擎那边回合真的结束。`turn.end` 落账只说明 harnessd 看见了，
+# 引擎自己可能还慢一拍——实测拿到 409 "Workspace already has an active turn"。
+# 所以这里重试几次，而不是一次 409 就判红（那是引擎约束，不是内核缺陷）。
 FORKED=0
-for _ in $(seq 1 40); do
-  if grep -q '"id":"a2"' "$WS/timebus.ndjson" 2>/dev/null || \
-     grep -q '"id":"a2".*success.*false' /tmp/fork-harnessd.log 2>/dev/null; then FORKED=1; break; fi
-  sleep 0.5
+for attempt in 1 2 3 4 5; do
+  send "{\"id\":\"a2_$attempt\",\"type\":\"fork\"}"
+  for _ in $(seq 1 30); do
+    if grep -q "\"id\":\"a2_$attempt\",\"success\":true" /tmp/fork-harnessd.log 2>/dev/null; then
+      FORKED=1; break 2
+    fi
+    sleep 0.3
+  done
 done
+[ "$FORKED" -eq 1 ] || echo "注意：5 次 fork 都失败（看 /tmp/fork-harnessd.log）"
 # 3) 在新线程上再跑一个回合——**要害在这里**
 send '{"id":"a3","type":"prompt","message":"回一个字：好"}'
 if ! wait_end 2; then
@@ -113,12 +120,18 @@ PROBLEMS=()
 [ "${ENDS:-0}" -eq "${STARTS:-0}" ] || PROBLEMS+=("回合没闭合：start=${STARTS:-0} end=${ENDS:-0}")
 NEW_THREAD=$(python3 -c "
 import json
+NEW = ''
 for l in open('/tmp/fork-harnessd.log'):
     if not l.startswith('{'): continue
     try: d=json.loads(l)
     except: continue
-    if d.get('type')=='response' and d.get('id')=='a2':
-        print(d.get('data',{}).get('id','')); break
+    # 重试过：前几条 a2_N 会是 409，只有 success:true 那条才有新 id。
+    # 取**最后一条**成功的，不是第一条（第一条失败时 id 为空）。
+    if d.get('type')=='response' and str(d.get('id','')).startswith('a2_') and d.get('success'):
+        data = d.get('data') or {}
+        if isinstance(data, dict) and data.get('id'):
+            NEW = data['id']
+print(NEW)
 ")
 [ -n "$NEW_THREAD" ] || PROBLEMS+=("fork 没返回新线程 id")
 [ "$NEW_THREAD" != "$OLD_THREAD" ] || PROBLEMS+=("fork 前后线程 id 一样（$OLD_THREAD）：$NEW_THREAD")

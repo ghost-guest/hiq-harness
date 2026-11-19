@@ -91,6 +91,12 @@ MUTANTS = [
      "self.cache.observe(input, cached);",
      "self.cache.observe(0, 0);",
      "harnessd", "缓存守卫永远拿到 0/0（永远\"没问题\"）"),
+    # steer 的数组方言：mapping.rs 产出 input 数组，不是字符串
+    ("steer-array-dialect", "crates/harnessd/src/http_engine.rs",
+     '        .or_else(|| {\n            params.get("input").and_then(Value::as_array).and_then(|a| {\n                a.iter()\n                    .filter_map(|i| i.get("text").and_then(Value::as_str))\n                    .next()\n            })\n        })\n',
+     '',
+     "harnessd", "steer 数组方言读不到 → 引擎 400 prompt is required"),
+
     # 回合 id 必须能穿过 handle 的包装；丢了它，第 2 回合会被误判成"被拒"
     ("turn-id-dropped-in-wrap", "crates/harnessd/src/server.rs",
      '"turn_id": out.get("turn_id"),',

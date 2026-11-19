@@ -77,6 +77,22 @@ else
   skip "S1 多回合" "同一线程连续回合，每轮闭合、前缀复用" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
+# steer：验引擎 API 接受插话 + harnessd 的 body 翻译正确。
+# compat 层的单线程限制在探针里如实标 LIMIT，不假装它能中途插话。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S2 steer" "引擎接受插话 + body 方言翻译正确" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  st=$(env HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       CODEWHALE_HOME="$CODEWHALE_HOME" bash scripts/probe-steer.sh 2>&1)
+  if printf '%s' "$st" | grep -q "^PASS "; then
+    pass "S2 steer" "引擎接受插话 + body 方言翻译正确" "$(printf '%s' "$st" | grep -E '^引擎 steer|^PASS ' | head -2 | tr '\n' ' ')"
+  else
+    fail "S2 steer" "引擎接受插话 + body 方言翻译正确" "$(printf '%s' "$st" | tail -3 | tr '\n' ' ')"
+  fi
+else
+  skip "S2 steer" "引擎接受插话 + body 方言翻译正确" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
 # fork 之后新线程还能跑完回合。单元测试只验了"id 换了"，
 # 没验 SSE 订阅也跟着换——真引擎上那会让回合静默挂住。
 if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then

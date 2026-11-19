@@ -5,6 +5,33 @@
 
 ---
 
+## steer：两层问题，别混为一谈
+
+`steer_targets_the_live_turn` 一直是绿的。真引擎探针一跑，两个问题一起冒出来：
+
+**① 真 bug（已修）：body 方言对不上。**
+`mapping.rs` 的 `Steer` 把文本翻成 `input` **数组**
+（`[{type:"text",text:"..."}]`），但 `http_engine` 只 `as_str()` → 拿到空串 →
+`{"prompt": ""}` → 引擎 400 `prompt is required`。
+mock 里只有 `{"text": "..."}` 那一种，所以从没测出来。
+抽成 `steer_text()` 认三种方言，单测 + 变异体钉住。
+
+**② 架构限制（未修，如实记录）：compat 层做不了中途插话。**
+orbit compat 是**单线程同步循环**，`prompt` 命令会 `drain_async_events()`
+一直阻塞到回合结束。此时 steer 命令根本进不来。
+但**引擎自己的 steer API 是好的**——直连实测：回合进行中发 steer，返回 200。
+限制在我们这一层，不在引擎。
+
+探针不再假装 compat 能中途插话：A 直连引擎验 API，B 单测验 body 翻译，
+然后明写 `LIMIT`。**把不能做的事说清楚，比假装有要值钱。**
+
+### fork 的 409 是引擎约束，不是内核缺陷
+
+fork 探针偶发红：`HTTP 409 Workspace already has an active turn`。
+`turn.end` 落账只说明 harnessd 看见了，引擎自己还可能慢一拍。
+改成重试 5 次（实测第 5 次才成功），而不是一次 409 就判红。
+这和"命中率改观察项"是同一个原则：**外部的不确定性，不该变成内核的红**。
+
 ## fork：单元测试只验了"id 换了"，没验"还能跑"
 
 `fork_switches_to_the_new_thread` 一直是绿的。但真引擎上 fork 之后，
