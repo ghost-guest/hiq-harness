@@ -29,16 +29,37 @@ KNOWN_RED="bench/known-red.txt"
 suite_names() { # 从 cargo 输出里取出 failures 块中的用例名
   sed -n '/^failures:$/,/^$/p' | grep -E '^[[:space:]]{4}[A-Za-z_]' | sed 's/^[[:space:]]*//' | sort -u
 }
-check_red() { # suite_label, output
-  local label="$1" out="$2" names unknown
+FLAKY=()   # 单跑就过、只在全量并发时才红的用例（观察项，不判不合格）
+check_red() { # suite_label, output, [recheck_dir]
+  local label="$1" out="$2" recheck_dir="${3:-}" names unknown
   names=$(printf '%s\n' "$out" | suite_names)
   if [ -z "$names" ]; then return 0; fi
   unknown=$(printf '%s\n' "$names" | while read -r n; do
               [ -z "$n" ] && continue
               grep -q "^${label}::${n}\$" "$KNOWN_RED" 2>/dev/null || echo "$n"
             done)
-  if [ -n "$unknown" ]; then
-    PROBLEMS+=("$label 出现未登记的失败：$(printf '%s' "$unknown" | tr '\n' ' ')")
+  local real=""
+  while read -r n; do
+    n="$(printf '%s' "$n" | xargs)"   # 去前导/尾随空格：unknown 是拼接出来的，带空格
+    [ -z "$n" ] && continue
+    if [ -n "$recheck_dir" ]; then
+      # 未登记的失败**先单跑确认**：全量并发跑时偶发红（flaky）的用例，
+      # 单独跑会 PASS。只有单跑明确 PASS 才降级为观察项；
+      # 单跑仍红、或压根跑不起来，一律当真失败——绝不洗白。
+      # 先整段收到变量里再判断，别用 `<cmd> | grep -q`：
+      # grep -q 一匹配就关管道，cargo 吃 SIGPIPE，在 <<< heredoc 上下文里
+      # 会让"单跑"根本没发生却判成失败。踩过：0.23 秒就返回，cargo 没跑。
+      local solo=""
+      solo=$(cd "$recheck_dir" && cargo test -p orbit-pi "$n" 2>&1 </dev/null)
+      if printf '%s' "$solo" | grep -q "test result: ok"; then
+        FLAKY+=("${label}::${n}（全量偶发红，单独跑 PASS）")
+        continue
+      fi
+    fi
+    real="$real $n"
+  done <<< "$unknown"
+  if [ -n "$(printf '%s' "$real" | tr -d ' ')" ]; then
+    PROBLEMS+=("$label 出现未登记的失败：$(printf '%s' "$real" | xargs)")
   fi
 }
 
@@ -53,6 +74,20 @@ if [ "${1:-}" = "--selftest-red" ]; then
     exit 0
   fi
   echo "selftest-red FAILED：${PROBLEMS[*]:-（什么都没抓到）}"
+  exit 1
+fi
+
+if [ "${1:-}" = "--selftest-flaky" ]; then
+  # 用一条真实存在、单独跑能过的用例，假装它是"未登记的失败"。
+  # 传了 recheck_dir → 单跑确认会 PASS → 应进 FLAKY，不进 PROBLEMS。
+  PROBLEMS=(); FLAKY=()
+  check_red orbit-pi 'failures:
+    updater::tests::update_parent_lock_serializes_helpers' "apps/orbit"
+  if [ ${#PROBLEMS[@]} -eq 0 ] && [ ${#FLAKY[@]} -eq 1 ]; then
+    echo "selftest-flaky ok：全量偶发红、单跑 PASS 的用例被记为观察项，没洗白真失败"
+    exit 0
+  fi
+  echo "selftest-flaky FAILED：PROBLEMS=${PROBLEMS[*]:-无} FLAKY=${FLAKY[*]:-无}"
   exit 1
 fi
 
@@ -103,12 +138,20 @@ say "| \`cargo test -p orbit-rpc\`（接缝① 客户端） | $rpc |"
 pi_out=$(cd apps/orbit && cargo test -p orbit-pi 2>&1)
 pi=$(printf '%s\n' "$pi_out" | grep -E "^test result" | tail -1 | sed -E 's/^test result: (FAILED|ok)\. //; s/; [0-9]+ (ignored|measured)[^;]*//g')
 need "orbit-pi 测试结果" "$pi" 'passed; [0-9]+ failed'
-check_red "orbit-pi" "$pi_out"
+check_red "orbit-pi" "$pi_out" "apps/orbit"
 pi_names=$(printf '%s\n' "$pi_out" | suite_names | tr '\n' ' ')
 say "| \`cargo test -p orbit-pi\`（GPUI 界面，无头） | $pi |"
 if [ -n "$pi_names" ]; then
   say
   say "orbit-pi 的红点（每一条都在 \`bench/known-red.txt\` 里登记了原因）：\`$pi_names\`"
+fi
+# 偶发红要单独说清楚：它既不是"允许红"，也不是"真失败"。
+# 空也要打印——"查过了，这次没有"和"没查"必须区分开。
+if [ ${#FLAKY[@]} -gt 0 ]; then
+  say
+  say "orbit-pi 偶发红（全量并发时才红、单独跑 PASS，不计入红点）：\`${FLAKY[*]}\`"
+else
+  say "orbit-pi 偶发红：本次没有（每条未登记失败都单跑确认过，见上）"
 fi
 say
 
