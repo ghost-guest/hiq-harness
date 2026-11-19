@@ -194,6 +194,37 @@ mod tests {
     }
 
     #[test]
+    /// 扁平化：字段必须**直接**在顶层，不能套一层。
+    ///
+    /// orbit 的事件解析用的是**整行**做 value（`Event::from_value`），
+    /// 它按 `{"type": ..., <字段直接在顶层>}` 去读。套一层 `"value"` 之后
+    /// 它读不到任何字段——表现为**界面一片空白**，而且不报错。
+    ///
+    /// 变异扫描抓到的：把 `flat` 改成嵌套，整个 crate 的测试全绿。
+    /// 因为所有测试都走 `text_delta` 那条路径，那条**不经过 `flat`**。
+    #[test]
+    fn flat_keeps_fields_at_the_top_level() {
+        let out = flat("message_start", &json!({ "id": "m1", "role": "assistant" }));
+        assert_eq!(out["type"], "message_start");
+        assert_eq!(out["id"], "m1", "字段必须在顶层，orbit 不会往里层找");
+        assert_eq!(out["role"], "assistant");
+        assert!(
+            out.get("value").is_none(),
+            "不能再套一层 value —— orbit 把整行当 value，嵌套了就什么都读不到（界面空白）"
+        );
+
+        // 非对象也要能转，且内容不能丢。
+        let arr = flat("x", &json!([1, 2, 3]));
+        assert_eq!(arr["type"], "x");
+        assert_eq!(arr["value"], json!([1, 2, 3]), "非对象时放 value，但只在顶层");
+
+        // `type` 由 kind 决定，data 里的 type 不能覆盖它。
+        let clash = flat("real", &json!({ "type": "fake", "a": 1 }));
+        assert_eq!(clash["type"], "real", "data 里的 type 不能盖掉 kind");
+        assert_eq!(clash["a"], 1);
+    }
+
+    #[test]
     fn text_delta_becomes_message_update() {
         // 键名必须与 orbit 的解析器一致（`assistantMessageEvent`）；写错不报错，
         // 界面只会一片空白，所以这条断言盯的是**解析器读的那个键**。

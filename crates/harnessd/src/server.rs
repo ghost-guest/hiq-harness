@@ -669,6 +669,20 @@ mod tests {
             events.iter().any(|e| e.kind == "compact_requested"),
             "满窗口 + 热前缀应当请求压缩"
         );
+        // 失败必须**记成失败**。变异扫描抓到的：把 `compact_failed` 改成
+        // `compact_ok`，测试全绿——因为没人看这个事件名。
+        // 这是这一夜反复出现的同一类病：坏消息被翻译成好消息。
+        // 压缩请求失败如果看起来像成功，用户会以为上下文被整理了，其实没有。
+        let failed: Vec<_> = events.iter().filter(|e| e.kind.contains("compact")).collect();
+        assert!(
+            failed.iter().any(|e| e.kind == "compact_failed"),
+            "压缩请求失败必须发 compact_failed，实际发的是 {:?}",
+            failed.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+        assert!(
+            !failed.iter().any(|e| e.kind == "compact_ok"),
+            "失败不能记成成功"
+        );
 
         let done = sup
             .on_notification("turn/completed", json!({}))

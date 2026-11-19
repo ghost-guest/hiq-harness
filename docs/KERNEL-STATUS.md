@@ -13,7 +13,7 @@
 `nudges_then_refuses_then_stops` 从没验过 stop。名字、注释、文档都能骗人，
 只有"改坏它，看它红不红"骗不了人。
 
-最近一次全量（`MUTATE=1 bash scripts/gate.sh` 里跑）：
+最近一次全量（`MUTATE=1 bash scripts/gate.sh` 里跑）——**14 个，全部是测试挡的**：
 
 | 变异体 | 改坏了什么 | 结果 | 说明 |
 |---|---|---|---|
@@ -25,9 +25,30 @@
 | cache-pressure | 压力线归零（永远觉得窗口满） | KILLED | 测试红了 |
 | approval-allow-word | 裸 "allow" 不再被认（引擎会 400） | KILLED | 测试红了 |
 | turn-completed-dropped | 正常完成的回合不再被认作完成 | KILLED | 测试红了 |
+| silent-drop-guard | 被拒的回合又变回静默成功 | KILLED | 测试红了 |
+| compact-failure-silent | 压缩失败被记成成功（坏消息翻译成好消息） | KILLED | 测试红了 |
+| protocol-turn-end | protocol 层不认 turn.completed | KILLED | 测试红了 |
+| orbit-flat-nesting | 扁平化变成嵌套（界面会读不到） | KILLED | 测试红了 |
+| cache-observed-values | 缓存守卫永远拿到 0/0（永远"没问题"） | KILLED | 测试红了 |
 | mapping-unknown-command | Prompt 命令掉进兜底 | KILLED | 测试红了 |
 
-全部 9 个变异体都被抓到（没有 STALE，也没有 SURVIVED）。
+全部 14 个变异体都被抓到（没有 STALE，也没有 SURVIVED）。
+
+### 扩到"这一夜修过的每个缺陷"
+
+第一版只有 9 个变异体，覆盖的是守卫/缓存/审批/回合。后来把范围改成
+**"这一夜修过的每个 bug，都问一遍：有测试守着吗"**，加进来 5 个，抓到两个漏洞：
+
+- **`orbit-flat-nesting`**：把 `flat()` 改成嵌套，测试全绿。因为所有测试都走
+  `text_delta` 那条路径，**那条不经过 `flat`**。而"界面一片空白"正是当年
+  这个 bug 的症状——orbit 把整行当 value，套一层就什么都读不到，还不报错。
+  补 `flat_keeps_fields_at_the_top_level`。
+- **`compact-failure-silent`**：把 `compact_failed` 改成 `compact_ok`，测试全绿。
+  又是"坏消息被翻译成好消息"——用户会以为上下文被整理了，其实没有。
+  补进 `a_failed_compaction_does_not_swallow_turn_end`。
+
+这两条合起来说明一件事：**修复本身不会自动带上测试**。修的时候想的是
+"让它不再坏"，不是"证明它不再坏"。所以修完还得问一句：把它改回去，谁会红？
 
 **扫描器自己也被验过会红**，抓出三个它自己的假绿：
 
