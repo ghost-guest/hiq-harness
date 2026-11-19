@@ -408,10 +408,20 @@ impl<E: Engine> Supervisor<E> {
                         if self.state.auto_compact {
                             if let Some(thread) = self.state.thread_id.clone() {
                                 self.plugins.broadcast("compact.pre", json!({ "reason": reason }));
-                                self.engine.request(
+                                // 压缩请求**不能**用 `?`：这里正处在 SSE 事件流里，
+                                // 一个失败的方法会中断整条流，`turn.completed` 就永远读不到，
+                                // 回合在 timebus 里永远不闭合（实测就是这样：
+                                //  timebus 只有 turn.start + usage 两条）。
+                                // 压缩是建议，不是回合的一部分——失败要说出来，但别拖垮事件流。
+                                if let Err(e) = self.engine.request(
                                     "thread/compact/start",
                                     json!({ "threadId": thread, "reason": reason }),
-                                )?;
+                                ) {
+                                    out.push(UiEvent::new(
+                                        "compact_failed",
+                                        json!({ "reason": reason, "error": e.to_string() }),
+                                    ));
+                                }
                             }
                         }
                         out.push(UiEvent::new("compact_requested", json!({ "reason": reason })));
@@ -604,6 +614,69 @@ mod tests {
         sup.pump().unwrap();
         let proj = sup.log.project();
         assert!(proj.blocked().is_some(), "unobserved effect must block");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 压缩请求失败时，**回合仍然要能闭合**。
+    ///
+    /// 这个 bug 在真引擎上表现为：timebus 只有 `turn.start` + `usage` 两条，
+    /// 没有 `turn.end`。原因是 `thread/compact/start` 在 HTTP 传输上没实现，
+    /// 而它当时是用 `?` 调的——一个失败的建议把整条事件流打断了，
+    /// 后面真正的 `turn.completed` 就再也读不到。
+    /// 日志不闭合，投影就全错——"日志是事实"这条原则被悄悄违反。
+    #[test]
+    fn a_failed_compaction_does_not_swallow_turn_end() {
+        let log = tmp_log("compact-fail");
+        let path = log.path().to_path_buf();
+        // 引擎：压缩请求一律失败（HTTP 上就是没这个方法），usage 报满窗口 + 热前缀。
+        // 一个"压缩一定失败"的引擎。MockEngine 的 reply 只能返回 Value，
+        // 所以这里用一个最小的自建引擎，专门让 thread/compact/start 报错。
+        struct FailingCompact(MockEngine);
+        impl crate::engine::Engine for FailingCompact {
+            fn request(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
+                if method == "thread/compact/start" {
+                    anyhow::bail!("this transport has no compaction endpoint");
+                }
+                self.0.request(method, params)
+            }
+            fn respond(&mut self, id: u64, result: Value) -> anyhow::Result<()> {
+                self.0.respond(id, result)
+            }
+            fn notifications(&mut self) -> Vec<crate::protocol::Frame> {
+                self.0.notifications()
+            }
+            fn name(&self) -> String {
+                self.0.name()
+            }
+        }
+        let mut sup = Supervisor::new(
+            FailingCompact(MockEngine::new(|_, _| json!({}))),
+            log,
+            9000,
+        );
+        sup.state.thread_id = Some("thr_1".into());
+        sup.state.auto_compact = true;
+        sup.cache.observe(12_000, 11_800);
+
+        // 直接喂一个 usage 通知，再喂一个 turn/completed——后者必须被投影看见。
+        let events = sup
+            .on_notification(
+                "thread/tokenUsage/updated",
+                json!({ "usage": { "input_tokens": 12000, "cached_tokens": 11800 } }),
+            )
+            .expect("usage 处理不该失败");
+        assert!(
+            events.iter().any(|e| e.kind == "compact_requested"),
+            "满窗口 + 热前缀应当请求压缩"
+        );
+
+        let done = sup
+            .on_notification("turn/completed", json!({}))
+            .expect("压缩失败不能打断事件流");
+        assert!(
+            done.iter().any(|e| e.kind == "turn_end"),
+            "turn.completed 必须变成 turn_end，否则 timebus 里的回合永远不闭合"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

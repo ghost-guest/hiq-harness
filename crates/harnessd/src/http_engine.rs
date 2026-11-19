@@ -243,6 +243,13 @@ impl Engine for HttpEngine {
                 if let Some(e) = params.get("effort").and_then(Value::as_str) {
                     body["reasoning_effort"] = json!(e);
                 }
+                // **先订阅，再发回合。** 这个顺序不是风格问题：
+                // 引擎的 SSE 是单订阅者，而且在没有订阅者时它会让回合停住
+                // （实测 `POST /turns` 返回 201，但 60 秒内 items=0、
+                //  `turn.started` 都不出现；下一回合直接 409
+                //  `Thread already has an active turn`）。
+                // 之前的顺序是发完才订阅，于是第一回合永远不结束。
+                self.ensure_stream();
                 let v = self.curl("POST", &format!("/v1/threads/{id}/turns"), Some(&body))?;
                 if let Some(t) = v.get("turn_id").or_else(|| v.pointer("/turn/id")).and_then(Value::as_str) {
                     self.last_turn = Some(t.to_string());
@@ -496,11 +503,19 @@ mod tests {
     fn serve_expect(needle: &'static str, reply: &'static str) -> String {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
+        // 要接**多次**连接：客户端在发回合之前会先挂上 SSE（引擎没有订阅者
+        // 就不推进回合），那也是一条连接。只接一次的话，SSE 会把唯一的名额吃掉。
         std::thread::spawn(move || {
-            if let Ok((mut s, _)) = l.accept() {
+            for _ in 0..4 {
+                let Ok((mut s, _)) = l.accept() else { return };
                 let mut buf = [0u8; 8192];
                 let n = s.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                if req.contains("/events") {
+                    // 保持打开，别回 JSON：这是 SSE，测试不消费它的内容。
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
                 let (status, body) = if req.contains(needle) {
                     ("200 OK", reply)
                 } else {

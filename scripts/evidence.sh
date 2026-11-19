@@ -234,11 +234,31 @@ say '跑一个 1.5 万 token 的回合，让缓存守卫判定"窗口满了且�
 say
 CMP_HOME="$(mktemp -d /tmp/evidence-cmp.XXXXXX)"
 [ -f "$HOME_DIR/config.toml" ] && cp "$HOME_DIR/config.toml" "$CMP_HOME/" 2>/dev/null
+# 这一节最慢：命中率是上游给的，可能要试几次才触发压缩。
+# 给它明确的上限（默认 3 次尝试 / 每回合 60 秒），超了就说超了——
+# 不能让整轮证据跑到 10 分钟被外部砍掉，那样什么都看不到。
 cmp=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" HARNESS_ENGINE_BIN="$ENGINE_BIN" \
-        CODEWHALE_HOME="$CMP_HOME" bash scripts/probe-compact.sh 2>&1)
+        CODEWHALE_HOME="$CMP_HOME" ROUNDS="${CMP_ROUNDS:-4}" \
+        ATTEMPTS="${CMP_ATTEMPTS:-3}" TURN_BUDGET="${CMP_TURN_BUDGET:-60}" \
+        bash scripts/probe-compact.sh 2>&1)
 code_block printf '%s\n' "$cmp"
 need "真压缩探针" "$cmp" '^PASS compact.pre'
 rm -rf "$CMP_HOME" 2>/dev/null || true
+
+say "## 9. 界面真的渲染出来了（OCR，不是人眼）"
+say
+say '界面这一格以前是"没人看过"。现在用截图 + OCR 断言关键控件在位——'
+say '锁屏时会明确 SKIP（截到的是登录框，不是界面），不会假装通过。'
+say
+ui=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" HARNESS_ENGINE_BIN="$ENGINE_BIN" \
+        CODEWHALE_HOME="$HOME_DIR" bash scripts/probe-ui.sh 2>&1)
+ui_code=$?
+code_block printf '%s\n' "$(printf '%s' "$ui" | grep -E '^(--- OCR|PASS|FAIL|SKIP|## |  - )' | head -8)"
+case "$ui_code" in
+  0) need "界面探针" "$ui" '^PASS 界面渲染' ;;
+  2) say '界面探针：SKIP（屏幕锁着，这一格本轮没验，不算通过）' ;;
+  *) need "界面探针" "$ui" '^PASS 界面渲染' ;;
+esac
 
 if [ ${#PROBLEMS[@]} -gt 0 ]; then
   say

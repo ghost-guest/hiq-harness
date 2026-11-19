@@ -489,6 +489,48 @@ self.cache.observe(prompt, cached);
 修法就一行（用已经解析好的值），另加了一个测试 `the_cache_guard_reads_the_http_usage_dialect`
 把它钉住。修完立刻就能触发，说明之前不是"条件苛刻"，是根本没在判断。
 
+### SSE 的顺序：先订阅，再发回合
+
+引擎的 SSE 是**单订阅者**，而且**没有订阅者时它不推进回合**。实测：
+`POST /v1/threads/{id}/turns` 返回 201，然后 60 秒内 `items=0`，
+连 `turn.started` 都不出现；再发一回合直接 409 `Thread already has an active turn`。
+
+harnessd 原来的顺序是"发完回合再订阅"，于是**第一回合永远不结束**。
+改成先订阅再发。这不是风格问题，是这一层唯一的正确顺序。
+
+写测试时还发现：测试里的 mock server 只 `accept()` 一次，SSE 订阅会把唯一的名额
+吃掉，于是"发回合"那一步连不上。mock 也得能接多次连接——测试替身的形状
+本身就是一条断言。
+
+### 一个失败的建议，把整条事件流打断了
+
+`thread/compact/start` 在 HTTP 传输上**没有实现**。它当时用 `?` 调用，
+而调用点在 SSE 事件处理里：一次失败就让 `on_notification` 返回 Err，
+后面真正的 `turn.completed` 再也读不到。
+
+结果：timebus 里只有 `turn.start` + `usage` 两条，**回合永远不闭合**。
+`turn_open` 永远是 true，所有基于它的投影都错。
+
+修法：压缩是**建议**，不是回合的一部分。失败要记下来（`compact_failed` 事件），
+但不能拖垮事件流。`a_failed_compaction_does_not_swallow_turn_end` 钉住这条，
+先验过它会红（把 `?` 放回去 → `turn.completed` 不再变成 `turn_end`）。
+
+修完 timebus 正常闭合：`turn.start, usage, turn.end, turn.start`。
+
+### 界面这一格：从"没人看过"变成可复跑
+
+以前 `docs/KERNEL-STATUS.md` 里写着"GUI 没人看过"——那是诚实，但不是证据。
+现在 `scripts/probe-ui.sh`：起引擎 + 起 orbit + 截图 + OCR，断言侧栏项目区、
+会话搜索框、任务输入框都在。锁屏时明确 `SKIP`（截到的是登录框，不是界面），
+不装通过。
+
+08:29 屏幕解锁时实测通过，OCR 读到 `项目 / 搜索会话 / 描述任务 / DeepSeek V4.1 Flash / 已连接`。
+
+红向也验过两次：
+- `/bin/sleep` 冒充 orbit → `FAIL 探针起的 orbit 已经退出`（第一版这里是**假绿**：
+  屏幕上有上一轮残留的窗口，OCR 照样读到了界面。所以探针现在先清场，再检查自己的进程还活着。）
+- 喂一张纯白图 → 三个缺失项逐条列出来
+
 ### 又一个"看着成功、其实丢了"
 
 `probe-compact.sh` 一次塞 4 条 prompt 进去，结果只有第 1 条真的跑了，另外 3 条
