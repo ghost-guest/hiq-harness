@@ -107,8 +107,21 @@ impl<E: Engine> Supervisor<E> {
                 }
                 let mut reply = self.engine.request(&method, params)?;
 
-                // thread/start is the only place a new thread id appears.
-                if method == "thread/start" {
+                // 哪些方法会让「当前线程」变。
+                //
+                // 以前这里只认 `thread/start`，注释还写着"新线程 id 只会在这里出现"。
+                // 那句话是错的：`thread/fork` 也创建线程。
+                //
+                // 踩过的后果——fork 之后出现**两个真相**：
+                //   - http_engine 自己把 thread_id 换成新线程（回合发到新线程）
+                //   - Supervisor 的 state.thread_id 还是旧线程（get_entries 读旧线程）
+                // 于是「在新线程上跑的回合，读回来的历史是旧线程的」。
+                // get_entries / get_messages / 再次 fork / set_session_name 全都读错线程。
+                // 这条只能靠真引擎探针抓：单测里 mock 不区分线程。
+                if matches!(
+                    method.as_str(),
+                    "thread/start" | "thread/fork" | "thread/resume"
+                ) {
                     // Two dialects: stdio nests the id under `thread`, the HTTP
                     // runtime returns the thread object at the top level.
                     if let Some(id) = reply
@@ -563,6 +576,53 @@ mod tests {
         assert_eq!(sup.state.thread_id.as_deref(), Some("thr_http"));
         assert!(sup.engine.calls().iter().any(|c| c == "prompt/run"), "prompt was dropped");
         assert_eq!(reply["output"], "hi");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// fork 之后，**当前线程必须跟着换**。
+    ///
+    /// 踩过：`handle` 只认 `thread/start` 会给出新线程 id，注释还写着
+    /// "新线程 id 只会在这里出现"。fork 也会创建线程，于是 fork 后出现两个真相：
+    ///   - http_engine 自己换成新线程 → 回合发到新线程
+    ///   - Supervisor 的 state.thread_id 还是旧线程 → get_entries 读旧线程
+    /// 结果"新线程上跑的回合，读回来的历史是旧线程的"。
+    /// 单测里 mock 不区分线程，真引擎探针（probe-fork-branch.sh）才抓到。
+    #[test]
+    fn fork_moves_the_current_thread_so_later_reads_follow_it() {
+        let engine = MockEngine::new(|method, _| match method {
+            "thread/start" => json!({ "id": "thr_old" }),
+            "thread/fork" => json!({ "id": "thr_new" }),
+            "thread/read" => json!({ "items": [] }),
+            _ => json!({}),
+        });
+        let log = tmp_log("fork-branch");
+        let path = log.path().to_path_buf();
+        let mut sup = Supervisor::new(engine, log, 128_000);
+
+        sup.handle("Prompt", json!({ "text": "hi" })).unwrap();
+        assert_eq!(sup.state.thread_id.as_deref(), Some("thr_old"));
+
+        sup.handle("Fork", json!({})).unwrap();
+        assert_eq!(
+            sup.state.thread_id.as_deref(),
+            Some("thr_new"),
+            "fork 之后当前线程必须换成新线程，否则后续读的还是旧线程"
+        );
+
+        // 而且真的按新线程去读——不是只有 state 好看。
+        sup.handle("GetEntries", json!({})).unwrap();
+        let reads: Vec<String> = sup
+            .engine
+            .requests()
+            .iter()
+            .filter(|(m, _)| m == "thread/read")
+            .filter_map(|(_, p)| p.get("threadId").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert_eq!(
+            reads.last().map(String::as_str),
+            Some("thr_new"),
+            "GetEntries 必须读新线程，实际读了：{reads:?}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

@@ -89,6 +89,31 @@ fork 探针偶发红：`HTTP 409 Workspace already has an active turn`。
 改成重试 5 次（实测第 5 次才成功），而不是一次 409 就判红。
 这和"命中率改观察项"是同一个原则：**外部的不确定性，不该变成内核的红**。
 
+## fork 的第二层：id 换了，但"当前线程"有两个真相
+
+`probe-fork.sh` 证明 fork 后新线程能跑完回合。但 S2 原文要的是
+"fork 出新会话能跑到**不同结论**"——真正的分叉应该是数据隔离。
+
+`probe-fork-branch.sh` 的做法：原线程发 MA → fork → **新线程**发 MB →
+切回原线程读历史。结果 MB 在新线程的历史里找不到。
+
+根因是两个真相源在 fork 之后分家：
+
+- `http_engine` 的 `self.thread_id` 在 fork 时换成新线程——**回合发到新线程**；
+- Supervisor 的 `state.thread_id` 没换——`get_entries` / `get_messages` /
+  再次 fork / `set_session_name` **全读旧线程**。
+
+`handle` 里那句注释写着"thread/start 是唯一出现新线程 id 的地方"。
+那句话是错的：fork 也创建线程。改成 start/fork/resume 都同步 state。
+
+**顺带修了测试替身**：`MockEngine::request` 以前把 params 丢了（`_params`），
+闭包永远只看到 `Null`。这就是这类 bug 单测抓不住的原因——测试根本看不到
+"发给引擎的 threadId 是什么"。现在 `requests()` 记录 (方法, 参数)，
+新单测 `fork_moves_the_current_thread_so_later_reads_follow_it` 钉住
+state 和真实的 threadId 两个层面，红方向验过（退回只认 start → 测试红）。
+
+变异扫描 17 → 19（新增 `fork-thread-state-stale` / `mock-engine-drops-params`）。
+
 ## fork：单元测试只验了"id 换了"，没验"还能跑"
 
 `fork_switches_to_the_new_thread` 一直是绿的。但真引擎上 fork 之后，
@@ -268,7 +293,7 @@ cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产�
 
 ## S0–S5 验收矩阵（现场跑，一条命令）
 
-`bash scripts/acceptance.sh` —— 20 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
+`bash scripts/acceptance.sh` —— 21 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
 下面是最近一次真跑的输出（`HARNESS_ENGINE_BIN` + `CODEWHALE_HOME` 都给了，含真引擎项）：
 
 | 验收项 | 期望 | 实际 | 判定 |
@@ -276,20 +301,21 @@ cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产�
 | S0 进程依赖 | 没有任何 crate 依赖引擎 | ok 没有任何 crate 依赖引擎（进程依赖成立）；path 依赖都在仓库内 | PASS |
 | S0 检查会红 | 越界的 path 依赖必须被判红 | 注入 ../../../acc-outside 后确实报错 | PASS |
 | S1 接缝① | 流式文本 + 工具调用 + 收尾 | PASS 接缝① 真引擎：orbit 客户端 → harnessd → 引擎，流式文本 + 工具调用 + 收尾都在 | PASS |
-| S1 多回合 | 同一线程连续回合，每轮闭合、前缀复用 | PASS 多回合：3 个回合都闭合 ｜ 前缀复用：0 98 97 | PASS |
-| S2 会话历史 | GetEntries 在真引擎上读回非空历史 | PASS GetEntries：entries 非空（2 条），历史里找到标记 HISTORY_MARK_11215 | PASS |
+| S1 多回合 | 同一线程连续回合，每轮闭合、前缀复用 | PASS 多回合：3 个回合都闭合 ｜ 前缀复用：0 83 84 | PASS |
+| S2 会话历史 | GetEntries 在真引擎上读回非空历史 | PASS GetEntries：entries 非空（3 条），历史里找到标记 HISTORY_MARK_20937 | PASS |
 | S2 steer | 引擎接受插话 + body 方言翻译正确 | 引擎 steer API：200 —— 回合进行中插话被接受 PASS steer：引擎侧接受 + harnessd body 翻译正确  | PASS |
 | S3 deferred 命令 | 回合中非 steer 命令不丢、顺序不乱 | PASS 回合中发的两条非 steer 命令都回来了，顺序 ['g1', 'g2'] | PASS |
+| S2 fork 真分叉 | 新线程的消息不漏进原线程历史 | PASS 分叉成立：新线程有自己的消息 MB，原线程历史干净（不含 MB） | PASS |
 | S3 中途插话 | 回合进行中插话，模型输出含插话标记 | PASS 中途插话：回合进行中注入 steer → 模型输出含插话标记（5 处） | PASS |
 | S2 fork 后回合 | fork 出新线程，新线程上回合闭合 | PASS fork：原线程跑完 → fork 出新线程 → 新线程上回合也闭合 | PASS |
-| S3 守卫跨回合 | auto_approve=false 下每轮工具真跑、回合闭合 | PASS 守卫跨回合：2 轮都闭合，每轮工具数一致（2 2），审批通道 2/2 都通 | PASS |
+| S3 守卫跨回合 | auto_approve=false 下每轮工具真跑、回合闭合 | PASS 守卫跨回合：2 轮都闭合，每轮工具数一致（1 1），审批通道 2/2 都通 | PASS |
 | S1 命令覆盖 | orbit 声明的命令与事件都有映射 | every_orbit_command_maps_to_something + every_orbit_type_we_claim_is_mapped 都通过 | PASS |
 | S2 档位 | effort 以 reasoning_effort 送到引擎 | effort_is_sent_as_reasoning_effort 通过 | PASS |
 | S2 fork | fork 后会话切到新线程 | fork_switches_to_the_new_thread 通过 | PASS |
 | S3 守卫 | 三件守卫语义正确 | 17 条守卫测试通过 | PASS |
 | S3 缓存守卫 | 命中率与压力两条线都判对 | 5 条缓存测试通过 | PASS |
 | S3 回合闭合 | 压缩失败也要写 turn.end | a_failed_compaction_does_not_swallow_turn_end 通过 | PASS |
-| S4 插件 | 真 Go 插件能 deny 一条命令 | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s；test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s | PASS |
+| S4 插件 | 真 Go 插件能 deny 一条命令 | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s；test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s | PASS |
 | S4 不空转 | 没有 go 时必须红，不能静默跳过 | 插件测试 ignored=0 | PASS |
 | S5 基线 | 通过率/返工率/误杀率有基线数字 | pass 1.0 / rework 0.01 / false-kill 0.0 / solver_fail 0 / cache 0.901 | PASS |
 | S5 门禁 | 四条门禁同时成立 | 门禁通过 | PASS |

@@ -103,6 +103,20 @@ MUTANTS = [
      '',
      "harnessd", "steer 数组方言读不到 → 引擎 400 prompt is required"),
 
+    # fork 之后当前线程必须跟着换。只认 thread/start 的话，fork 后
+    # state.thread_id 还是旧线程：回合发到新线程，get_entries 却读旧线程。
+    ("fork-thread-state-stale", "crates/harnessd/src/server.rs",
+     '"thread/start" | "thread/fork" | "thread/resume"',
+     '"thread/start"',
+     "harnessd", "fork 之后 Supervisor 的当前线程没跟着换"),
+
+    # 测试替身丢掉 params。丢了的代价是"发给引擎的 threadId 是什么"看不见，
+    # 投影类 bug（读错线程、key 名不对）单测全抓不到。
+    ("mock-engine-drops-params", "crates/harnessd/src/engine.rs",
+     'self.requests.push((method.to_string(), params.clone()));',
+     'self.requests.push((method.to_string(), Value::Null));',
+     "harnessd", "测试替身不再记录参数"),
+
     # 回合 id 必须能穿过 handle 的包装；丢了它，第 2 回合会被误判成"被拒"
     ("turn-id-dropped-in-wrap", "crates/harnessd/src/server.rs",
      '"turn_id": out.get("turn_id"),',

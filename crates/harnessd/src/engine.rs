@@ -166,6 +166,10 @@ impl Drop for JsonRpcEngine {
 /// does not break existing tests.
 pub struct MockEngine {
     calls: Vec<String>,
+    /// (方法, 参数) —— `calls` 只留方法名，参数以前被直接丢掉。
+    /// 丢参数的代价：测试替身**永远看不到**发给引擎的 threadId / key 叫什么，
+    /// 于是"读错了线程""key 名对不上"这类投影 bug 单测全抓不到（真踩过）。
+    requests: Vec<(String, Value)>,
     outbox: VecDeque<Frame>,
     responses: Vec<(u64, Value)>,
     reply: Box<dyn Fn(&str, &Value) -> Value + Send>,
@@ -190,6 +194,7 @@ impl MockEngine {
     pub fn new(reply: impl Fn(&str, &Value) -> Value + Send + 'static) -> Self {
         Self {
             calls: Vec::new(),
+            requests: Vec::new(),
             outbox: VecDeque::new(),
             responses: Vec::new(),
             reply: Box::new(reply),
@@ -198,6 +203,11 @@ impl MockEngine {
 
     pub fn calls(&self) -> &[String] {
         &self.calls
+    }
+
+    /// 方法 + 参数。要看"发给引擎的 threadId 是不是新线程"，用这个。
+    pub fn requests(&self) -> &[(String, Value)] {
+        &self.requests
     }
 
     /// Answers this mock gave to reverse requests (approvals).
@@ -217,9 +227,10 @@ impl MockEngine {
 }
 
 impl Engine for MockEngine {
-    fn request(&mut self, method: &str, _params: Value) -> Result<Value> {
+    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         self.calls.push(method.to_string());
-        Ok((self.reply)(method, &Value::Null))
+        self.requests.push((method.to_string(), params.clone()));
+        Ok((self.reply)(method, &params))
     }
 
     fn respond(&mut self, id: u64, result: Value) -> Result<()> {
