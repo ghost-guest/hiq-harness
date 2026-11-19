@@ -161,18 +161,48 @@ impl HttpEngine {
     }
 }
 
-/// 未知事件也要带名字转发（`engine/<kind>`），否则 UI 只能看到一团。
-fn out_method(kind: &str) -> &'static str {
+/// SSE 事件名 → 我们内部的 method 名。
+///
+/// 抽成纯函数是为了能被测：原来这段内联在 `notifications()` 里，
+/// **一行测试都没有**。变异扫描把 `"turn.completed"` 从这个分支删掉，
+/// 整个 crate 的测试全绿——而"回合不闭合"正是这一夜最贵的那个 bug。
+fn sse_method_for(kind: &str, v: &Value) -> String {
     match kind {
-        "turn.lifecycle" => "engine/turn.lifecycle",
-        "turn.usage" => "thread/tokenUsage/updated",
-        "pre_turn" | "post_turn" => "engine/turn.phase",
-        "thread.started" => "engine/thread.started",
-        "user_message" => "engine/user.message",
-        "agent_message" => "item/completed",
-        "file" => "engine/file",
-        "status" => "thread/status/changed",
-        _ => "engine/event",
+        "turn.completed" | "turn.failed" | "turn.cancelled" => "turn/completed".into(),
+        "turn.started" => "turn/started".into(),
+        "error" => "error".into(),
+        "item.started" => "item/started".into(),
+        "item.completed" => "item/completed".into(),
+        "item.delta" => {
+            let inner = v
+                .pointer("/payload/kind")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if inner == "agent_message" {
+                "item/agentMessage/delta".into()
+            } else {
+                "item/commandExecution/outputDelta".into()
+            }
+        }
+        // 认不出的**带名字**转发。注释一直说"带名字转发，不丢"，
+        // 但代码原来一律返回 `engine/event`——名字被压扁了，
+        // 下游只能看到"有事件"，看不到是哪个。文档说的和代码做的不是一回事。
+        other => out_method(other),
+    }
+}
+
+/// 未知事件也要带名字转发（`engine/<kind>`），否则 UI 只能看到一团。
+fn out_method(kind: &str) -> String {
+    match kind {
+        "turn.lifecycle" => "engine/turn.lifecycle".into(),
+        "turn.usage" => "thread/tokenUsage/updated".into(),
+        "pre_turn" | "post_turn" => "engine/turn.phase".into(),
+        "thread.started" => "engine/thread.started".into(),
+        "user_message" => "engine/user.message".into(),
+        "agent_message" => "item/completed".into(),
+        "file" => "engine/file".into(),
+        "status" => "thread/status/changed".into(),
+        other => format!("engine/{other}"),
     }
 }
 
@@ -358,28 +388,7 @@ impl Engine for HttpEngine {
                                 // 事件名直接对上 `ui_kind_for`，UI 才能拿到
                                 // `turn_end` / `text_delta` 这类认识的种类；
                                 // 认不出的照样转发，不丢。
-                                let method = match kind.as_str() {
-                                    "turn.completed" | "turn.failed" | "turn.cancelled" => "turn/completed",
-                                    "turn.started" => "turn/started",
-                                    "error" => "error",
-                                    "item.started" => "item/started",
-                                    "item.completed" => "item/completed",
-                                    "item.delta" => {
-                                        let inner = v
-                                            .pointer("/payload/kind")
-                                            .and_then(Value::as_str)
-                                            .unwrap_or("");
-                                        if inner == "agent_message" {
-                                            "item/agentMessage/delta"
-                                        } else {
-                                            "item/commandExecution/outputDelta"
-                                        }
-                                    }
-                                    other => {
-                                        // 借用一下 string：未知种类带自己的名字转发。
-                                        out_method(other)
-                                    }
-                                };
+                                let method = sse_method_for(&kind, &v);
                                 if kind.contains("approval") {
                                     self.next_approval += 1;
                                     let id = self.next_approval;
@@ -404,7 +413,7 @@ impl Engine for HttpEngine {
                                         .get("payload")
                                         .cloned()
                                         .unwrap_or_else(|| v.clone());
-                                    out.push(Frame::notification(method, payload));
+                                    out.push(Frame::notification(&method, payload));
                                 }
                             }
                         }
@@ -547,6 +556,45 @@ mod tests {
         let v = e.request("thread/fork", json!({})).unwrap();
         assert_eq!(v["id"], "thr_2");
         assert_eq!(e.thread_id.as_deref(), Some("thr_2"), "fork must move the session");
+    }
+
+    /// 每一种 SSE 事件都必须映射到自己那一档。
+    ///
+    /// 这条是变异扫描逼出来的：把 `"turn.completed"` 从这个 match 里删掉，
+    /// 整个 crate 的测试**全绿**——而"回合不闭合"正是这一夜最贵的那个 bug
+    /// （timebus 里只有 turn.start + usage，投影全错）。
+    /// 事件名是这一层的词汇表，词汇表错了，后面每一层都跟着错。
+    #[test]
+    fn every_sse_event_maps_to_its_own_method() {
+        let empty = json!({});
+        // 回合结束的三种形态都必须认。
+        for kind in ["turn.completed", "turn.failed", "turn.cancelled"] {
+            assert_eq!(
+                sse_method_for(kind, &empty),
+                "turn/completed",
+                "{kind} 必须映射成 turn/completed，否则 timebus 里的回合永远不闭合"
+            );
+        }
+        assert_eq!(sse_method_for("turn.started", &empty), "turn/started");
+        assert_eq!(sse_method_for("item.started", &empty), "item/started");
+        assert_eq!(sse_method_for("item.completed", &empty), "item/completed");
+        assert_eq!(sse_method_for("error", &empty), "error");
+
+        // 增量的两种走向由 payload 里的 kind 决定。
+        let text = json!({ "payload": { "kind": "agent_message" } });
+        assert_eq!(
+            sse_method_for("item.delta", &text),
+            "item/agentMessage/delta"
+        );
+        let tool = json!({ "payload": { "kind": "tool_call" } });
+        assert_eq!(
+            sse_method_for("item.delta", &tool),
+            "item/commandExecution/outputDelta"
+        );
+
+        // 认不出的要带名字转发，不能丢。
+        assert_eq!(sse_method_for("turn.usage", &empty), "thread/tokenUsage/updated");
+        assert_eq!(sse_method_for("weird.thing", &empty), "engine/weird.thing");
     }
 
     #[test]

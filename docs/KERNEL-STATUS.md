@@ -5,6 +5,53 @@
 
 ---
 
+## 变异扫描：测试到底抓不抓得住
+
+`python3 scripts/mutate.py` —— 把内核代码故意改坏，看测试红不红。
+
+为什么需要它：这一夜反复出现同一类问题——**名字说有，内容里没有**。
+`nudges_then_refuses_then_stops` 从没验过 stop。名字、注释、文档都能骗人，
+只有"改坏它，看它红不红"骗不了人。
+
+最近一次全量（`MUTATE=1 bash scripts/gate.sh` 里跑）：
+
+| 变异体 | 改坏了什么 | 结果 | 说明 |
+|---|---|---|---|
+| guards-stop-to-note | 守卫最后一档 Stop 降级成 Note | KILLED | 测试红了 |
+| guards-refuse-to-note | 拒跑降级成提示 | KILLED | 测试红了 |
+| guards-nudge-to-ok | 提示的理由被清空（UI 看到空提示） | KILLED | 测试红了 |
+| guards-failure-gate-threshold | 相同失败永远到不了阈值 | KILLED | 测试红了 |
+| cache-hit-floor | 命中率下限归零（冷前缀也压缩） | KILLED | 测试红了 |
+| cache-pressure | 压力线归零（永远觉得窗口满） | KILLED | 测试红了 |
+| approval-allow-word | 裸 "allow" 不再被认（引擎会 400） | KILLED | 测试红了 |
+| turn-completed-dropped | 正常完成的回合不再被认作完成 | KILLED | 测试红了 |
+| mapping-unknown-command | Prompt 命令掉进兜底 | KILLED | 测试红了 |
+
+全部 9 个变异体都被抓到（没有 STALE，也没有 SURVIVED）。
+
+**扫描器自己也被验过会红**，抓出三个它自己的假绿：
+
+1. `SKIP` 被算成"抓到"。原文没找到时打印 `SKIP` 然后 `continue`，
+   最后照样说"全部抓到"——这是最讽刺的一种：**一个用来抓假绿的工具自己在假绿**。
+   现在 `SKIP` 改名 `STALE`，并且计入失败。
+2. 两个变异体是**编译器**挡的，不是测试挡的（`GateDecision::Allow` 类型不匹配）。
+   那不算数——编译器挡的是语法，不是语义。改成语义等价但能编译的破坏
+   （`>= self.threshold` → `>= 9999`），才是真在测行为。
+3. 扫描期间工作区里是"被改坏"的代码。我并发跑了 `cargo test`，看到
+   `failure_gate_blocks_identical_failures` 红了，查了半小时才发现是扫描器
+   正在改文件、还没还原。现在加了 `.mutate.lock`，并且 `finally` 里一定解锁。
+
+### 它抓到的一个真缺陷
+
+`turn.completed` 从 SSE 映射里删掉 → **整个 crate 的测试全绿**。
+而"回合不闭合"正是这一夜最贵的那个 bug（timebus 里只有 `turn.start` + `usage`，
+投影全错）。这段映射原来内联在 `notifications()` 里，**一行测试都没有**。
+现在抽成 `sse_method_for`，`every_sse_event_maps_to_its_own_method` 钉住每个事件名。
+
+顺带发现文档骗人：注释写"未知事件带名字转发，不丢"，
+代码却一律返回固定的 `engine/event`——名字被压扁了。
+改成真的 `format!("engine/{other}")`。
+
 ## S0–S5 验收矩阵（现场跑，一条命令）
 
 `bash scripts/acceptance.sh` —— 13 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。

@@ -28,6 +28,20 @@ elif [ "${SKIP_ACCEPTANCE:-0}" = "1" ]; then
   echo "注意：SKIP_ACCEPTANCE=1，S0–S5 验收矩阵这一轮没跑。"
 fi
 
+# 变异扫描：把内核改坏，看测试抓不抓得住。
+# 默认**跳过**（一轮约 100 秒，不适合每次提交都跑），
+# 但跳过要说出来——静默跳过就是又一个"永远绿"。
+if [ "${MUTATE:-0}" = "1" ]; then
+  if ! python3 scripts/mutate.py >/tmp/mutate.out 2>&1; then
+    echo "门禁未通过：有变异体存活（测试抓不住那些改动）"
+    grep -E "^## !!|^- " /tmp/mutate.out | head -6
+    exit 1
+  fi
+  echo "变异扫描：$(grep -c '| KILLED |' /tmp/mutate.out) 个变异体全部被抓"
+else
+  echo "注意：MUTATE 未设，变异扫描这一轮没跑（想跑：MUTATE=1 bash scripts/gate.sh）。"
+fi
+
 if [ "${1:-}" = "--run" ]; then
   shift
   if [ $# -eq 0 ]; then echo "用法: bash scripts/gate.sh --run '<solver 命令>'"; exit 2; fi

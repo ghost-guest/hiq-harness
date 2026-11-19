@@ -549,6 +549,55 @@ mod tests {
         assert!(saw_refuse, "第 12 次应拒跑");
     }
 
+    /// 每一档给出的**理由**必须是有内容的。
+    ///
+    /// 变异扫描抓到的：把 `Nudge { note }` 改成 `Nudge { note: format!("") }`，
+    /// 16 条守卫测试全绿。因为所有测试都写 `Nudge { .. }` ——
+    /// 只关心"是不是提示"，不关心"提示说了什么"。
+    /// 但提示是给模型看的：空的提示等于没有提示，而且更糟——它占了一次额度。
+    /// 同理，拒跑和终止的理由是给人看的，空了就查不出为什么被拦。
+    #[test]
+    fn every_rung_explains_itself() {
+        let s = sig("bash", "sleep 5", "done");
+        let mut g = NoProgressGuard::default();
+        let (mut nudge, mut refuse, mut stop) = (None, None, None);
+        for _ in 0..40 {
+            match g.record(&s) {
+                NoProgressDecision::Nudge { note } if nudge.is_none() => nudge = Some(note),
+                NoProgressDecision::Refuse { reason } if refuse.is_none() => refuse = Some(reason),
+                NoProgressDecision::Stop { reason } if stop.is_none() => stop = Some(reason),
+                _ => {}
+            }
+        }
+        for (what, text) in [
+            ("提示", nudge.expect("应出现提示档")),
+            ("拒跑", refuse.expect("应出现拒跑档")),
+            ("终止", stop.expect("应出现终止档")),
+        ] {
+            assert!(
+                text.trim().len() >= 10,
+                "{what}的理由必须说清原因，实际是 {text:?} —— 空的理由等于没有，而且更难查"
+            );
+        }
+
+        // 还要走一遍 `after_call`：那条路径上有**自己的一套映射**
+        // （`NoProgressDecision::Nudge { note } => PostCallVerdict::Note { note }`）。
+        // 只测 `record` 的话，映射把 note 清空照样绿——这正是变异扫出来的漏洞。
+        let mut g = GuardSet::default();
+        let mut note = None;
+        for _ in 0..40 {
+            if let PostCallVerdict::Note { note: n } = g.after_call(&s, true) {
+                note = Some(n);
+                break;
+            }
+        }
+        let n = note.expect("after_call 应给出 Note");
+        assert!(
+            n.trim().len() >= 10,
+            "after_call 给出的提示也必须说清原因，实际是 {n:?}"
+        );
+    }
+
     /// 阶梯的最后一档必须真的会到。
     ///
     /// 上面那条测试叫 `nudges_then_refuses_then_stops`，但它只验了前两档——
