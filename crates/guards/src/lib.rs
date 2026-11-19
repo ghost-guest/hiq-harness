@@ -549,6 +549,81 @@ mod tests {
         assert!(saw_refuse, "第 12 次应拒跑");
     }
 
+    /// 阶梯的最后一档必须真的会到。
+    ///
+    /// 上面那条测试叫 `nudges_then_refuses_then_stops`，但它只验了前两档——
+    /// 把 `NoProgressDecision::Stop => PostCallVerdict::Stop` 悄悄降级成
+    /// `PostCallVerdict::Note`，14 条守卫测试**全绿**。名字比内容诚实。
+    ///
+    /// 这条把第三档钉住：拒跑累积到 `stop_after_refusals` 之后，
+    /// `record` 必须返回 `Stop`，而且之后**一直**是 `Stop`（不是偶尔一下）。
+    #[test]
+    fn no_progress_reaches_the_stop_rung_and_stays_there() {
+        let mut g = NoProgressGuard::default();
+        let s = sig("bash", "sleep 5", "done");
+        let mut stopped_at = None;
+        for i in 1..=40 {
+            if matches!(g.record(&s), NoProgressDecision::Stop { .. }) {
+                stopped_at = Some(i);
+                break;
+            }
+        }
+        let at = stopped_at.expect("拒跑到上限之后必须终止，不能只拒不停");
+        assert!(
+            at > 12,
+            "终止应在拒跑之后（第 12 次才拒跑），实际第 {at} 次就停了"
+        );
+        // 终止是粘性的：再说一次也必须还是 Stop，不能"歇一会儿又放行"。
+        assert!(
+            matches!(g.record(&s), NoProgressDecision::Stop { .. }),
+            "一旦终止就必须一直终止，否则模型可以靠重复把守卫磨穿"
+        );
+    }
+
+    /// 阶梯的每一档都必须从 `after_call` 出来时还是自己那一档。
+    /// 这一条钉映射表本身：把 `Stop => PostCallVerdict::Stop` 改成 `Note`，
+    /// 这里立刻红。
+    #[test]
+    fn every_no_progress_rung_survives_after_call() {
+        let s = sig("bash", "sleep 5", "done");
+
+        // 提示档
+        let mut g = GuardSet::default();
+        let mut saw_note = false;
+        for _ in 0..8 {
+            if matches!(g.after_call(&s, true), PostCallVerdict::Note { .. }) {
+                saw_note = true;
+                break;
+            }
+        }
+        assert!(saw_note, "第 8 次 after_call 应给出 Note");
+
+        // 拒跑档 → ReplaceResult（挡住这次调用并给理由）
+        let mut g = GuardSet::default();
+        let mut saw_replace = false;
+        for _ in 0..12 {
+            if matches!(g.after_call(&s, true), PostCallVerdict::ReplaceResult { .. }) {
+                saw_replace = true;
+                break;
+            }
+        }
+        assert!(saw_replace, "第 12 次 after_call 应给出 ReplaceResult");
+
+        // 终止档 → Stop。这是最容易被悄悄降级的一档。
+        let mut g = GuardSet::default();
+        let mut saw_stop = false;
+        for _ in 0..40 {
+            if matches!(g.after_call(&s, true), PostCallVerdict::Stop { .. }) {
+                saw_stop = true;
+                break;
+            }
+        }
+        assert!(
+            saw_stop,
+            "拒跑累积到上限后 after_call 必须给出 Stop——降级成 Note 等于把最后一档拆了"
+        );
+    }
+
     #[test]
     fn no_progress_sleep_not_killed_when_other_work_progresses() {
         // 核心场景：模型反复 sleep，但旁边的检查在推进

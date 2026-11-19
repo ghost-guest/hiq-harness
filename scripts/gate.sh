@@ -16,6 +16,18 @@ if [ -x scripts/check-engine.sh ]; then
   bash scripts/check-engine.sh || { echo "门禁未通过：D4 检查红了"; exit 1; }
 fi
 
+# S0–S5 验收矩阵。默认跑；`SKIP=1` 可跳（比如 CI 上没有引擎二进制）。
+# 跳了要说出来——静默跳过就是又一个"永远绿"。
+if [ "${SKIP_ACCEPTANCE:-0}" != "1" ] && [ -x scripts/acceptance.sh ]; then
+  if ! ACCEPTANCE_FAST="${ACCEPTANCE_FAST:-1}" bash scripts/acceptance.sh >/tmp/acceptance.out 2>&1; then
+    echo "门禁未通过：验收矩阵有红"
+    grep -E "^## !!|^- " /tmp/acceptance.out | head -10
+    exit 1
+  fi
+elif [ "${SKIP_ACCEPTANCE:-0}" = "1" ]; then
+  echo "注意：SKIP_ACCEPTANCE=1，S0–S5 验收矩阵这一轮没跑。"
+fi
+
 if [ "${1:-}" = "--run" ]; then
   shift
   if [ $# -eq 0 ]; then echo "用法: bash scripts/gate.sh --run '<solver 命令>'"; exit 2; fi

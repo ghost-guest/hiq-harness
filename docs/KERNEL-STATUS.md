@@ -5,6 +5,51 @@
 
 ---
 
+## S0–S5 验收矩阵（现场跑，一条命令）
+
+`bash scripts/acceptance.sh` —— 13 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
+下面是最近一次真跑的输出（`HARNESS_ENGINE_BIN` + `CODEWHALE_HOME` 都给了，含真引擎项）：
+
+| 验收项 | 期望 | 实际 | 判定 |
+|---|---|---|---|
+| S0 进程依赖 | 没有任何 crate 依赖引擎 | ok 没有任何 crate 依赖引擎（进程依赖成立）；path 依赖都在仓库内 | PASS |
+| S0 检查会红 | 越界的 path 依赖必须被判红 | 注入 ../../../acc-outside 后确实报错 | PASS |
+| S1 接缝① | 流式文本 + 工具调用 + 收尾 | PASS 接缝① 真引擎：orbit 客户端 → harnessd → 引擎，流式文本 + 工具调用 + 收尾都在 | PASS |
+| S1 命令覆盖 | orbit 声明的命令与事件都有映射 | every_orbit_command_maps_to_something + every_orbit_type_we_claim_is_mapped 都通过 | PASS |
+| S2 档位 | effort 以 reasoning_effort 送到引擎 | effort_is_sent_as_reasoning_effort 通过 | PASS |
+| S2 fork | fork 后会话切到新线程 | fork_switches_to_the_new_thread 通过 | PASS |
+| S3 守卫 | 三件守卫语义正确 | 16 条守卫测试通过 | PASS |
+| S3 缓存守卫 | 命中率与压力两条线都判对 | 5 条缓存测试通过 | PASS |
+| S3 回合闭合 | 压缩失败也要写 turn.end | a_failed_compaction_does_not_swallow_turn_end 通过 | PASS |
+| S4 插件 | 真 Go 插件能 deny 一条命令 | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s；test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s | PASS |
+| S4 不空转 | 没有 go 时必须红，不能静默跳过 | 插件测试 ignored=0 | PASS |
+| S5 基线 | 通过率/返工率/误杀率有基线数字 | pass 1.0 / rework 0.01 / false-kill 0.0 / solver_fail 0 / cache 0.901 | PASS |
+| S5 门禁 | 四条门禁同时成立 | 门禁通过 | PASS |
+
+全部成立（SKIP 的不算成立，但也不算失败——它明说了自己没验）。
+
+**这张表自己也被验过会红。** 写它的过程中抓到三个问题：
+
+1. 我引用了 `every_command_body_variant_is_mapped` 这个测试名——**它不存在**。
+   真实的叫 `every_orbit_command_maps_to_something`。矩阵第一版有两条永远红。
+2. `S3 缓存守卫` 用 `grep -c "^test .* ok$"` 数测试——`cargo test -q` 根本不打印那些行，
+   数出来恒为 0。**判定写错比不判还糟**：它会稳定地告诉你"没做"。
+3. `gate.sh` 会调 `acceptance.sh`，而 `acceptance.sh` 又调 `gate.sh` —— **无限递归**。
+   表现是"脚本跑了几百秒、输出 0 行"，看起来像慢，其实是自我 fork。
+   修法：矩阵调门禁时设 `SKIP_ACCEPTANCE=1`。400 秒 → 4 秒。
+
+## 守卫的最后一档：名字比内容诚实
+
+有一条测试叫 `no_progress_nudges_then_refuses_then_stops`。我试着把
+`NoProgressDecision::Stop => PostCallVerdict::Stop` 悄悄降级成 `Note` ——
+**14 条守卫测试全绿**。
+
+因为那条测试只验了 Nudge 和 Refuse 两档，第三档从没被断言过。
+名字里有 `stops`，内容里没有。这是最阴的一类空洞：名字让人以为验过了。
+
+补了 `every_no_progress_rung_survives_after_call`，把三档各自从 `after_call` 走一遍。
+再降级 → 立刻红（`拒跑累积到上限后 after_call 必须给出 Stop`）。守卫 14 → 16 条。
+
 ## 一句话
 
 **引擎作为进程通过 JSON-RPC 接入，融合层全在我们自己的 crate 里。**
