@@ -13,12 +13,14 @@
 每个变异体跑完一定还原文件——`finally` 里做，不用等人工清理。
 """
 import argparse
+import os
 import pathlib
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOCK = ROOT / ".mutate.lock"
@@ -131,7 +133,14 @@ def _sweep(picked):
                 path.write_text(src.replace(old, new, 1), encoding="utf-8")
                 verdict, out = suite(crate)
             finally:
+                # 还原后必须把 mtime 推新。`copy2` 会保留**备份文件**的 mtime，
+                # 而备份是"改坏之前"那一刻创建的——cargo 一比时间戳，
+                # 认为源文件没变，继续用**变异版**的旧产物。
+                # 我踩过：扫描全绿，紧接着 cargo test 红了两条不相关的测试，
+                # 源码却是对的，查了很久才发现是缓存。
                 shutil.copy2(backup, path)
+                _now = time.time()
+                os.utime(path, (_now, _now))
 
             if verdict == "fail":
                 rows.append((name, desc, "KILLED", "测试红了"))

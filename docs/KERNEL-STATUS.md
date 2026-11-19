@@ -41,6 +41,19 @@
    `failure_gate_blocks_identical_failures` 红了，查了半小时才发现是扫描器
    正在改文件、还没还原。现在加了 `.mutate.lock`，并且 `finally` 里一定解锁。
 
+### 扫描器自己的第四个假绿：缓存
+
+扫描全绿之后紧接着跑 `cargo test`，红了两条不相关的测试
+（`every_orbit_command_maps_to_something`、`repeated_identical_failure_produces_a_verdict`）。
+源码是**对的**，`git status` 也是干净的。
+
+原因：`shutil.copy2` 还原文件时**保留备份的 mtime**，而备份是"改坏之前"那一刻创建的。
+cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产物。
+
+这类缺陷最坏的地方是它的**指向**：它让你怀疑源码、怀疑测试、怀疑并发，
+而真凶是"文件内容对了但时间戳说它没变"。现在还原后显式 `os.utime`。
+修完验证：扫描 9/9 KILLED，紧接着 `cargo test --workspace` → **404 通过 / 0 失败**。
+
 ### 它抓到的一个真缺陷
 
 `turn.completed` 从 SSE 映射里删掉 → **整个 crate 的测试全绿**。
