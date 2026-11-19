@@ -574,6 +574,29 @@ mod tests {
     /// 整个 crate 的测试**全绿**——而"回合不闭合"正是这一夜最贵的那个 bug
     /// （timebus 里只有 turn.start + usage，投影全错）。
     /// 事件名是这一层的词汇表，词汇表错了，后面每一层都跟着错。
+    /// 真实引擎的 turn.usage 信封必须能被认出来。
+    /// 这是从直连 SSE 抓来的原文（seq 13283），不是编的。
+    /// 压缩探针红了 6 次才查到：timebus 里一条 usage 都没有——
+    /// 缓存守卫的命中率从这里来，usage 丢了就永远不会压缩。
+    #[test]
+    fn real_turn_usage_envelope_maps_to_token_usage() {
+        let v = json!({
+            "schema_version": 1, "seq": 13283, "event": "turn.usage",
+            "kind": "turn.usage", "thread_id": "thr_x", "turn_id": "turn_x",
+            "payload": { "usage": {
+                "input_tokens": 13582, "output_tokens": 10,
+                "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 13582
+            }}
+        });
+        let method = sse_method_for(
+            v.get("kind").and_then(serde_json::Value::as_str).unwrap_or("event"), &v);
+        assert_eq!(method, "thread/tokenUsage/updated");
+        let payload = v.get("payload").cloned().unwrap_or(v.clone());
+        let inner = payload.get("usage").unwrap_or(&payload);
+        let input = inner.get("input_tokens").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        assert_eq!(input, 13582, "usage 必须能被解析出来，否则缓存命中率永远没有");
+    }
+
     #[test]
     fn every_sse_event_maps_to_its_own_method() {
         let empty = json!({});

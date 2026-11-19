@@ -149,7 +149,11 @@ for i in $(seq 1 "$ATTEMPTS"); do
     echo "PASS compact.pre 端到端到达插件（真引擎 + 真 harnessd + 真插件，第 $i 次）"
     exit 0
   fi
-  echo "…第 $i/$ATTEMPTS 次没触发（这一回合的命中率不够）"
+  # 把**实际**命中率打出来。原来只说"命中率不够"，查了半天还以为 usage 丢了——
+  # 其实缓存守卫一直在工作，只是上游代理这几次给的是 87.8/68.8/75%，
+  # 确实没到 90% 的线。没有数字就只能猜，有数字一眼就定。
+  seen_rates=$(grep -o 'hit only [0-9.]*%' /tmp/compact-harnessd.log 2>/dev/null | tail -3 | tr '\n' ' ')
+  echo "…第 $i/$ATTEMPTS 次没触发（实际命中率：${seen_rates:-日志里没有记录}）"
 done
 
 echo "FAIL $ATTEMPTS 次都没收到 compact.pre（看 /tmp/compact-harnessd.log 与 /tmp/compact-engine.log）"

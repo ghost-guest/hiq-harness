@@ -1,7 +1,7 @@
 # S0–S5 验收证据
 
-- 生成时间：2026-11-19 10:23:59 CST
-- 提交：`019fa34` (fix(kernel): 引擎拒掉的回合不再当成功——连发多条 prompt 时消息静默消失)
+- 生成时间：2026-11-19 13:57:44 CST
+- 提交：`43477cf` (test: 带审批的多回合探针——补上上一条探针的证据缺口)
 - 引擎：`/tmp/kh/codewhale/target/debug/codewhale`（外部二进制，D1 进程依赖）
 
 ## 1. 测试
@@ -9,9 +9,9 @@
 红点不是"允许红"，是"红点必须被解释"。实际失败的用例会与 `bench/known-red.txt`
 求差：清单里没有的那一条，就是没人解释过的失败，本节直接判不合格。
 
-| `cargo test --workspace`（内核 9 个 crate） | 400 passed / 0 failed |
+| `cargo test --workspace`（内核 9 个 crate） | 409 passed / 0 failed |
 | `cargo test -p orbit-rpc`（接缝① 客户端） | 94 passed / 0 failed |
-| `cargo test -p orbit-pi`（GPUI 界面，无头） | 1933 passed; 5 failed; 0 filtered out; finished in 41.21s |
+| `cargo test -p orbit-pi`（GPUI 界面，无头） | 1933 passed; 5 failed; 0 filtered out; finished in 41.06s |
 
 orbit-pi 的红点（每一条都在 `bench/known-red.txt` 里登记了原因）：`app::session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag git_accounts::tests::workspace_local_identity_and_remotes_are_read_without_remote_access onboarding::tests::every_dependency_has_an_install_hint onboarding::tests::host_facts_cover_the_platform_and_the_stores onboarding::tests::install_hints_match_the_host `
 
@@ -62,7 +62,7 @@ selftest ok: 20 tasks, every check fails before the fix and passes after
 ```
 ### 4.2 建会话
 ```
-{"schema_version":2,"id":"thr_a9d148852dda4f689e2207c146bbd8c7","created_at":"2026-11-19T02:25:47.726574Z","updated_at":"2026-11-19T02:25:47.726574Z","model":"auto/deepseek-v4.1-flash","model_provider":"custom","model_provider_id":"magipe","workspace":"/private/tmp/evidence-ws.kXpXgK","mode":"agent"```
+{"schema_version":2,"id":"thr_77a0d9f9c3df4c4990ca856a1362df9d","created_at":"2026-11-19T05:59:29.493540Z","updated_at":"2026-11-19T05:59:29.493540Z","model":"auto/deepseek-v4.1-flash","model_provider":"custom","model_provider_id":"magipe","workspace":"/private/tmp/evidence-ws.NZyIqc","mode":"agent"```
 ### 4.3 档位（合法值被接受，非法值被拒绝并列出**全部**取值）
 ```
 reasoning_effort=low   -> 201
@@ -72,13 +72,13 @@ Unrecognized reasoning effort "bogus". Expected one of: auto, off, minimal, low,
 ```
 ### 4.4 事件流里真的有工具调用和用量
 ```
-事件种类: {'thread.started': 1, 'turn.started': 1, 'item.started': 3, 'item.completed': 4, 'turn.lifecycle': 1, 'turn.workspace_snapshot': 4, 'model.tools.snapshot': 3, 'turn.provider_request': 2, 'turn.usage': 2, 'operation.activity_started': 1, 'operation.activity_completed': 1, 'item.delta': 1, 'turn.completed': 1, 'turn.artifacts': 1}
+事件种类: {'thread.started': 1, 'turn.started': 1, 'item.started': 5, 'item.completed': 6, 'turn.lifecycle': 1, 'turn.workspace_snapshot': 4, 'model.tools.snapshot': 3, 'item.delta': 4, 'turn.provider_request': 2, 'turn.usage': 2, 'operation.activity_started': 1, 'operation.activity_completed': 1, 'turn.completed': 1, 'turn.artifacts': 1}
 工具调用: ['bash', 'bash']
-用量: {"input_tokens": 9970, "output_tokens": 5, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 9970, "prompt_cache_write_tokens": 0, "reasoning_tokens": 0, "reasoning_replay_tokens": 4}
+用量: {"input_tokens": 11799, "output_tokens": 17, "prompt_cache_hit_tokens": 9664, "prompt_cache_miss_tokens": 2135, "prompt_cache_write_tokens": 0, "reasoning_tokens": 0, "reasoning_replay_tokens": 41}
 ```
 ### 4.5 fork 出新会话（接在一个已完成轮次的会话上——空会话没有可分的枝）
 ```
-n_observation":{"sessions_dir":"/tmp/evidence-home.4FljDk/sessions","session_id":"4763b53c-71fd-4d69-9be1-caf7742db8fb","document_sha256":"dd7d308cafd0188188f95e5cab79dffef164efe5d63b742e48815c280b18a8e5","checkpoint_sha256":null},"covered_turn_id":"turn_b44d68824ef5483ba971ca259a9f126c","messages_sha256":"285227f9c7c6c1f5157807e966630e02e6a2676a552ff4bbd58ca225e8bcae04","messages_len":4}}
+n_observation":{"sessions_dir":"/tmp/evidence-home.Pfnn2y/sessions","session_id":"1d97ce96-9af4-44aa-be0b-37943025d306","document_sha256":"10b0b7ba24dfa7a60e8a81d8eca331d14bbec8b711a724a931c0fd678f3e6c20","checkpoint_sha256":null},"covered_turn_id":"turn_479ff13f8c7f417882275a55375c4364","messages_sha256":"fe40049b214563f3654cd69aca53f385089bd0904259c2e86acb217b82670703","messages_len":4}}
 -> 201
 ```
 ### 5. 审批通道：真引擎里 deny 一条命令，这一轮还能正常收尾
@@ -86,8 +86,8 @@ n_observation":{"sessions_dir":"/tmp/evidence-home.4FljDk/sessions","session_id"
 > 这条通道曾经整条是坏的（id 硬编码 0 / 命令没摊平 / 词表抄错 / 重复投递），
 > 而所有基线都跑在 `auto_approve:true` 上，所以没人发现。探针会自己起一个引擎去验。
 ```
-approval: id=approval_0b362b35d5ed412bb5ec186a1e50c33a tool=bash command='echo hi'
-POST /v1/approvals/approval_0b362b35d5ed412bb5ec186a1e50c33a {'decision':'deny'} → 200 ok
+approval: id=approval_448516629c0e413494947dbf0bc0f56f tool=bash command='echo hi'
+POST /v1/approvals/approval_448516629c0e413494947dbf0bc0f56f {'decision':'deny'} → 200 ok
 turn end: turn.completed
 PASS 审批通道：id 对、命令对、deny 被接受、这一轮正常收尾
 ```
@@ -108,8 +108,8 @@ warning: variable does not need to be mutable
     |
     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
-文本长度: 13
-文本片段: "```\nseam1\n```"
+文本长度: 5
+文本片段: "seam1"
 工具调用: ["bash"]
 agent_end: true
 PASS 接缝① 真引擎：orbit 客户端 → harnessd → 引擎，流式文本 + 工具调用 + 收尾都在
@@ -131,11 +131,9 @@ PASS 常驻 4 事件（turn.start / tool.pre / tool.post / turn.end）在真回�
 跑一个 1.5 万 token 的回合，让缓存守卫判定"窗口满了且前缀还很热"，逼它真的请求压缩。
 
 ```
-!! 第 2 回合没结束（超时），继续往后试
-!! 第 4 回合没结束（超时），继续往后试
 收到的事件：turn.end turn.start 
-用量（cached_tokens 尾两条）："cached_tokens":0 "cached_tokens":0 
-scripts/probe-compact.sh: line 96: 11106 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
+用量（cached_tokens 尾两条）："cached_tokens":20224 "cached_tokens":24960 
+scripts/probe-compact.sh: line 96: 64649 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
 import json, sys, time, urllib.request
 port = sys.argv[1]; base = f"http://127.0.0.1:{port}"
 answered = set(); deadline = time.time() + 600
@@ -156,11 +154,11 @@ while time.time() < deadline:
     time.sleep(1)
 APPROVER
 
-…第 5/3 次没触发（这一回合的命中率不够）
+…第 4/6 次没触发（实际命中率：hit only 0.0% hit only 81.1% hit only 84.4% ）
 …第 2 回合就触发了压缩，提前结束（还剩 2 回合没跑）
 收到的事件：compact.pre turn.end turn.start 
-用量（cached_tokens 尾两条）："cached_tokens":15360 
-scripts/probe-compact.sh: line 96: 12912 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
+用量（cached_tokens 尾两条）："cached_tokens":15104 "cached_tokens":15232 
+scripts/probe-compact.sh: line 96: 65382 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
 import json, sys, time, urllib.request
 port = sys.argv[1]; base = f"http://127.0.0.1:{port}"
 answered = set(); deadline = time.time() + 600
@@ -183,6 +181,7 @@ APPROVER
 
 PASS compact.pre 端到端到达插件（真引擎 + 真 harnessd + 真插件，第 2 次）
 ```
+OK 真压缩探针：这一轮触发了 compact.pre
 ## 9. 界面真的渲染出来了（OCR，不是人眼）
 
 界面这一格以前是"没人看过"。现在用截图 + OCR 断言关键控件在位——
