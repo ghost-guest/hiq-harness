@@ -238,7 +238,13 @@ say
 # `CMP_HOME` 指定的那个（可从外部覆盖），不在这里偷偷新建。
 CMP_HOME="${CMP_HOME:-${CODEWHALE_HOME:-$HOME_DIR}}"
 mkdir -p "$CMP_HOME"
-[ -f "$HOME_DIR/config.toml" ] && cp "$HOME_DIR/config.toml" "$CMP_HOME/config.toml" 2>/dev/null
+# **不许覆盖目标里已有的配置。**
+# 踩过：CMP_HOME 指向共享的引擎 home 时，这一行把 0 字节的空配置写了进去，
+# 之后的探针全部 400「DeepSeek API key not found」。
+# 测试不能改坏被测环境——补配置是"缺了才补"，不是"有也覆盖"。
+if [ ! -s "$CMP_HOME/config.toml" ] && [ -s "$HOME_DIR/config.toml" ]; then
+  cp "$HOME_DIR/config.toml" "$CMP_HOME/config.toml"
+fi
 # 这一节最慢：命中率是上游给的，可能要试几次才触发压缩。
 # 命中率是上游代理给的，我们控制不了；实测同一份代码，有时 2 次就触发，
 # 有时 4 次都没到 90%（87.8% / 68.8% / 75%）。所以默认给 6 次机会，

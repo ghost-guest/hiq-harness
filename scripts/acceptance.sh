@@ -77,6 +77,24 @@ else
   skip "S1 多回合" "同一线程连续回合，每轮闭合、前缀复用" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
+# fork 之后新线程还能跑完回合。单元测试只验了"id 换了"，
+# 没验 SSE 订阅也跟着换——真引擎上那会让回合静默挂住。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S2 fork 后回合" "fork 出新线程，新线程上回合闭合" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  fk=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" \
+       HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       CODEWHALE_HOME="$CODEWHALE_HOME" \
+       bash scripts/probe-fork.sh 2>&1)
+  if printf '%s' "$fk" | grep -q "^PASS "; then
+    pass "S2 fork 后回合" "fork 出新线程，新线程上回合闭合" "$(printf '%s' "$fk" | grep '^PASS ' | head -1)"
+  else
+    fail "S2 fork 后回合" "fork 出新线程，新线程上回合闭合" "$(printf '%s' "$fk" | tail -3 | tr '\n' ' ')"
+  fi
+else
+  skip "S2 fork 后回合" "fork 出新线程，新线程上回合闭合" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
 # 带审批的多回合：上一条用 auto_approve:true，关掉了守卫/审批路径。
 # 这条用 false，真跑工具，确认守卫路径跨回合没死。
 if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then

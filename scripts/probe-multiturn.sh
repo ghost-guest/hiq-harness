@@ -89,16 +89,15 @@ PROBLEMS=()
 [ "$starts" -eq "$ROUNDS" ] || PROBLEMS+=("回合数不对：发了 $ROUNDS 条，开了 $starts 个回合")
 [ "$ends" -eq "$starts" ] || PROBLEMS+=("有回合没闭合：start=$starts end=$ends（timebus 不闭合，投影全错）")
 
-# 第二回合命中率应高于第一回合（前缀复用）。只有一回合时不判。
-set -- $hits
-if [ $# -ge 2 ]; then
-  [ "$2" -gt "$1" ] || PROBLEMS+=("第二回合命中率没涨（$1% → $2%）——前缀没被复用")
-fi
+# 命中率是**上游代理给的**，我们控制不了。
+# 实测同一份代码：0 98 97 / 0 83 82 / 0 0 83 —— 有时第二回合就是 0。
+# 所以命中率只作**观察**，硬门禁只保留"回合都闭合"。
+REUSE="前缀复用：$( [ -n "$hits" ] && echo "$hits" || echo '本轮无 usage' )"
 
-echo "回合：start=$starts end=$ends ｜ 逐回合命中率：${hits:-（无）}"
+echo "回合：start=$starts end=$ends ｜ 逐回合命中率：${hits:-（无）}（观察项，非门禁）"
 if [ ${#PROBLEMS[@]} -gt 0 ]; then
   echo "## !! 多回合不成立"
   for p in "${PROBLEMS[@]}"; do echo "  - $p"; done
   exit 1
 fi
-echo "PASS 多回合：$ROUNDS 个回合都闭合，前缀跨回合复用（命中率 ${hits}）"
+echo "PASS 多回合：$ROUNDS 个回合都闭合 ｜ $REUSE"

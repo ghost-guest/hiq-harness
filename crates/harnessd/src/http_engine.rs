@@ -305,12 +305,24 @@ impl Engine for HttpEngine {
                     .or_else(|| params.get("threadId").and_then(Value::as_str).map(str::to_string))
                     .context("fork without a thread")?;
                 let v = self.curl("POST", &format!("/v1/threads/{id}/fork"), Some(&json!({})))?;
+                // fork 换了 thread_id，就**必须**把 SSE 订阅一起换掉。
+                // `ensure_stream()` 见 `sse.is_some()` 就直接返回，
+                // 旧订阅还挂在原来的线程上——新线程没有订阅者，
+                // 引擎会让回合停住（POST 201 → 没有事件 → 下一回合 409）。
+                // 实测：fork 之后三条命令都 success:true，但新线程那一回合
+                // 永远不闭合。单元测试里没有 SSE，这条只能靠真引擎探针抓。
                 if let Some(new_id) = v
                     .get("id")
                     .or_else(|| v.pointer("/thread/id"))
                     .and_then(Value::as_str)
                 {
-                    self.thread_id = Some(new_id.to_string());
+                    if self.thread_id.as_deref() != Some(new_id) {
+                        if let Some((mut child, _rx)) = self.sse.take() {
+                            let _ = child.kill();
+                        }
+                        self.sse = None;
+                        self.thread_id = Some(new_id.to_string());
+                    }
                 }
                 Ok(v)
             }
