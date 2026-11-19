@@ -1,7 +1,7 @@
 # S0–S5 验收证据
 
-- 生成时间：2026-11-19 16:40:18 CST
-- 提交：`6a77bef` (test(deferred): 验回合中非 steer 命令不丢——新路径的红方向)
+- 生成时间：2026-11-19 16:49:27 CST
+- 提交：`d18b9fe` (fix(evidence): 证据陈旧（409→414）+ 偶发红被误判成未登记失败)
 - 引擎：`/tmp/kh/codewhale/target/debug/codewhale`（外部二进制，D1 进程依赖）
 
 ## 1. 测试
@@ -11,9 +11,10 @@
 
 | `cargo test --workspace`（内核 9 个 crate） | 414 passed / 0 failed |
 | `cargo test -p orbit-rpc`（接缝① 客户端） | 94 passed / 0 failed |
-| `cargo test -p orbit-pi`（GPUI 界面，无头） | 1933 passed; 5 failed; 0 filtered out; finished in 40.92s |
+| `cargo test -p orbit-pi`（GPUI 界面，无头） | 1933 passed; 5 failed; 0 filtered out; finished in 39.99s |
 
 orbit-pi 的红点（每一条都在 `bench/known-red.txt` 里登记了原因）：`app::session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag git_accounts::tests::workspace_local_identity_and_remotes_are_read_without_remote_access onboarding::tests::every_dependency_has_an_install_hint onboarding::tests::host_facts_cover_the_platform_and_the_stores onboarding::tests::install_hints_match_the_host `
+orbit-pi 偶发红：本次没有（每条未登记失败都单跑确认过，见上）
 
 ## 2. 基准自检（不花 token，不碰网络）
 
@@ -62,7 +63,7 @@ selftest ok: 20 tasks, every check fails before the fix and passes after
 ```
 ### 4.2 建会话
 ```
-{"schema_version":2,"id":"thr_a75e9c1cbf2f4d27bd1cce4155e2602c","created_at":"2026-11-19T08:42:07.255870Z","updated_at":"2026-11-19T08:42:07.255870Z","model":"auto/deepseek-v4.1-flash","model_provider":"custom","model_provider_id":"magipe","workspace":"/private/tmp/evidence-ws.RO4KsG","mode":"agent"```
+{"schema_version":2,"id":"thr_ff1cf365bb0a4903baaf3422fd5cd7a4","created_at":"2026-11-19T08:51:17.171143Z","updated_at":"2026-11-19T08:51:17.171143Z","model":"auto/deepseek-v4.1-flash","model_provider":"custom","model_provider_id":"magipe","workspace":"/private/tmp/evidence-ws.3dIp0I","mode":"agent"```
 ### 4.3 档位（合法值被接受，非法值被拒绝并列出**全部**取值）
 ```
 reasoning_effort=low   -> 201
@@ -74,11 +75,11 @@ Unrecognized reasoning effort "bogus". Expected one of: auto, off, minimal, low,
 ```
 事件种类: {'thread.started': 1, 'turn.started': 1, 'item.started': 3, 'item.completed': 4, 'turn.lifecycle': 1, 'turn.workspace_snapshot': 4, 'model.tools.snapshot': 3, 'turn.provider_request': 2, 'turn.usage': 2, 'operation.activity_started': 1, 'operation.activity_completed': 1, 'item.delta': 1, 'turn.completed': 1, 'turn.artifacts': 1}
 工具调用: ['bash', 'bash']
-用量: {"input_tokens": 12274, "output_tokens": 12, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 12274, "prompt_cache_write_tokens": 0, "reasoning_tokens": 0, "reasoning_replay_tokens": 4}
+用量: {"input_tokens": 12264, "output_tokens": 4, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 12264, "prompt_cache_write_tokens": 0, "reasoning_tokens": 0, "reasoning_replay_tokens": 4}
 ```
 ### 4.5 fork 出新会话（接在一个已完成轮次的会话上——空会话没有可分的枝）
 ```
-n_observation":{"sessions_dir":"/tmp/evidence-home.2sjnQ6/sessions","session_id":"19956da1-362f-4711-bbfc-cd15e98af2f7","document_sha256":"8d6be97205fa2d894ad6567418d14b7d8158e98e7af0c1fa1ae9911bd3f0f74b","checkpoint_sha256":null},"covered_turn_id":"turn_1770b44b85e344958a908ab29a8d2db6","messages_sha256":"21080d325d9902258fab44fd9d6ea3b5ecdcbed5e02cf82c7eed75be1d34d2fc","messages_len":4}}
+n_observation":{"sessions_dir":"/tmp/evidence-home.kjQ4ix/sessions","session_id":"43f95f31-4f52-4e35-a0e2-717a8ada2134","document_sha256":"e9116226348fc67be44c53982483fcdd9064e5dceee4451fb0f5d50144ceb06b","checkpoint_sha256":null},"covered_turn_id":"turn_727f8181684345c087325bdc494443dd","messages_sha256":"a9f704143e673f523b5440af220fbc0f230631d20600e514c493f41a186e30b7","messages_len":4}}
 -> 201
 ```
 ### 5. 审批通道：真引擎里 deny 一条命令，这一轮还能正常收尾
@@ -86,8 +87,8 @@ n_observation":{"sessions_dir":"/tmp/evidence-home.2sjnQ6/sessions","session_id"
 > 这条通道曾经整条是坏的（id 硬编码 0 / 命令没摊平 / 词表抄错 / 重复投递），
 > 而所有基线都跑在 `auto_approve:true` 上，所以没人发现。探针会自己起一个引擎去验。
 ```
-approval: id=approval_15e6511972a24757b9cb6c76d15a4fcd tool=bash command='echo hi'
-POST /v1/approvals/approval_15e6511972a24757b9cb6c76d15a4fcd {'decision':'deny'} → 200 ok
+approval: id=approval_571f160a22ce4ebfa3fb7cbcfd0977d7 tool=bash command='echo hi'
+POST /v1/approvals/approval_571f160a22ce4ebfa3fb7cbcfd0977d7 {'decision':'deny'} → 200 ok
 turn end: turn.completed
 PASS 审批通道：id 对、命令对、deny 被接受、这一轮正常收尾
 ```
@@ -133,7 +134,7 @@ PASS 常驻 4 事件（turn.start / tool.pre / tool.post / turn.end）在真回�
 ```
 收到的事件：turn.end turn.start 
 用量（cached_tokens 尾两条）："cached_tokens":0 "cached_tokens":0 
-scripts/probe-compact.sh: line 96: 46870 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
+scripts/probe-compact.sh: line 96: 87011 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
 import json, sys, time, urllib.request
 port = sys.argv[1]; base = f"http://127.0.0.1:{port}"
 answered = set(); deadline = time.time() + 600
@@ -157,7 +158,7 @@ APPROVER
 …第 4/6 次没触发（实际命中率：hit only 0.0% hit only 0.0% hit only 0.0% ）
 收到的事件：turn.end turn.start 
 用量（cached_tokens 尾两条）："cached_tokens":0 "cached_tokens":0 
-scripts/probe-compact.sh: line 96: 47438 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
+scripts/probe-compact.sh: line 96: 87589 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
 import json, sys, time, urllib.request
 port = sys.argv[1]; base = f"http://127.0.0.1:{port}"
 answered = set(); deadline = time.time() + 600
@@ -180,8 +181,8 @@ APPROVER
 
 …第 4/6 次没触发（实际命中率：hit only 0.0% hit only 0.0% hit only 0.0% ）
 收到的事件：turn.end turn.start 
-用量（cached_tokens 尾两条）："cached_tokens":0 "cached_tokens":0 
-scripts/probe-compact.sh: line 96: 47967 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
+用量（cached_tokens 尾两条）："cached_tokens":19968 "cached_tokens":24576 
+scripts/probe-compact.sh: line 96: 88112 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
 import json, sys, time, urllib.request
 port = sys.argv[1]; base = f"http://127.0.0.1:{port}"
 answered = set(); deadline = time.time() + 600
@@ -202,10 +203,11 @@ while time.time() < deadline:
     time.sleep(1)
 APPROVER
 
-…第 4/6 次没触发（实际命中率：hit only 0.0% hit only 0.0% hit only 0.0% ）
-收到的事件：turn.end turn.start 
-用量（cached_tokens 尾两条）："cached_tokens":0 "cached_tokens":0 
-scripts/probe-compact.sh: line 96: 48472 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
+…第 4/6 次没触发（实际命中率：hit only 76.7% hit only 81.1% hit only 84.1% ）
+…第 2 回合就触发了压缩，提前结束（还剩 2 回合没跑）
+收到的事件：compact.pre turn.end turn.start 
+用量（cached_tokens 尾两条）："cached_tokens":15360 "cached_tokens":15360 
+scripts/probe-compact.sh: line 96: 88677 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
 import json, sys, time, urllib.request
 port = sys.argv[1]; base = f"http://127.0.0.1:{port}"
 answered = set(); deadline = time.time() + 600
@@ -226,60 +228,9 @@ while time.time() < deadline:
     time.sleep(1)
 APPROVER
 
-…第 4/6 次没触发（实际命中率：hit only 0.0% hit only 0.0% hit only 0.0% ）
-收到的事件：turn.end turn.start 
-用量（cached_tokens 尾两条）："cached_tokens":0 "cached_tokens":0 
-scripts/probe-compact.sh: line 96: 48996 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
-import json, sys, time, urllib.request
-port = sys.argv[1]; base = f"http://127.0.0.1:{port}"
-answered = set(); deadline = time.time() + 600
-while time.time() < deadline:
-    try:
-        pend = json.loads(urllib.request.urlopen(base + "/v1/approvals", timeout=5).read())
-        for a in (pend.get("approvals") or pend.get("pending") or []):
-            aid = a.get("id") or a.get("approval_id")
-            if not aid or aid in answered: continue
-            answered.add(aid)
-            req = urllib.request.Request(base + f"/v1/approvals/{aid}",
-                data=json.dumps({"decision": "allow"}).encode(),
-                headers={"content-type": "application/json"}, method="POST")
-            try: urllib.request.urlopen(req, timeout=10)
-            except Exception: pass
-    except Exception:
-        pass
-    time.sleep(1)
-APPROVER
-
-…第 4/6 次没触发（实际命中率：hit only 0.0% hit only 0.0% hit only 0.0% ）
-收到的事件：turn.end turn.start 
-用量（cached_tokens 尾两条）："cached_tokens":0 "cached_tokens":0 
-scripts/probe-compact.sh: line 96: 49515 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
-import json, sys, time, urllib.request
-port = sys.argv[1]; base = f"http://127.0.0.1:{port}"
-answered = set(); deadline = time.time() + 600
-while time.time() < deadline:
-    try:
-        pend = json.loads(urllib.request.urlopen(base + "/v1/approvals", timeout=5).read())
-        for a in (pend.get("approvals") or pend.get("pending") or []):
-            aid = a.get("id") or a.get("approval_id")
-            if not aid or aid in answered: continue
-            answered.add(aid)
-            req = urllib.request.Request(base + f"/v1/approvals/{aid}",
-                data=json.dumps({"decision": "allow"}).encode(),
-                headers={"content-type": "application/json"}, method="POST")
-            try: urllib.request.urlopen(req, timeout=10)
-            except Exception: pass
-    except Exception:
-        pass
-    time.sleep(1)
-APPROVER
-
-…第 4/6 次没触发（实际命中率：hit only 0.0% hit only 0.0% hit only 0.0% ）
-FAIL 6 次都没收到 compact.pre（看 /tmp/compact-harnessd.log 与 /tmp/compact-engine.log）
+PASS compact.pre 端到端到达插件（真引擎 + 真 harnessd + 真插件，第 2 次）
 ```
-OBSERVE 真压缩探针：这一轮上游命中率没到线，compact.pre 未触发（不算失败，但记录在此）
-  实测：hit only 0.0% hit only 0.0% hit only 0.0% 
-  内核侧压缩判定由 crates/harnessd/src/cacheguard.rs 单测覆盖（5/5 通过）
+OK 真压缩探针：这一轮触发了 compact.pre
 ## 9. 界面真的渲染出来了（OCR，不是人眼）
 
 界面这一格以前是"没人看过"。现在用截图 + OCR 断言关键控件在位——
