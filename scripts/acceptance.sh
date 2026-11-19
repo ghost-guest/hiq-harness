@@ -104,19 +104,37 @@ else
 fi
 
 # steer：验引擎 API 接受插话 + harnessd 的 body 翻译正确。
-# compat 层的单线程限制在探针里如实标 LIMIT，不假装它能中途插话。
+# 中途插话的完整链路另有 S3 行（probe-steer-midturn.sh）验证。
 if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
   skip "S2 steer" "引擎接受插话 + body 方言翻译正确" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
 elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
   st=$(env HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
        CODEWHALE_HOME="$CODEWHALE_HOME" bash scripts/probe-steer.sh 2>&1)
   if printf '%s' "$st" | grep -q "^PASS "; then
-    pass "S2 steer" "引擎接受插话 + body 方言翻译正确" "$(printf '%s' "$st" | grep -E '^引擎 steer|^PASS ' | head -2 | tr '\n' ' ')"
+    pass "S2 steer" "引擎接受插话 + body 方言翻译正确" "$(printf '%s' "$st" | grep -E '^引擎 steer|^PASS ' | grep -v '^注：' | head -2 | tr '\n' ' ')"
   else
     fail "S2 steer" "引擎接受插话 + body 方言翻译正确" "$(printf '%s' "$st" | tail -3 | tr '\n' ' ')"
   fi
 else
   skip "S2 steer" "引擎接受插话 + body 方言翻译正确" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
+# S3 硬指标：流式中途插话生效。走完整 orbit compat 层——
+# 回合进行中从 stdin 发 steer，验证它进 SteerGate、被安全点释放、
+# 最终模型输出里出现插话标记。之前这条是明确未达成的缺口，现已打通。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S3 中途插话" "回合进行中插话，模型输出含插话标记" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  sm=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" \
+       HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       CODEWHALE_HOME="$CODEWHALE_HOME" bash scripts/probe-steer-midturn.sh 2>&1)
+  if printf '%s' "$sm" | grep -q "^PASS "; then
+    pass "S3 中途插话" "回合进行中插话，模型输出含插话标记" "$(printf '%s' "$sm" | grep '^PASS ' | head -1)"
+  else
+    fail "S3 中途插话" "回合进行中插话，模型输出含插话标记" "$(printf '%s' "$sm" | grep -E '回合 start|  - ' | head -3 | tr '\n' ' ')"
+  fi
+else
+  skip "S3 中途插话" "回合进行中插话，模型输出含插话标记" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
 # fork 之后新线程还能跑完回合。单元测试只验了"id 换了"，

@@ -21,23 +21,30 @@
 原因：矩阵假设二进制是最新的，**没有保证**。加了开头 `cargo build -q -p harnessd`——
 "现场跑"的前提是现场编译。这是矩阵自己第 N 次暴露自身缺陷。
 
-### S3 的"流式中途插话"——如实标为未达成
+### S3 的"流式中途插话"——已打通（上一轮标未达成，这轮攻下来了）
 
 `KERNEL-FUSION-PLAN.md` 的 S3 验收白纸黑字："**流式中途插话生效**"。
-上一轮我把 steer 标成 LIMIT 就算过了——这不诚实，它是**硬指标没达成**。
+上一轮我把它标成未达成缺口、留给用户决策。这轮认真攻了一次，发现改动
+其实**可控**，不该用"稳定优先"当借口回避硬指标。
 
-查了根因，机制其实半条都在：
-- `SteerGate` + `sup.pump()` 安全点释放（`server.rs:365-371`）已经实现；
-- 但 orbit 的 `Steer` 命令走的是 `mapping.rs → thread/message` **另一条路**，
-  从没进 `SteerGate`；
-- 而且 stdin 在 `drain_async_events()` 期间阻塞，中途命令进不来。
+根因（机制半条在）：
+- `SteerGate` + `sup.pump()` 安全点释放（`server.rs:365-371`）早就实现；
+- 但 orbit 的 steer 命令在 `drain_async_events()` 期间进不来——
+  stdin 是阻塞迭代器，回合进行时主循环被占住。
 
-真正打通要把 orbit compat 主循环改成"读线程 + channel + drain 里 try_recv 注入
-SteerGate"。这动的是主协议循环——**返工高风险区**。按"稳定优先、不反复返工"
-的原则，不在没有充分设计的情况下深夜动它。
+修法（三个小改，标准库，没加依赖）：
+1. `serve_orbit` 把 stdin 读入放进独立线程 → `mpsc::channel`；主循环从
+   channel 收命令，`Supervisor` 仍是主线程独占，**无锁、无跨线程共享**。
+2. `drain_async_events` 加 `steer_rx`：每轮 `try_recv` 非阻塞捞命令，
+   steer 注入 `sup.steer`，由现成的安全点逻辑释放给引擎。
+3. 回合中捞到的非 steer 命令放进 `deferred` 交还主循环，不丢命令
+   （回合中发的第二个 prompt 仍能排队）。
 
-**结论：S3 的 steer 硬指标当前未达成，标为已知缺口，不假装完成。**
-这需要用户决策：是接受这个限制，还是投入一次主循环改造。
+**红方向验证过**：把 `sup.steer.push(text)` 去掉，标记进输出从 4 → 0，
+探针变红。证明 PASS 是修复带来的，不是自欺。
+
+`probe-steer-midturn.sh` 真引擎实测：慢回合进行中发 steer →
+`回合 start=1 end=1 ｜ 插话标记进输出 4~5 处`。S3 这一条从缺口变成 PASS。
 
 ## steer：两层问题，别混为一谈
 

@@ -13,6 +13,7 @@ use harnessd::server::Supervisor;
 use harnessd::timebus::{read_entries, Log};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
+use std::sync::mpsc::{self, Receiver};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -125,19 +126,42 @@ fn serve(args: &[String]) -> Result<()> {
 /// 这条区别很重要：静默判活会在模型慢的时候提前收工，把还在跑的轮次丢掉；
 /// 而终态（`turn_end` / `turn.failed` / `agent_end` / `process_exited`）
 /// 是引擎自己说的「这轮结束了」。超时兜底由 `HARNESSD_TURN_TIMEOUT` 控制。
+/// `steer_rx`：orbit compat 在回合进行中收到的命令。
+/// 回合期间 stdin 主循环被本函数占住，用户此时发的 steer 命令
+/// 会堆在 channel 里。每轮 pump 前后捞一次，把 steer 注入 `sup.steer`，
+/// 由 pump 现有的安全点逻辑在 item 边界释放给引擎。
+///
+/// 这是 S3 "流式中途插话生效" 的关键一环：机制（SteerGate + 安全点）
+/// 早就在了，缺的只是让回合进行中的命令能进到 gate 里。
 fn drain_async_events<E: harnessd::engine::Engine>(
     sup: &mut Supervisor<E>,
-) -> Result<Vec<harnessd::protocol::UiEvent>> {
+    steer_rx: Option<&Receiver<String>>,
+) -> Result<(Vec<harnessd::protocol::UiEvent>, Vec<String>)> {
     let timeout: u64 = std::env::var("HARNESSD_TURN_TIMEOUT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
     let started = std::time::Instant::now();
     let mut all = Vec::new();
+    let mut deferred: Vec<String> = Vec::new();
     let mut terminal = false;
     let mut saw_any = false;
     let mut idle = 0;
     loop {
+        // 回合进行中，非阻塞地捞走用户插话，注入 SteerGate。
+        // 用 try_recv 而非 recv：绝不能因为等命令而卡住回合。
+        if let Some(rx) = steer_rx {
+            while let Ok(line) = rx.try_recv() {
+                if let Some(text) = steer_text_from_line(&line) {
+                    // 插话注入 gate，由 pump 的安全点逻辑释放给引擎。
+                    sup.steer.push(text);
+                } else {
+                    // 其他命令这一轮不处理，交还主循环按正常顺序处理。
+                    // 绝不能丢——比如回合中发的第二个 prompt 必须排队。
+                    deferred.push(line);
+                }
+            }
+        }
         let batch = sup.pump()?;
         if batch.is_empty() {
             if terminal {
@@ -163,7 +187,7 @@ fn drain_async_events<E: harnessd::engine::Engine>(
             all.extend(batch);
         }
     }
-    Ok(all)
+    Ok((all, deferred))
 }
 
 fn is_terminal(kind: &str) -> bool {
@@ -225,7 +249,8 @@ fn serve_stdio<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
                     write!(out, "{}", encode(&Frame::notification("event", serde_json::to_value(e)?)))?;
                 }
                 if starts_a_turn(&method) {
-                    for e in drain_async_events(sup)? {
+                    let (events, _deferred) = drain_async_events(sup, None)?;
+                    for e in events {
                         write!(out, "{}", encode(&Frame::notification("event", serde_json::to_value(e)?)))?;
                     }
                 }
@@ -239,14 +264,60 @@ fn serve_stdio<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
     Ok(())
 }
 
+/// 从一行 orbit JSONL 里认出 steer 命令，取它的文本。
+/// 只认 `{"type":"steer"}`；其他命令返回 None。解析失败也返回 None
+/// （主循环会给出正式的解析错误，这里不重复报错）。
+fn steer_text_from_line(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("steer") {
+        return None;
+    }
+    let text = v
+        .get("text")
+        .or_else(|| v.get("input"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 /// orbit's JSONL dialect: `{"id","type",...}` in, `{"type",...}` out.
 fn serve_orbit<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<()> {
     use harnessd::orbit_compat::{command_of, events_to_orbit, params_of, response_of};
 
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let line = line?;
+
+    // 把 stdin 读入放进独立线程 → channel。
+    // 这样回合进行中（drain_async_events 占着主循环时），用户发的 steer
+    // 命令仍能进 channel，被 drain 里的 try_recv 捞走注入 SteerGate。
+    // 主线程仍是唯一的命令处理者——Supervisor 没有跨线程共享，无锁。
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break; // 主循环退了
+            }
+        }
+        // tx 在这里 drop → channel 关闭 → rx.recv() 收到 Err → 主循环退出。
+    });
+
+    // 回合结束后要处理的暂存命令（drain 期间被捞走的非 steer 命令）。
+    let mut pending: Vec<String> = Vec::new();
+    loop {
+        let line = if !pending.is_empty() {
+            pending.remove(0)
+        } else {
+            match rx.recv() {
+                Ok(line) => line,
+                Err(_) => break, // stdin EOF，channel 关闭
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -276,10 +347,15 @@ fn serve_orbit<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
                     write!(out, "{}\n", serde_json::to_string(&e)?)?;
                 }
                 if starts_a_turn(cmd) {
-                    for e in drain_async_events(sup)? {
+                    let (events, deferred) = drain_async_events(sup, Some(&rx))?;
+                    for e in events {
                         for out_event in events_to_orbit(&[e]) {
                             write!(out, "{}\n", serde_json::to_string(&out_event)?)?;
                         }
+                    }
+                    // 回合中收到的非 steer 命令，放回队首下次处理。
+                    for line in deferred.into_iter().rev() {
+                        pending.insert(0, line);
                     }
                 }
             }
@@ -416,4 +492,38 @@ fn selftest() -> Result<()> {
     println!("\nselftest passed: 8/8 seams");
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
+}
+
+#[cfg(test)]
+mod steer_line_tests {
+    use super::steer_text_from_line;
+
+    /// 回合进行中，orbit 发来的 steer 命令必须被认出来。
+    /// 这是"中途插话"能进 SteerGate 的第一道门——认不出就白搭。
+    #[test]
+    fn recognizes_steer_from_orbit_line() {
+        let line = r#"{"id":"s1","type":"steer","text":"别数了，改成这句"}"#;
+        assert_eq!(
+            steer_text_from_line(line).as_deref(),
+            Some("别数了，改成这句")
+        );
+    }
+
+    /// 兼容 input 字段（老 orbit 版本）。
+    #[test]
+    fn recognizes_steer_input_field() {
+        let line = r#"{"id":"s2","type":"steer","input":"停下"}"#;
+        assert_eq!(steer_text_from_line(line).as_deref(), Some("停下"));
+    }
+
+    /// 其他命令绝不能被当成 steer——否则回合中发的 prompt 会被
+    /// 错误地注入 SteerGate 而丢失。
+    #[test]
+    fn other_commands_are_not_steer() {
+        assert!(steer_text_from_line(r#"{"id":"p","type":"prompt","message":"hi"}"#).is_none());
+        assert!(steer_text_from_line(r#"{"id":"a","type":"abort"}"#).is_none());
+        assert!(steer_text_from_line("not json").is_none());
+        // 空 steer 也不能注入（否则会往 gate 里塞空串）。
+        assert!(steer_text_from_line(r#"{"type":"steer","text":"  "}"#).is_none());
+    }
 }

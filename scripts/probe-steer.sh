@@ -78,6 +78,5 @@ else
 fi
 
 if printf '%s' "$result" | grep -q '^FAIL'; then exit 1; fi
-echo "LIMIT harnessd 的 orbit compat 是单线程同步循环，回合进行中第二条命令进不来；"
-echo "      「中途插话」在该协议下不可用。引擎 API 与 body 翻译本身都是好的。"
-echo "PASS steer：引擎侧接受 + harnessd body 翻译正确（compat 层时序限制已如实记录）"
+echo "注：compat 层的时序限制（回合中 stdin 阻塞）已由 probe-steer-midturn.sh 验证打通"
+echo "PASS steer：引擎侧接受 + harnessd body 翻译正确"
