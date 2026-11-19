@@ -309,7 +309,23 @@ else
   say "  实测：$(printf '%s' "$cmp" | grep -o 'hit only [0-9.]*%' | tail -3 | tr '\n' ' ')"
   say "  内核侧压缩判定由 crates/harnessd/src/cacheguard.rs 单测覆盖（5/5 通过）"
 fi
-rm -rf "$CMP_HOME" 2>/dev/null || true
+# **只删我们自己建的那个。**
+# 踩过：CMP_HOME 默认落到 $CODEWHALE_HOME（外部给的共享引擎 home），
+# 这一行 `rm -rf` 把整个引擎 home 删了，之后所有真引擎探针都 400 / 无输出。
+# 上一轮只修了"别覆盖配置"，没修"别删目录"——同一个教训的两半。
+if [ "$CMP_HOME" = "$HOME_DIR" ]; then
+  rm -rf "$CMP_HOME" 2>/dev/null || true
+fi
+
+# 自检：外部给的引擎 home，跑完必须原样还在。
+# 测试不能改坏被测环境——这次是硬检查，不是注释里的提醒。
+if [ -n "${CODEWHALE_HOME:-}" ]; then
+  if [ -s "$CODEWHALE_HOME/config.toml" ]; then
+    say "环境自检：外部引擎 home 的 config.toml 完好（$(wc -c < "$CODEWHALE_HOME/config.toml" | tr -d ' ') 字节）"
+  else
+    PROBLEMS+=("外部引擎 home 的 config.toml 被本轮测试弄没了：$CODEWHALE_HOME")
+  fi
+fi
 
 say "## 9. 界面真的渲染出来了（OCR，不是人眼）"
 say
