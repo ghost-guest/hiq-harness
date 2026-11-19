@@ -72,9 +72,9 @@ MUTANTS = [
     # ---- 映射兜底 ----
     # ---- 这一夜修过的每个缺陷，都问一遍：有测试守着吗 ----
     ("silent-drop-guard", "crates/harnessd/src/server.rs",
-     'anyhow::bail!("engine rejected this turn: no turn started, no output (prompt dropped)");',
-     'let _ = (opened, closed);',
-     "harnessd", "被拒的回合又变回静默成功"),
+     '"engine rejected this turn: no turn id, no output (prompt dropped)"',
+     '"engine accepted this turn (downgraded)"',
+     "harnessd", "被拒的回合又被当成正常（错误文案都被改了）"),
     ("compact-failure-silent", "crates/harnessd/src/server.rs",
      'out.push(UiEvent::new(\n                                        "compact_failed",',
      'out.push(UiEvent::new(\n                                        "compact_ok",',
@@ -91,6 +91,12 @@ MUTANTS = [
      "self.cache.observe(input, cached);",
      "self.cache.observe(0, 0);",
      "harnessd", "缓存守卫永远拿到 0/0（永远\"没问题\"）"),
+    # 回合 id 必须能穿过 handle 的包装；丢了它，第 2 回合会被误判成"被拒"
+    ("turn-id-dropped-in-wrap", "crates/harnessd/src/server.rs",
+     '"turn_id": out.get("turn_id"),',
+     '"turn_id": Value::Null,',
+     "harnessd", "包装时丢掉回合 id（多回合被误判成被拒）"),
+
     ("mapping-unknown-command", "crates/harnessd/src/mapping.rs",
      '"Prompt" => {',
      '"Prompt-DISABLED" => {',

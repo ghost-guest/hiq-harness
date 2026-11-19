@@ -142,6 +142,9 @@ impl<E: Engine> Supervisor<E> {
                             "thread": { "id": thread },
                             "output": out.get("output"),
                             "model": out.get("model"),
+                            // 回合 id 必须带着，否则上层判据（见下方 `accepted`）
+                            // 拿不到证据，会把好回合误判成"被拒"。
+                            "turn_id": out.get("turn_id"),
                         });
                     }
                 }
@@ -151,16 +154,33 @@ impl<E: Engine> Supervisor<E> {
                 // 回 success 会让 orbit 以为消息发出去了，而它静默消失了。
                 // 这不是假想：连续发 4 条 prompt 时只有第 1 条真的跑了，另外 3 条
                 // 都拿到了 `{"output": null}` + `success: true`。
-                let fresh = &self.log.entries()[entries_before.min(self.log.entries().len())..];
-                let opened = fresh.iter().any(|e| e.kind == "turn.start");
-                let closed = fresh.iter().any(|e| e.kind == "turn.end");
+                // 判"引擎到底接没接这一轮"，唯一可靠的同步证据是**回合 id**。
+                //
+                // HTTP 上 `POST /turns` 成功就带 `turn_id`；被拒（上一轮还没结束、
+                // 线程状态不对）则没有。stdout 方言同理，`prompt/run` 成功会带
+                // `output` 或回合事件。
+                //
+                // 不能用 `turn.start`：那一行是**我们自己**在发请求前写的，永远在——
+                // 用它判断"引擎跑没跑"等于自己给自己作证。
+                // 也不能用"这一瞬间 pump 到了什么"：HTTP 回合是异步的，
+                // 201 返回时引擎还没产出事件，那一瞬间永远是空的。
+                // （踩过：第 1 回合正常，第 2 回合被这条误判成"被拒"。）
+                let accepted = reply
+                    .pointer("/turn/turn_id")
+                    .or_else(|| reply.pointer("/turn/id"))
+                    .or_else(|| reply.get("turn_id"))
+                    .and_then(Value::as_str)
+                    .is_some()
+                    || reply.get("output").map(|v| !v.is_null()).unwrap_or(false)
+                    || reply.get("model").is_some();
                 if (method == "prompt/run" || method == "prompt/request" || method == "turn/start")
-                    && opened
-                    && !closed
-                    && reply.get("output").map(Value::is_null).unwrap_or(true)
+                    && !accepted
                 {
-                    anyhow::bail!("engine rejected this turn: no turn started, no output (prompt dropped)");
+                    anyhow::bail!(
+                        "engine rejected this turn: no turn id, no output (prompt dropped)"
+                    );
                 }
+
                 Ok((reply, events))
             }
         }
@@ -813,6 +833,42 @@ for line in sys.stdin:
     /// `output` 也没有任何回合事件。之前的实现把它原样当成功回给 orbit——
     /// **消息静默消失**，而调用方看到的是 `success: true`。
     /// 这条测试钉住：那种回应必须变成错误。
+    #[test]
+    /// 包装不能吃掉回合 id。
+    ///
+    /// 变异扫描抓到的：把 `turn_id` 换成 `Value::Null`，单元测试全绿。
+    /// 但真引擎上第 2 回合会被判成"被拒"——因为上层唯一可靠的
+    /// "引擎接没接这一轮"的证据就是这个 id。
+    /// （真引擎实测：201 返回 `{"thread":…,"turn":{"id":"turn_…"}}`，
+    ///   handle 手工包装时把 turn 整个丢了。）
+    #[test]
+    fn prompt_reply_keeps_the_turn_id_through_wrapping() {
+        let log = tmp_log("turn-id-wrap");
+        let path = log.path().to_path_buf();
+        let mut sup = Supervisor::new(
+            MockEngine::new(|method, _| {
+                if method == "prompt/run" {
+                    json!({ "turn_id": "turn_abc", "output": "ok" })
+                } else {
+                    json!({ "thread": { "id": "thr_1" } })
+                }
+            }),
+            log,
+            128_000,
+        );
+        sup.state.thread_id = Some("thr_1".into());
+        sup.state.pending_prompt = Some("先存着的那条".into());
+
+        let outcome = sup.handle("Prompt", json!({ "text": "不会真发出去" }));
+        let _ = std::fs::remove_file(&path);
+        let reply = outcome.expect("带着 turn_id 的回合不该被当成被拒");
+        assert_eq!(
+            reply.0.get("turn_id").and_then(Value::as_str),
+            Some("turn_abc"),
+            "包装后回合 id 必须还在——丢了它，真引擎多回合会被误判成被拒"
+        );
+    }
+
     #[test]
     fn a_rejected_prompt_is_an_error_not_a_silent_drop() {
         let log = tmp_log("prompt-drop");

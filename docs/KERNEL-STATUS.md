@@ -13,7 +13,7 @@
 `nudges_then_refuses_then_stops` 从没验过 stop。名字、注释、文档都能骗人，
 只有"改坏它，看它红不红"骗不了人。
 
-最近一次全量（`MUTATE=1 bash scripts/gate.sh` 里跑）——**14 个，全部是测试挡的**：
+最近一次全量（`MUTATE=1 bash scripts/gate.sh` 里跑）——**15 个，全部是测试挡的**：
 
 | 变异体 | 改坏了什么 | 结果 | 说明 |
 |---|---|---|---|
@@ -25,14 +25,38 @@
 | cache-pressure | 压力线归零（永远觉得窗口满） | KILLED | 测试红了 |
 | approval-allow-word | 裸 "allow" 不再被认（引擎会 400） | KILLED | 测试红了 |
 | turn-completed-dropped | 正常完成的回合不再被认作完成 | KILLED | 测试红了 |
-| silent-drop-guard | 被拒的回合又变回静默成功 | KILLED | 测试红了 |
+| silent-drop-guard | 被拒的回合又被当成正常（错误文案都被改了） | KILLED | 测试红了 |
 | compact-failure-silent | 压缩失败被记成成功（坏消息翻译成好消息） | KILLED | 测试红了 |
 | protocol-turn-end | protocol 层不认 turn.completed | KILLED | 测试红了 |
 | orbit-flat-nesting | 扁平化变成嵌套（界面会读不到） | KILLED | 测试红了 |
 | cache-observed-values | 缓存守卫永远拿到 0/0（永远"没问题"） | KILLED | 测试红了 |
+| turn-id-dropped-in-wrap | 包装时丢掉回合 id（多回合被误判成被拒） | KILLED | 测试红了 |
 | mapping-unknown-command | Prompt 命令掉进兜底 | KILLED | 测试红了 |
 
-全部 14 个变异体都被抓到（没有 STALE，也没有 SURVIVED）。
+全部 15 个变异体都被抓到（没有 STALE，也没有 SURVIVED）。
+
+### 变异扫描证明不了的东西：多回合
+
+`mutate.py` 跑的是单元测试。有一类缺陷它**天生看不见**——
+"先订阅再发回合"和"回合 id 带回顶层"都只在真引擎上才显形。
+它们的假象是：**第 1 回合正常，第 2 回合被拒**。单元测试里没有引擎，
+永远看不到。
+
+加 `scripts/probe-multiturn.sh`，断言三件事：同一线程连着跑 N 轮、
+每轮 `turn.start`/`turn.end` 数量相等、命中率跨轮上涨（前缀真的复用）。
+
+它一跑就红了，挖出一条**真缺陷**：
+
+> 引擎 HTTP 响应是 `{"thread":…, "turn":{"id":"turn_…"}}`，
+> harnessd 的 `handle` 手工包装成 `{"thread":…,"output":…,"model":…}` 时
+> 把 `turn` 整个丢掉了。上层判断"引擎接没接这一轮"唯一可靠的同步证据
+> 就是这个 id——id 没了，第 2 回合被误判成"被拒"。
+
+旧守卫的判据更糟：它看 `turn.start`，而那一行是**我们自己**在发请求前写的，
+永远在——等于自己给自己作证。
+
+修完实测：**3 回合全闭合，命中率 0 → 98 → 97**。前缀复用这条
+现在也进了验收矩阵（S1 多回合，14/14）。
 
 ### 扩到"这一夜修过的每个缺陷"
 

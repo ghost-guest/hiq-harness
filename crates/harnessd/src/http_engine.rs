@@ -285,7 +285,17 @@ impl Engine for HttpEngine {
                     self.last_turn = Some(t.to_string());
                 }
                 self.ensure_stream();
-                Ok(json!({ "thread": { "id": id }, "turn": v }))
+                // 回合 id 要带到顶层。引擎的响应是 `{"thread":…, "turn":{"id":…}}`，
+                // 但上层 `handle` 会把返回包成 `{"thread":…, "output":…, "model":…}`，
+                // `turn` 整个丢掉。丢掉之后上层**无法判断引擎到底接没接这一轮**——
+                // 判据查不到，回合被误判成"被拒"。（真实踩过：第 1 回合正常，
+                // 第 2 回合被拒，而引擎其实 201 返回了。）
+                let turn_id = v
+                    .get("id")
+                    .or_else(|| v.pointer("/turn/id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                Ok(json!({ "thread": { "id": id }, "turn": v, "turn_id": turn_id }))
             }
             // 分叉：`Fork`（回到某条消息之前）与 `CloneSession`（原样复制）都走这一条。
             "thread/fork" => {

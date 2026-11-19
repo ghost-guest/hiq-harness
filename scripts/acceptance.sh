@@ -58,6 +58,25 @@ else
   skip "S1 接缝①" "流式文本 + 工具调用 + 收尾" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
+# 多回合：同一线程连着跑 N 轮，每轮都闭合，前缀跨轮复用。
+# 变异扫描证明不了这个——"先订阅再发回合"和"turn_id 带回顶层"
+# 都只在真引擎上才看得出来（假象：第 1 轮好，第 2 轮被误判成"被拒"）。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S1 多回合" "同一线程连续回合，每轮闭合、前缀复用" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  mt=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" \
+       HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       CODEWHALE_HOME="$CODEWHALE_HOME" ROUNDS=3 \
+       bash scripts/probe-multiturn.sh 2>&1)
+  if printf '%s' "$mt" | grep -q "^PASS "; then
+    pass "S1 多回合" "同一线程连续回合，每轮闭合、前缀复用" "$(printf '%s' "$mt" | grep '^PASS ' | head -1)"
+  else
+    fail "S1 多回合" "同一线程连续回合，每轮闭合、前缀复用" "$(printf '%s' "$mt" | tail -3 | tr '\n' ' ')"
+  fi
+else
+  skip "S1 多回合" "同一线程连续回合，每轮闭合、前缀复用" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
 # 命令覆盖：orbit 声明的每个命令都要有映射（"能跑"不够，要"没有漏"）
 cov=$(cargo test -q -p harnessd every_orbit_command_maps_to_something 2>&1)
 ty=$(cargo test -q -p harnessd every_orbit_type_we_claim_is_mapped 2>&1)
