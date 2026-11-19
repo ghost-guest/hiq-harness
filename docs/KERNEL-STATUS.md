@@ -70,14 +70,17 @@
 mock 里只有 `{"text": "..."}` 那一种，所以从没测出来。
 抽成 `steer_text()` 认三种方言，单测 + 变异体钉住。
 
-**② 架构限制（未修，如实记录）：compat 层做不了中途插话。**
-orbit compat 是**单线程同步循环**，`prompt` 命令会 `drain_async_events()`
-一直阻塞到回合结束。此时 steer 命令根本进不来。
-但**引擎自己的 steer API 是好的**——直连实测：回合进行中发 steer，返回 200。
+**② 架构限制（当时未修，现已修）：compat 层做不了中途插话。**
+当时的问题：orbit compat 是**单线程同步循环**，`prompt` 命令会
+`drain_async_events()` 一直阻塞到回合结束，此时 steer 命令根本进不来。
+而**引擎自己的 steer API 是好的**——直连实测回合进行中发 steer 返回 200。
 限制在我们这一层，不在引擎。
 
-探针不再假装 compat 能中途插话：A 直连引擎验 API，B 单测验 body 翻译，
-然后明写 `LIMIT`。**把不能做的事说清楚，比假装有要值钱。**
+当时我没有收工，而是如实标了 `LIMIT`。后来把它攻下来了：stdin 拆成
+读线程 + mpsc，`drain_async_events` 用 `try_recv` 非阻塞捞 steer 注入
+`SteerGate`，由现成的安全点逻辑释放。`probe-steer-midturn.sh` 真引擎实测：
+`回合 start=1 end=1 ｜ 插话标记进输出 4~5 处`；红方向：去掉注入 → 4 → 0。
+详见本节上方的"流式中途插话——已打通"。
 
 ### fork 的 409 是引擎约束，不是内核缺陷
 
@@ -265,7 +268,7 @@ cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产�
 
 ## S0–S5 验收矩阵（现场跑，一条命令）
 
-`bash scripts/acceptance.sh` —— 13 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
+`bash scripts/acceptance.sh` —— 20 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
 下面是最近一次真跑的输出（`HARNESS_ENGINE_BIN` + `CODEWHALE_HOME` 都给了，含真引擎项）：
 
 | 验收项 | 期望 | 实际 | 判定 |
@@ -273,13 +276,20 @@ cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产�
 | S0 进程依赖 | 没有任何 crate 依赖引擎 | ok 没有任何 crate 依赖引擎（进程依赖成立）；path 依赖都在仓库内 | PASS |
 | S0 检查会红 | 越界的 path 依赖必须被判红 | 注入 ../../../acc-outside 后确实报错 | PASS |
 | S1 接缝① | 流式文本 + 工具调用 + 收尾 | PASS 接缝① 真引擎：orbit 客户端 → harnessd → 引擎，流式文本 + 工具调用 + 收尾都在 | PASS |
+| S1 多回合 | 同一线程连续回合，每轮闭合、前缀复用 | PASS 多回合：3 个回合都闭合 ｜ 前缀复用：0 98 97 | PASS |
+| S2 会话历史 | GetEntries 在真引擎上读回非空历史 | PASS GetEntries：entries 非空（2 条），历史里找到标记 HISTORY_MARK_11215 | PASS |
+| S2 steer | 引擎接受插话 + body 方言翻译正确 | 引擎 steer API：200 —— 回合进行中插话被接受 PASS steer：引擎侧接受 + harnessd body 翻译正确  | PASS |
+| S3 deferred 命令 | 回合中非 steer 命令不丢、顺序不乱 | PASS 回合中发的两条非 steer 命令都回来了，顺序 ['g1', 'g2'] | PASS |
+| S3 中途插话 | 回合进行中插话，模型输出含插话标记 | PASS 中途插话：回合进行中注入 steer → 模型输出含插话标记（5 处） | PASS |
+| S2 fork 后回合 | fork 出新线程，新线程上回合闭合 | PASS fork：原线程跑完 → fork 出新线程 → 新线程上回合也闭合 | PASS |
+| S3 守卫跨回合 | auto_approve=false 下每轮工具真跑、回合闭合 | PASS 守卫跨回合：2 轮都闭合，每轮工具数一致（2 2），审批通道 2/2 都通 | PASS |
 | S1 命令覆盖 | orbit 声明的命令与事件都有映射 | every_orbit_command_maps_to_something + every_orbit_type_we_claim_is_mapped 都通过 | PASS |
 | S2 档位 | effort 以 reasoning_effort 送到引擎 | effort_is_sent_as_reasoning_effort 通过 | PASS |
 | S2 fork | fork 后会话切到新线程 | fork_switches_to_the_new_thread 通过 | PASS |
-| S3 守卫 | 三件守卫语义正确 | 16 条守卫测试通过 | PASS |
+| S3 守卫 | 三件守卫语义正确 | 17 条守卫测试通过 | PASS |
 | S3 缓存守卫 | 命中率与压力两条线都判对 | 5 条缓存测试通过 | PASS |
 | S3 回合闭合 | 压缩失败也要写 turn.end | a_failed_compaction_does_not_swallow_turn_end 通过 | PASS |
-| S4 插件 | 真 Go 插件能 deny 一条命令 | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s；test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s | PASS |
+| S4 插件 | 真 Go 插件能 deny 一条命令 | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s；test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s | PASS |
 | S4 不空转 | 没有 go 时必须红，不能静默跳过 | 插件测试 ignored=0 | PASS |
 | S5 基线 | 通过率/返工率/误杀率有基线数字 | pass 1.0 / rework 0.01 / false-kill 0.0 / solver_fail 0 / cache 0.901 | PASS |
 | S5 门禁 | 四条门禁同时成立 | 门禁通过 | PASS |
@@ -406,7 +416,7 @@ HARNESSD_BIN=<harnessd> HARNESSD_ENGINE=<codewhale> HARNESSD_ENGINE_ARGS=app-ser
 | S0 两仓独立构建，harnessd 能调 `ExecPolicyEngine` | 改为进程依赖（§0.1 / 方案 §7） | `check-engine.sh`：扫描全部 `Cargo.toml`，任何地方提到引擎 crate 或 path 依赖逃出仓库就红（**两个方向都验过会红**），已并进 `gate.sh` |
 | S1 orbit 界面能发一条消息，看到流式回复和工具调用 | **通过（机器可判）**；排版好不好看仍需人一眼 | `app::render_tests::a_streamed_reply_and_its_tool_call_land_in_the_transcript`：真子进程喂流式事件 → 断言语义上的**可见对话导出**里有回复文本、工具行也进同一份投影；另有真会话回放两段 | 两段真跑输出回放：`a_real_session_parses_into_the_events_the_ui_renders`（脚本化 + DeepSeek 真会话）都解析出文本增量、`tool_execution_start/end` 成对、`agent_end` |
 | S2 切换模型/档位生效；fork 出新会话能跑到不同结论 | **通过** | 真模型路由切换 200；`fork` → 201 新 id；档位实测：`low`/`high` → 201，非法值 → 400 并列出全部取值（`auto, off, minimal, low, medium, high, xhigh, ultra, max`，实测 9 档，不是方案里写的 7 档） |
-| S3 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | **通过** | steer 实测 `steer_count=1`；误杀 0/10；真模型 20 题测得缓存命中 **95.6%**（`prompt_cache_hit_tokens / input_tokens`） |
+| S3 流式中途插话生效；10 个长任务不被误杀；压缩前后缓存命中 >90% | **通过** | 中途插话：`probe-steer-midturn.sh` 真引擎实测，慢回合进行中发 steer → `回合 start=1 end=1 ｜ 插话标记进输出 4~5 处`；红方向去掉注入 → 0（见「流式中途插话——已打通」）。误杀 0/10。缓存命中：真模型 20 题测得 **95.6%**，但命中率由上游代理给出、内核不可控，故 §8 与多回合命中率只作**观察项**，不作门禁 |
 | S4 写一个 Go 插件，deny 一条命令，内核记录并继续 | **通过** | `go_plugin_can_deny_a_command_and_the_kernel_records_it`：线上回 decline、日志记 `guard.deny`（带 `source: plugin`）、下一问照常 accept |
 | S5 通过率/返工率/误杀率有基线数字 | **通过** | 真模型（DeepSeek V4.1 Flash）20/20 = 1.0；返工率 1.3%；误杀率 0.0%；缓存命中 95.6%；平均 20.0s |
 
@@ -952,9 +962,30 @@ grep 抓不到 `test result`，表格里就留一格空白，而脚本照样 exi
 1. **界面排版没有人眼看过。** 机器能判的部分（流式文本、工具行、结束态、退出清理、
    重连）已经有测试钉住（见上面 `render_tests`/1931 条）。剩下的只是"好不好看"，
    需要一台醒着的机器点一次。
-2. **上游 `orbit-pi` 还有 5 条红**（本轮从 6 减到 5：`backdrop` 那条其实是断言写错，已修）。 全部归类在上面那张表：`onboarding`×3 断言的是
-   外部 pi 安装那套旧产品模型、`git_accounts` 缺 git 身份、
-   `session_park` 停靠会话取消 UI。改它们等于改上游产品定义或环境假设，不属于内核。
+2. **上游 `orbit-pi` 只剩 1 条红**（这一轮从 5 减到 1）。
+
+   上一版这里写着"4 条不属于内核，改它们等于改上游产品定义或环境假设"。
+   **那句话是错的**，这一轮逐条查完被打脸——`bench/known-red.txt` 里早写过
+   一句警告："红点挂太久会被自动归成环境"。实际是：
+
+   - `onboarding::every_dependency_has_an_install_hint` /
+     `install_hints_match_the_host`：不是产品模型之争。内嵌内核没有外部 pi 可装，
+     `INSTALL_COMMAND` 故意是空串，但测试断言"必须非空"；更糟的是
+     `check_dependencies()` 把 pi 当外部依赖去磁盘探测，探不到就得出
+     「未安装 + 空安装命令」——**设置页给用户一个空代码框和只复制空串的按钮**。
+     改成 `embedded_runtime()`（已安装、版本取本应用、没有命令），并加测试钉住。
+   - `onboarding::host_facts_cover_the_platform_and_the_stores`：产品从 Orbit 改名
+     hiq 后，测试还写死 `"Orbit config"`。改用 `tr!` 取键。
+   - `git_accounts::workspace_local_identity_…`：**真 bug**。Apple Git 2.54 对
+     `/etc/gitconfig` 的默认 helper 报 `scope=unknown`，`parse_helpers` 把
+     `unknown` 当脏数据、整段 bail → macOS 用户的账号页读不到任何 helper 状态。
+     `unknown` 是 git 的合法取值，加进白名单。
+
+   剩下的一条是**真的 design-diff**，不是环境：
+   `session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag`
+   需要内核回 `extension_ui_response{cancelled:true}`，而
+   `orbit_rpc::client::cancel_dialog()` 按设计返回 Err（"harness 内核没有扩展 UI
+   机制"）。要变绿就得给内核加扩展 UI 子协议——这是产品决策，不伪造。
 3. **引擎二进制不在本仓库。** D1 是进程依赖：`harnessd` 只通过 JSON-RPC/HTTP 跟它说话，
    从不链接它的 crate（`check-engine.sh` 守着这条）。所以跑任何实测都要先
    `HARNESS_ENGINE_BIN=/path/to/codewhale`。这是**设计**，不是遗漏；代价是部署时要多带一个二进制。
