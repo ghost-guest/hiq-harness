@@ -10,10 +10,14 @@
 # 分类原则：
 #   old-product-model  上游 pi 把 agent 装成外部依赖，我们的内核进程内跑——产品模型不同，测试的前提不成立
 #   design-diff        内核按设计拒绝这条路径（比如 Raw 直通），要变绿就得给内核加新协议
-#   env                 测试依赖宿主机上的东西（git 身份、字体度量）
+#   env                 测试依赖宿主机上的东西（git 身份）
+#
+# 已修掉、从清单移除的一条：
+#   backdrop::tests::mark_placement_and_small_fallback —— 它断言 mark 的宽高比落在 2.0..2.4，
+#   而实测蒙版是 64×43（1.49）。不是环境问题，是断言写死了某个版本的图形。改成
+#   "宽高比应与蒙版一致"这个不变式之后立刻绿了。教训：红点挂太久会被自动归成"环境"。
 orbit-pi::onboarding::tests::every_dependency_has_an_install_hint
 orbit-pi::onboarding::tests::host_facts_cover_the_platform_and_the_stores
 orbit-pi::onboarding::tests::install_hints_match_the_host
 orbit-pi::git_accounts::tests::workspace_local_identity_and_remotes_are_read_without_remote_access
-orbit-pi::backdrop::tests::mark_placement_and_small_fallback
 orbit-pi::app::session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag

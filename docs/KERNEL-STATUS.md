@@ -489,6 +489,19 @@ self.cache.observe(prompt, cached);
 修法就一行（用已经解析好的值），另加了一个测试 `the_cache_guard_reads_the_http_usage_dialect`
 把它钉住。修完立刻就能触发，说明之前不是"条件苛刻"，是根本没在判断。
 
+### 又一个"看着成功、其实丢了"
+
+`probe-compact.sh` 一次塞 4 条 prompt 进去，结果只有第 1 条真的跑了，另外 3 条
+拿到的是 `{"output": null}` + `success: true`——**消息静默消失**，调用方还以为发出去了。
+引擎在「上一轮还没结束」时就是这个回应，而 harnessd 把它当成功转发。
+
+判据改成：本轮写了 `turn.start`、但没有 `turn.end`、也没有 `output` → 报错。
+`a_rejected_prompt_is_an_error_not_a_silent_drop` 钉住这条（先验过它会红：
+`reply={"output":null}` 拿到 `success: true`）。
+
+这类 bug 的共同点是**坏消息被翻译成了好消息**——和之前缓存守卫读到 0/0、
+`check-engine` 打印 `nothing to check` 是同一种病。
+
 ### 改完之后重跑真仓库（回归确认）
 
 这一夜改了事件平铺、工具字段方言、缓存守卫、测试等待预算。改完必须在**真仓库**上确认
@@ -594,8 +607,8 @@ grep 抓不到 `test result`，表格里就留一格空白，而脚本照样 exi
 1. **界面排版没有人眼看过。** 机器能判的部分（流式文本、工具行、结束态、退出清理、
    重连）已经有测试钉住（见上面 `render_tests`/1931 条）。剩下的只是"好不好看"，
    需要一台醒着的机器点一次。
-2. **上游 `orbit-pi` 还有 6 条红。** 全部归类在上面那张表：`onboarding`×3 断言的是
-   外部 pi 安装那套旧产品模型、`git_accounts` 缺 git 身份、`backdrop` 长宽比、
+2. **上游 `orbit-pi` 还有 5 条红**（本轮从 6 减到 5：`backdrop` 那条其实是断言写错，已修）。 全部归类在上面那张表：`onboarding`×3 断言的是
+   外部 pi 安装那套旧产品模型、`git_accounts` 缺 git 身份、
    `session_park` 停靠会话取消 UI。改它们等于改上游产品定义或环境假设，不属于内核。
 3. **引擎二进制不在本仓库。** D1 是进程依赖：`harnessd` 只通过 JSON-RPC/HTTP 跟它说话，
    从不链接它的 crate（`check-engine.sh` 守着这条）。所以跑任何实测都要先

@@ -92,6 +92,9 @@ impl<E: Engine> Supervisor<E> {
             Action::Local { reply } => Ok((reply, Vec::new())),
             Action::Unsupported { reason } => bail!("{reason}"),
             Action::Call { method, params } => {
+                // 这一轮**开始前**的条目数。用来判断引擎到底跑没跑——
+                // 光看 `turn_open` 不行：`handle` 进来时就把它置位了。
+                let entries_before = self.log.entries().len();
                 // A turn starts on either dialect: codex-style `turn/start` or the
                 // native `prompt/run`. Missing this line means the log has a turn
                 // that never opened — the projection would then be wrong.
@@ -143,6 +146,21 @@ impl<E: Engine> Supervisor<E> {
                     }
                 }
                 let events = self.pump()?;
+                // 引擎可能**根本没跑这一轮**（上一轮还没结束、或者它自己拒了）。
+                // 判据：既没有 output，也没有任何回合事件。这种情况必须报错——
+                // 回 success 会让 orbit 以为消息发出去了，而它静默消失了。
+                // 这不是假想：连续发 4 条 prompt 时只有第 1 条真的跑了，另外 3 条
+                // 都拿到了 `{"output": null}` + `success: true`。
+                let fresh = &self.log.entries()[entries_before.min(self.log.entries().len())..];
+                let opened = fresh.iter().any(|e| e.kind == "turn.start");
+                let closed = fresh.iter().any(|e| e.kind == "turn.end");
+                if (method == "prompt/run" || method == "prompt/request" || method == "turn/start")
+                    && opened
+                    && !closed
+                    && reply.get("output").map(Value::is_null).unwrap_or(true)
+                {
+                    anyhow::bail!("engine rejected this turn: no turn started, no output (prompt dropped)");
+                }
                 Ok((reply, events))
             }
         }
@@ -702,6 +720,42 @@ for line in sys.stdin:
         let _ = std::fs::remove_file(&path);
         assert!(froze, "命中率只有 9.6% 时必须冻结前缀，实际事件：{events:?}");
         assert!(!compressed, "命中率崩了还去压缩，等于把最便宜的 token 扔了");
+    }
+
+    /// 连续发多条 prompt 时，引擎会拒绝"上一轮还没结束"的新回合，回应里既没有
+    /// `output` 也没有任何回合事件。之前的实现把它原样当成功回给 orbit——
+    /// **消息静默消失**，而调用方看到的是 `success: true`。
+    /// 这条测试钉住：那种回应必须变成错误。
+    #[test]
+    fn a_rejected_prompt_is_an_error_not_a_silent_drop() {
+        let log = tmp_log("prompt-drop");
+        let path = log.path().to_path_buf();
+        let mut sup = Supervisor::new(
+            MockEngine::new(|method, _| {
+                if method == "prompt/run" {
+                    // 引擎在"上一轮还在跑"时的真实回应：什么都没有。
+                    json!({ "output": null })
+                } else {
+                    json!({ "thread": { "id": "thr_1" } })
+                }
+            }),
+            log,
+            128_000,
+        );
+        sup.state.thread_id = Some("thr_1".into());
+
+        let outcome = sup.handle("Prompt", json!({"text": "第二条"}));
+        let _ = std::fs::remove_file(&path);
+        let err = match outcome {
+            Err(e) => e.to_string(),
+            Ok((reply, _)) => panic!(
+                "引擎没跑这一轮却回了 success，消息就此消失（reply={reply}）"
+            ),
+        };
+        assert!(
+            err.contains("no turn") || err.contains("rejected") || err.contains("没有回合"),
+            "错误信息要说清是引擎没接受这一轮，实际：{err}"
+        );
     }
 
     #[test]

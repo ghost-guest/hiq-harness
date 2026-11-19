@@ -796,7 +796,17 @@ mod tests {
         let (x, y, w, h) = mark.rect(1280, 820).unwrap();
         assert!((x as f32 + w as f32 / 2. - 640.).abs() < 1.);
         assert!((y as f32 + h as f32 / 2. - 820. * MARK_CY).abs() < 1.);
-        assert!((2.0..2.4).contains(&(w as f32 / h as f32)));
+        // 这里断言的是"mark 保持了它自己蒙版的长宽比"，不是某个写死的数字。
+        // 之前写的是 `(2.0..2.4)`，而实测蒙版是 64×43（比例 1.49）——这条断言从
+        // 导入 orbit 那天起就一直红着，被当成"环境问题"记了三次。
+        // 写死比例等于把"某个版本的图形长什么样"钉进测试；这里要钉的是**不变式**：
+        // 排出来的宽高比 == 蒙版的宽高比（容差取 ±1 像素的取整误差）。
+        let want = mark.mask.height() as f32 / mark.mask.width() as f32;
+        let got = h as f32 / w as f32;
+        assert!(
+            (got - want).abs() < 0.02,
+            "mark 的长宽比应与蒙版一致：期望 {want:.3}，实际 {got:.3}（rect {w}×{h}）"
+        );
     }
 
     #[test]
