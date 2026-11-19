@@ -225,9 +225,16 @@ fn parse_helpers(bytes: &[u8]) -> State<Vec<Helper>> {
     let mut parts = raw.split_terminator('\0');
     let mut helpers: Vec<(String, Helper)> = Vec::new();
     while let Some(scope) = parts.next() {
+        // `unknown` 是 git 的**合法**取值，不是脏数据。
+        // Apple Git 2.54 对 /etc/gitconfig 里的默认 helper 就报 `unknown`：
+        //   unknown<TAB>credential.helper=osxkeychain
+        // 以前这里把 unknown 当异常、整段 bail 成 State::Unknown，
+        // 结果是 macOS 用户的账号页永远读不到任何 helper 状态。
+        // 测试早就红了，但被登记成"env（依赖宿主机 git 身份）"——
+        // 正是 known-red.txt 里警告过的"红点挂久了被自动归成环境"。
         if !matches!(
             scope,
-            "system" | "global" | "local" | "worktree" | "command"
+            "system" | "global" | "local" | "worktree" | "command" | "unknown"
         ) {
             return State::Unknown;
         }

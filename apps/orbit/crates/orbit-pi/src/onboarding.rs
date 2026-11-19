@@ -95,10 +95,32 @@ pub struct HostFact {
 /// Probe every known dependency, in display order (required first).
 pub fn check_dependencies() -> Vec<Dependency> {
     vec![
-        dependency("pi", "pi", true, "onboarding.pi_detail"),
+        embedded_runtime("pi", "onboarding.pi_detail"),
         dependency("node", "Node.js", true, "onboarding.node_detail"),
         dependency("git", "git", false, "onboarding.git_detail"),
     ]
+}
+
+/// 运行时那一行：内核编译在本应用里（见 `pi_install`），**天然就在**。
+///
+/// 之前这一行走的是 `dependency("pi", ..)` —— 它去磁盘找 `pi` 二进制。
+/// 内嵌内核没有独立可执行文件，于是得到「未安装 + 空安装命令」：
+/// 设置页显示一个必装依赖缺失，给的却是一个**空代码框**和一个只会
+/// 复制空串的按钮。用户既看不懂也没法修。
+///
+/// 诚实的模型是：它不需要安装，因为它在。版本号取本应用自己的版本。
+fn embedded_runtime(name: &'static str, detail_key: &'static str) -> Dependency {
+    Dependency {
+        name,
+        bin: name,
+        required: true,
+        installed: true,
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        // 没有可安装的东西，所以没有命令。UI 在 `installed: true` 时
+        // 走的是对勾那一支，不会渲染这个空串。
+        install_hint: "",
+        detail_key,
+    }
 }
 
 /// The host and the paths Orbit depends on, for the setup page. Takes the
@@ -375,16 +397,27 @@ mod tests {
             assert!(install_hint("node").starts_with("winget install"));
             assert!(install_hint("git").starts_with("winget install"));
         }
-        for bin in ["pi", "node", "git"] {
-            assert!(!install_hint(bin).trim().is_empty());
+        // 运行时不走安装命令（内嵌），其余依赖必须有。
+        assert!(
+            install_hint("pi").trim().is_empty(),
+            "内嵌运行时不该有安装命令，实际：{}",
+            install_hint("pi")
+        );
+        for bin in ["node", "git"] {
+            assert!(!install_hint(bin).trim().is_empty(), "{bin} 缺安装命令");
         }
     }
 
-    /// Every dependency row carries a hint, and every hint names the binary it
-    /// installs so a copied command can't be confused for another row's.
+    /// 只有**可能要装**的依赖才带安装命令，而且命令里要点名那个二进制
+    /// （否则用户复制了另一行的命令）。内嵌运行时是例外：它在，不用装。
     #[test]
-    fn every_dependency_has_an_install_hint() {
+    fn only_installable_dependencies_carry_an_install_hint() {
         for dep in check_dependencies() {
+            if dep.installed && dep.install_hint.is_empty() {
+                // 内嵌运行时：必须已安装，且没有命令。有命令反而是编的。
+                assert_eq!(dep.name, "pi", "{} 没装又没安装命令", dep.name);
+                continue;
+            }
             assert!(!dep.install_hint.trim().is_empty(), "{}", dep.name);
             // Case-insensitively: installers spell the package, not the
             // executable (`winget install Git.Git` for `git`).
@@ -395,6 +428,18 @@ mod tests {
                 dep.install_hint
             );
         }
+    }
+
+    /// 内嵌运行时必须是「已安装」，否则设置页会给一个空安装命令。
+    #[test]
+    fn the_embedded_runtime_is_always_present() {
+        let pi = check_dependencies()
+            .into_iter()
+            .find(|d| d.name == "pi")
+            .expect("必须有 pi 这一行");
+        assert!(pi.installed, "内嵌运行时永远在，不该显示成未安装");
+        assert!(pi.version.is_some(), "版本取本应用版本");
+        assert!(pi.install_hint.is_empty(), "没有可安装的东西");
     }
 
     /// The setup page reports the platform and the two directories the app
@@ -415,12 +460,20 @@ mod tests {
         assert!(platform.value.contains(host.arch), "{}", platform.value);
         assert_eq!(platform.alert, host.unsupported.is_some());
 
-        let sessions = facts.iter().find(|f| f.label == "pi sessions").unwrap();
+        // 用翻译键取值，别写死。产品从 Orbit 改名成 hiq 之后，
+        // 写死 `"Orbit config"` 的那条就永远找不到了。
+        let sessions = facts
+            .iter()
+            .find(|f| f.label == tr!("onboarding.pi_sessions"))
+            .expect("必须有 sessions 那一行");
         assert!(sessions.value.contains("sessions"), "{}", sessions.value);
         // Displayed, not used: separators are normalized so a Windows user
         // never sees `.pi/agent\sessions`.
         assert!(!sessions.value.contains('\\'), "{}", sessions.value);
-        let config = facts.iter().find(|f| f.label == "Orbit config").unwrap();
+        let config = facts
+            .iter()
+            .find(|f| f.label == tr!("onboarding.orbit_config"))
+            .expect("必须有配置目录那一行");
         assert!(config.value.contains(".orbit-pi"), "{}", config.value);
         // A missing directory is reported, not treated as an error.
         for fact in facts.iter().skip(1) {

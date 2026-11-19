@@ -12,12 +12,29 @@
 #   design-diff        内核按设计拒绝这条路径（比如 Raw 直通），要变绿就得给内核加新协议
 #   env                 测试依赖宿主机上的东西（git 身份）
 #
-# 已修掉、从清单移除的一条：
+# 2026-11-19 又修掉四条（都不是环境问题，是"挂久了没人看"）：
+#   onboarding::tests::every_dependency_has_an_install_hint
+#   onboarding::tests::install_hints_match_the_host
+#     —— 内嵌内核没有外部 pi 可装，INSTALL_COMMAND 故意是空串，但测试断言"必须非空"。
+#        更糟的是 check_dependencies() 把 pi 当外部依赖去磁盘探测，探不到就
+#        得到「未安装 + 空安装命令」：设置页给用户一个空代码框和只会复制空串的按钮。
+#        改成 embedded_runtime()：已安装、版本取本应用、没有安装命令。
+#   onboarding::tests::host_facts_cover_the_platform_and_the_stores
+#     —— 产品从 Orbit 改名 hiq 后，测试还写死 "Orbit config"。改用 tr! 取键。
+#   git_accounts::tests::workspace_local_identity_…
+#     —— 真 bug：Apple Git 2.54 对 /etc/gitconfig 的默认 helper 报 scope=unknown，
+#        parse_helpers 把 unknown 当脏数据、整段 bail，macOS 用户账号页读不到任何
+#        helper 状态。unknown 是合法取值，加进白名单。
+#
+# 剩下这一条是**真的 design-diff**，不是环境：
+#   session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag
+#     —— 需要内核回 `extension_ui_response{cancelled:true}`。而
+#        orbit_rpc::client::cancel_dialog() 按设计返回 Err：
+#        "harness 内核没有扩展 UI 机制，无对话可取消"。
+#        要变绿就得给内核加扩展 UI 子协议——留给产品决策，不伪造。
+
+# 更早修掉、从清单移除的一条：
 #   backdrop::tests::mark_placement_and_small_fallback —— 它断言 mark 的宽高比落在 2.0..2.4，
 #   而实测蒙版是 64×43（1.49）。不是环境问题，是断言写死了某个版本的图形。改成
 #   "宽高比应与蒙版一致"这个不变式之后立刻绿了。教训：红点挂太久会被自动归成"环境"。
-orbit-pi::onboarding::tests::every_dependency_has_an_install_hint
-orbit-pi::onboarding::tests::host_facts_cover_the_platform_and_the_stores
-orbit-pi::onboarding::tests::install_hints_match_the_host
-orbit-pi::git_accounts::tests::workspace_local_identity_and_remotes_are_read_without_remote_access
 orbit-pi::app::session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag
