@@ -89,6 +89,16 @@ fork 探针偶发红：`HTTP 409 Workspace already has an active turn`。
 改成重试 5 次（实测第 5 次才成功），而不是一次 409 就判红。
 这和"命中率改观察项"是同一个原则：**外部的不确定性，不该变成内核的红**。
 
+## §9 界面探针：解锁时真的 PASS 过一次
+
+2026-11-19 21:54 CST 屏幕解锁期间，`HARNESS_ENGINE_BIN=… CODEWHALE_HOME=… bash scripts/probe-ui.sh`
+实跑拿到 `PASS 界面渲染（项目区 / 会话搜索 / 任务输入框 都在）`，
+截图 `/tmp/orbit-ui-probe.png`。
+
+之后屏幕重新锁上（`CGSSessionScreenIsLocked=True`）。23:11 重新生成
+`docs/EVIDENCE.md` 时探针按设计报 SKIP——证据只写当轮真正验到的东西，
+不拿旧截图冒充本轮通过。两次结论不矛盾，是屏幕状态变了。
+
 ## "问一句就一个命令，然后没有下文" —— 两个方言的坑只修了一半
 
 用户实测：在界面里问"你的内核是什么？" → 跑了一个命令 → 回合结束，没有回答。
