@@ -173,6 +173,30 @@ WS 握手 → hello → 收到带 `device_id` 的 `hello_ack`。这两条以前*
 > 流式 body 适配器，第 5 步的 SSE 端到端还没有。所以这一项**不能**用
 > "改完编译过"来结案。
 
+### 试过 `tiny_http` 了：这条路不通（2026-11-21 00:35）
+
+真按方案改了一版，`relay_e2e` 当场判红：
+
+```
+WS 握手: Protocol(SecWebSocketAcceptKeyMismatch)
+```
+
+原因是两个库抢同一件事：`tiny_http::Request::upgrade(protocol, response)`
+会**自己写出 101 响应**，而 tungstenite 的服务端握手要自己算
+`Sec-WebSocket-Accept` 并写响应。tiny_http 先写过之后，tungstenite 拿到的
+请求已经被消费掉，握手根本没法完成（服务端日志：`Handshake not finished`）。
+
+可选出路只有两条，都不轻：
+
+1. **换 `axum` + `tokio-tungstenite`**：async 重构，整个 relay 从
+   "每连接一线程"改成 tokio 任务；`/run/stream` 也要改成 async stream。
+2. **两个端口**：HTTP 走 tiny_http，WS 单独一个原始端口 —— 但这会改动
+   对外接口（`/health` 与 `ws://.../ws` 不再同端口），下游要跟着改。
+
+所以这一项**不是"换个库"那么小**，是一个需要单独排期的重构。
+已经做好的护栏保留：`dispatch()` 拆分 + 三条路由单测 + `relay_e2e` 两条
+端到端（HTTP/WS），换任何方案都用它们判红。
+
 ## 自研传输清完了：desktop 的 curl、CLI 的手写 WebSocket
 
 方案里"不要自研"不是只针对 harnessd。这一轮把剩下的两处也换掉了：
