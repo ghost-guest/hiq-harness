@@ -106,8 +106,15 @@ pub fn sweep(root: &Path, only: Option<&str>) {
 }
 
 fn suite(root: &Path, krate: &str) -> (&'static str, String) {
+    // **必须用独立的 target 目录。**
+    // 扫描期间工作区里是"被改坏"的源码，而变异体里有一个叫
+    // `mapping-unknown-command`——它能把 Prompt 打成未知命令。
+    // 如果这时别人（我）正好 `cargo build -p harnessd`，编出来的就是一个
+    // "Prompt 不认识"的二进制，放进 target/debug 被界面拿去用。
+    // 实测踩过：界面上报 `Prompt失败：unknown command Prompt`，查源码完全正常。
     let out = Command::new("cargo")
         .args(["test", "-q", "-p", krate])
+        .env("CARGO_TARGET_DIR", root.join("target/mutants"))
         .current_dir(root)
         .output()
         .expect("run cargo test");
