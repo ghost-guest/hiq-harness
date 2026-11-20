@@ -1385,3 +1385,16 @@ HARNESS_ENGINE_BIN=… CODEWHALE_HOME=… bash scripts/gate.sh
 | D1 进程依赖 | 成立 | 引擎是外部二进制，`HARNESS_ENGINE_BIN` 指定 |
 | **HTTP/SSE 传输不得自研** | 本次修好 | curl 子进程 → `reqwest` + `reqwest-eventsource` |
 | 能力集 = 引擎说支持 ∩ 传输能路由 | 本次修好 | `supported_methods()` 是唯一事实来源 |
+
+---
+
+## 已知 flake：侧栏宽度那条在并发下会红
+
+`app::sidepane_full_width_tests::expanding_fills_the_page_beside_the_sidebar`
+在满载并发时偶尔失败，单独跑稳定 PASS；`--test-threads=1` 全量跑也不会红
+（实测：单线程 1933 passed / 1 failed，唯一的红是 `session_park` 那条设计差异）。
+
+原因没查到根上：gpui 的测试各自有 `TestAppContext`，但 56 个测试文件都往全局写
+`Theme`，怀疑与共享的字体/图集缓存有关。**没有证据就不动它**——
+`evidence.sh` 里本来就有"未登记的失败先单跑复核，只有单跑 PASS 才降级为观察项"
+的机制，这条会被如实标成 flake，而不是悄悄洗白。
