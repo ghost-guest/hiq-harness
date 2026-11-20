@@ -26,6 +26,9 @@ pub struct Supervisor<E: Engine> {
     pub plugins: PluginHost,
     pub state: SessionState,
     text_buffer: String,
+    /// 思考增量。单独一条缓冲：它不进 assistant 正文的日志条目，
+    /// 但回放时要能和正文分开（正文是结论，思考是过程）。
+    reasoning_buffer: String,
     /// 本轮内出现过的工具调用签名 → 次数。返工率就是从这里量的：
     /// 同一条命令在一轮里被执行两次，才是真的"重做"。
     tool_seen: std::collections::HashMap<String, u32>,
@@ -44,6 +47,7 @@ impl<E: Engine> Supervisor<E> {
             plugins: PluginHost::new(),
             state: SessionState::default(),
             text_buffer: String::new(),
+            reasoning_buffer: String::new(),
             tool_seen: std::collections::HashMap::new(),
             approvals: 0,
             denials: 0,
@@ -75,13 +79,39 @@ impl<E: Engine> Supervisor<E> {
                 self.state.caps.full_api = Some(fa.to_string());
             }
         }
-        if !methods.is_empty() {
-            // The thread surface is not always advertised, but we need it.
-            for m in ["thread/start", "thread/read", "app/models"] {
-                methods.insert(m.to_string());
+        // 兜底用"这条传输自己能路由的"，不是靠引擎探测（探测经常全失败）。
+        match self.engine.supported_methods() {
+            Some(list) => {
+                for m in list {
+                    methods.insert((*m).to_string());
+                }
             }
-            self.state.caps.methods = methods;
+            None => {
+                for m in ["thread/start", "thread/read", "app/models"] {
+                    methods.insert(m.to_string());
+                }
+            }
         }
+        // 能力集**永远**收敛到"本传输真能路由的"，不管探测成没成。
+        //
+        // 这里踩过一个连环坑，值得记下来：
+        //   1. 引擎没有 `/v1/prompt/capabilities` 这个端点，探测三个全失败；
+        //   2. 以前整块写在 `if !methods.is_empty()` 里，所以探测失败时
+        //      `caps.methods` 保持**空**；
+        //   3. 而 `has()` 把空集解释成"什么都能做"（is_empty() || contains），
+        //      于是 `GetCommands` 挑中了 `prompt/capabilities` 去调，
+        //      得到 "'prompt/capabilities' is not mapped on the HTTP transport"，
+        //      界面上是一整条红：`Get commands 失败`。
+        // 空集意味着"不知道"，不该意味着"全都能"。至少要把我们确定支持的那些填进去。
+        let before = methods.len();
+        methods.retain(|m| self.engine.supports(m));
+        if methods.len() != before {
+            eprintln!(
+                "capabilities: 丢弃 {} 个本传输路由不了的方法",
+                before - methods.len()
+            );
+        }
+        self.state.caps.methods = methods;
         self.pump()?;
         Ok(())
     }
@@ -101,6 +131,7 @@ impl<E: Engine> Supervisor<E> {
                 if method == "turn/start" || method.starts_with("prompt/") {
                     self.guards.begin_turn();
                     self.text_buffer.clear();
+                        self.reasoning_buffer.clear();
                     self.tool_seen.clear();
                     self.log.append("turn.start", json!({ "thread": self.state.thread_id }))?;
                     self.plugins.broadcast("turn.start", json!({ "thread": self.state.thread_id }));
@@ -315,9 +346,23 @@ impl<E: Engine> Supervisor<E> {
         }
 
         match method {
+            // 注意：增量**不必**在这里 push 事件。函数开头那句
+            //   `let mut out = vec![UiEvent::new(ui_kind_for(method), params.clone())]`
+            // 已经把它按 `text_delta` 逐条发出去了——流式本来就是通的。
+            // 我一开始以为"不流式"是这里只攒不发，加了第二份 push，
+            // 结果每条增量发两遍（单测立刻抓到 ["一","一","二","二"]）。
+            // 真正让界面"像一次性蹦出来"的是缺 `agent_start`：
+            // 界面不认识"有一轮在跑"，就把增量憋着，等结算再一起放。
             "item/agentMessage/delta" => {
                 if let Some(d) = params.get("delta").and_then(Value::as_str) {
                     self.text_buffer.push_str(d);
+                }
+            }
+            // 思考增量单独走一条线（方法名由 http_engine 按 `payload.kind` 分出来）。
+            // 以前它和工具输出混在一个分支里，界面上"思考"根本不是思考。
+            "item/agentReasoning/delta" => {
+                if let Some(d) = params.get("delta").and_then(Value::as_str) {
+                    self.reasoning_buffer.push_str(d);
                 }
             }
             "item/completed" => {
@@ -967,6 +1012,37 @@ for line in sys.stdin:
     /// "引擎接没接这一轮"的证据就是这个 id。
     /// （真引擎实测：201 返回 `{"thread":…,"turn":{"id":"turn_…"}}`，
     ///   handle 手工包装时把 turn 整个丢了。）
+    /// 「怎么不是流式显示呢」——判据是增量**什么时候**出去，不是有没有。
+    /// 以前只攒不发，item 结束才补一条成品：事件条数看着对，界面是整段蹦出来。
+    #[test]
+    fn deltas_go_out_as_they_arrive_not_all_at_item_end() {
+        let mut engine = MockEngine::new(Box::new(|m: &str, _p: &Value| {
+            if m == "thread/start" {
+                json!({ "thread": { "id": "thr_mock" } })
+            } else {
+                json!({ "output": "ok" })
+            }
+        }));
+        engine.emit("item/agentMessage/delta", json!({ "delta": "一" }));
+        engine.emit("item/agentMessage/delta", json!({ "delta": "二" }));
+        engine.emit("item/agentReasoning/delta", json!({ "delta": "想" }));
+        let mut sup = Supervisor::new(engine, tmp_log("streaming"), 128_000);
+
+        let (_r, events) = sup.handle("Prompt", json!({ "text": "hi" })).unwrap();
+        let texts: Vec<&str> = events
+            .iter()
+            .filter(|e| e.kind == "text_delta")
+            .filter_map(|e| e.data.get("delta").and_then(Value::as_str))
+            .collect();
+        assert_eq!(texts, vec!["一", "二"], "增量没有边到边发");
+        let think: Vec<&str> = events
+            .iter()
+            .filter(|e| e.kind == "reasoning_delta")
+            .filter_map(|e| e.data.get("delta").and_then(Value::as_str))
+            .collect();
+        assert_eq!(think, vec!["想"], "思考增量没走自己那条线");
+    }
+
     #[test]
     fn prompt_reply_keeps_the_turn_id_through_wrapping() {
         let log = tmp_log("turn-id-wrap");

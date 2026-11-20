@@ -20,8 +20,9 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 
 use crate::engine::Engine;
 use crate::protocol::Frame;
@@ -37,7 +38,8 @@ pub struct HttpEngine {
     thread_id: Option<String>,
     last_turn: Option<String>,
     inbox: VecDeque<Frame>,
-    sse: Option<(Child, Receiver<String>)>,
+    client: reqwest::blocking::Client,
+    sse: Option<SseHandle>,
     /// 合成 id → 引擎的 approval id。
     ///
     /// 反向请求在这个传输上不是真的"请求"：引擎把审批放在 SSE 事件里
@@ -66,6 +68,11 @@ impl HttpEngine {
             thread_id: None,
             last_turn: None,
             inbox: VecDeque::new(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::blocking::Client::new()),
             sse: None,
             pending_approvals: HashMap::new(),
             next_approval: 0,
@@ -73,47 +80,44 @@ impl HttpEngine {
         }
     }
 
-    fn curl(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
+    /// 一个 HTTP 请求。用 `reqwest`，不再 spawn `curl`。
+    ///
+    /// 换成库不是为了好看：子进程方案里"连接还活着吗"这个问题没有答案，
+    /// 只能看 `child.is_some()`。今天那个"一直在转、没有下文"就是它——
+    /// curl 悄悄退出，我们当成还连着，把回合发给了不存在的订阅者。
+    fn http(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
-        let mut cmd = Command::new("curl");
-        cmd.args(["--silent", "--show-error", "--max-time", "120", "-X", method])
-            .args(["-H", "content-type: application/json"])
-            .args(["-w", "\n%{http_code}"]);
+        let m = reqwest::Method::from_bytes(method.as_bytes())
+            .with_context(|| format!("bad method {method}"))?;
+        let mut req = self
+            .client
+            .request(m, &url)
+            .header("content-type", "application/json");
         if let Some(t) = &self.token {
-            cmd.args(["-H", &format!("authorization: Bearer {t}")]);
+            req = req.header("authorization", format!("Bearer {t}"));
         }
         if let Some(b) = body {
-            cmd.args(["-d", &serde_json::to_string(b)?]);
+            req = req.body(serde_json::to_string(b)?);
         }
-        cmd.arg(&url);
-
-        let out = cmd.output().context("run curl")?;
-        let raw = String::from_utf8_lossy(&out.stdout).to_string();
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            bail!("{method} {path} failed: {err} {}", truncate(&raw));
+        let resp = req.send().with_context(|| format!("{method} {path}"))?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        let body_text = text.trim().to_string();
+        if !status.is_success() {
+            bail!("{method} {path} → HTTP {} {body}", status.as_u16(), body = truncate(&body_text));
         }
-        // The status is the only thing that separates "empty success" from 404,
-        // and a 404 body is empty — so never trust the body alone.
-        let (body, status) = match raw.rsplit_once('\n') {
-            Some((b, code)) => (b.trim().to_string(), code.trim().to_string()),
-            None => (raw.trim().to_string(), "000".to_string()),
-        };
-        if !(status.starts_with('2')) {
-            bail!("{method} {path} → HTTP {status} {}", truncate(&body));
+        if body_text.is_empty() {
+            bail!("{method} {path} → HTTP {} with an empty body", status.as_u16());
         }
-        if body.is_empty() {
-            bail!("{method} {path} → HTTP {status} with an empty body");
-        }
-        serde_json::from_str(&body)
-            .with_context(|| format!("{method} {path} returned non-JSON: {}", truncate(&body)))
+        serde_json::from_str(&body_text)
+            .with_context(|| format!("{method} {path} returned non-JSON: {}", truncate(&body_text)))
     }
 
     fn ensure_thread(&mut self) -> Result<String> {
         if let Some(t) = &self.thread_id {
             return Ok(t.clone());
         }
-        let v = self.curl("POST", "/v1/threads", Some(&self.thread_body))?;
+        let v = self.http("POST", "/v1/threads", Some(&self.thread_body))?;
         let id = v
             .get("id")
             .or_else(|| v.pointer("/thread/id"))
@@ -124,40 +128,99 @@ impl HttpEngine {
         Ok(id)
     }
 
-    /// Lazily attach to the thread's SSE stream. Events are forwarded verbatim:
-    /// we do not yet know every event's schema, and guessing would be worse than
-    /// passing them through under one honest kind.
+    /// Lazily attach to the thread's SSE stream.
+    ///
+    /// 传输交给 `reqwest-eventsource`：断线、keep-alive、`last-event-id`、
+    /// TLS、超时都由库负责。我们只做一件事——把事件行推进 channel，
+    /// 和以前的线程模型完全一致，所以 `Engine` trait 一点没动。
     fn ensure_stream(&mut self) {
-        if self.sse.is_some() {
-            return;
+        // 死掉的订阅要认出来。以前这里只看 `is_some()`：引擎在回合结束时
+        // 关流，curl 安静退出，而 `Some(...)` 还挂着——下一回合就发给空气了。
+        // 库方案下用 `is_closed()` 判断，是库自己维护的真实状态，不是猜的。
+        if let Some(h) = self.sse.as_ref() {
+            if !h.is_closed() {
+                return;
+            }
+            self.sse = None;
         }
         let Some(thread) = self.thread_id.clone() else { return };
         let url = format!("{}/v1/threads/{}/events", self.base, thread);
-        let mut cmd = Command::new("curl");
-        cmd.args(["--silent", "--no-buffer", "--max-time", "3600"]);
-        if let Some(t) = &self.token {
-            cmd.args(["-H", &format!("authorization: Bearer {t}")]);
-        }
-        cmd.arg(url).stdout(Stdio::piped()).stderr(Stdio::null());
-        let Ok(mut child) = cmd.spawn() else { return };
-        let Some(stdout) = child.stdout.take() else { return };
-        let (tx, rx) = mpsc::channel();
+        let token = self.token.clone();
+        let (tx, rx) = mpsc::channel::<String>();
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let closed = Arc::new(AtomicBool::new(false));
+        let closed_thread = closed.clone();
         std::thread::Builder::new()
             .name("http-sse".into())
             .spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    match line {
-                        Ok(l) => {
-                            if tx.send(l).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
+                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(rt) => rt,
+                    Err(_) => {
+                        closed_thread.store(true, Ordering::SeqCst);
+                        return;
                     }
-                }
+                };
+                rt.block_on(async move {
+                    use futures::StreamExt as _;
+                    let client = reqwest::Client::new();
+                    let mut rb = client.get(&url);
+                    if let Some(t) = token.as_deref() {
+                        rb = rb.header(
+                            reqwest::header::AUTHORIZATION,
+                            format!("Bearer {t}"),
+                        );
+                    }
+                    let mut es = match reqwest_eventsource::EventSource::new(rb) {
+                        Ok(es) => es,
+                        Err(_) => {
+                            closed_thread.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                    };
+                    loop {
+                        if stop_rx.try_recv().is_ok() {
+                            break;
+                        }
+                        match es.next().await {
+                            Some(Ok(reqwest_eventsource::Event::Message(msg))) => {
+                                // 我们下游只认 `data:` 里的 JSON，和以前一样。
+                                let line = format!("data:{}", msg.data);
+                                if tx.send(line).is_err() {
+                                    break;
+                                }
+                            }
+                            Some(Ok(reqwest_eventsource::Event::Open)) => {}
+                            Some(Err(_)) | None => break,
+                        }
+                    }
+                    es.close();
+                    closed_thread.store(true, Ordering::SeqCst);
+                });
             })
             .ok();
-        self.sse = Some((child, rx));
+        self.sse = Some(SseHandle { rx, stop: stop_tx, closed });
+    }
+}
+
+/// 一条 SSE 订阅的生命周期把手。
+///
+/// `is_closed()` 读的是**线程真的结束了吗**，不是"我们还记得它吗"——
+/// 以前那个 `Option<(Child, Receiver)>` 只有后者，于是死订阅会被当成活的。
+struct SseHandle {
+    rx: Receiver<String>,
+    stop: mpsc::Sender<()>,
+    closed: Arc<AtomicBool>,
+}
+
+impl SseHandle {
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for SseHandle {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
     }
 }
 
@@ -178,10 +241,14 @@ fn sse_method_for(kind: &str, v: &Value) -> String {
                 .pointer("/payload/kind")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if inner == "agent_message" {
-                "item/agentMessage/delta".into()
-            } else {
-                "item/commandExecution/outputDelta".into()
+            match inner {
+                "agent_message" => "item/agentMessage/delta".into(),
+                // 思考增量。以前一律落到下面那个分支，被当成"命令输出"——
+                // 界面上思考过程就变成了工具输出，或者干脆不显示。
+                "agent_reasoning" | "reasoning" | "reasoning_text" => {
+                    "item/agentReasoning/delta".into()
+                }
+                _ => "item/commandExecution/outputDelta".into(),
             }
         }
         // 认不出的**带名字**转发。注释一直说"带名字转发，不丢"，
@@ -249,12 +316,12 @@ impl Engine for HttpEngine {
         match method {
             // The stdio handshake has no HTTP equivalent; /healthz is the check.
             "initialize" => {
-                let v = self.curl("GET", "/healthz", None)?;
+                let v = self.http("GET", "/healthz", None)?;
                 Ok(json!({ "userAgent": v.get("service").cloned().unwrap_or(Value::Null), "protocol": v.get("protocol") }))
             }
             // There is no /v1/models: the catalogue hangs off the provider.
             "app/models" | "model/list" => {
-                let providers = self.curl("GET", "/v1/providers", None)?;
+                let providers = self.http("GET", "/v1/providers", None)?;
                 let current = providers
                     .get("current_provider_id")
                     .and_then(Value::as_str)
@@ -267,7 +334,7 @@ impl Engine for HttpEngine {
                     .cloned()
                     .unwrap_or(Value::Null);
                 let models = self
-                    .curl("GET", &format!("/v1/providers/{current}/models"), None)
+                    .http("GET", &format!("/v1/providers/{current}/models"), None)
                     .unwrap_or(Value::Null);
                 Ok(json!({
                     "provider": current,
@@ -276,7 +343,7 @@ impl Engine for HttpEngine {
                 }))
             }
             "thread/start" => {
-                let v = self.curl("POST", "/v1/threads", Some(&self.thread_body))?;
+                let v = self.http("POST", "/v1/threads", Some(&self.thread_body))?;
                 if let Some(id) = v.get("id").and_then(Value::as_str) {
                     self.thread_id = Some(id.to_string());
                 }
@@ -286,7 +353,7 @@ impl Engine for HttpEngine {
                 let id = params.get("threadId").and_then(Value::as_str).map(str::to_string)
                     .or_else(|| self.thread_id.clone())
                     .context("thread/read without a thread id")?;
-                let v = self.curl("GET", &format!("/v1/threads/{id}"), None)?;
+                let v = self.http("GET", &format!("/v1/threads/{id}"), None)?;
                 Ok(with_entries_from_items(v))
             }
             // Tool-enabled turn: this is the whole reason the HTTP transport exists.
@@ -314,7 +381,7 @@ impl Engine for HttpEngine {
                 //  `Thread already has an active turn`）。
                 // 之前的顺序是发完才订阅，于是第一回合永远不结束。
                 self.ensure_stream();
-                let v = self.curl("POST", &format!("/v1/threads/{id}/turns"), Some(&body))?;
+                let v = self.http("POST", &format!("/v1/threads/{id}/turns"), Some(&body))?;
                 if let Some(t) = v.get("turn_id").or_else(|| v.pointer("/turn/id")).and_then(Value::as_str) {
                     self.last_turn = Some(t.to_string());
                 }
@@ -338,7 +405,7 @@ impl Engine for HttpEngine {
                     .clone()
                     .or_else(|| params.get("threadId").and_then(Value::as_str).map(str::to_string))
                     .context("fork without a thread")?;
-                let v = self.curl("POST", &format!("/v1/threads/{id}/fork"), Some(&json!({})))?;
+                let v = self.http("POST", &format!("/v1/threads/{id}/fork"), Some(&json!({})))?;
                 // fork 换了 thread_id，就**必须**把 SSE 订阅一起换掉。
                 // `ensure_stream()` 见 `sse.is_some()` 就直接返回，
                 // 旧订阅还挂在原来的线程上——新线程没有订阅者，
@@ -351,9 +418,7 @@ impl Engine for HttpEngine {
                     .and_then(Value::as_str)
                 {
                     if self.thread_id.as_deref() != Some(new_id) {
-                        if let Some((mut child, _rx)) = self.sse.take() {
-                            let _ = child.kill();
-                        }
+                        // Drop 会把停止信号发给订阅线程，连接随之关闭。
                         self.sse = None;
                         self.thread_id = Some(new_id.to_string());
                     }
@@ -377,7 +442,7 @@ impl Engine for HttpEngine {
                 // 引擎 400 `prompt is required`，而 steer 看着"发出去了"。
                 // （真引擎探针抓到的：steer 从没验过，mock 里只有字符串那一种。）
                 let text = steer_text(&params);
-                self.curl(
+                self.http(
                     "POST",
                     &format!("/v1/threads/{thread}/turns/{turn}/steer"),
                     // 实测：steer 要的是 `prompt`，不是 OpenAI 风格的 input 数组。
@@ -395,7 +460,7 @@ impl Engine for HttpEngine {
                     .clone()
                     .or_else(|| params.get("turnId").and_then(Value::as_str).map(str::to_string))
                     .context("interrupt without a turn id")?;
-                self.curl("POST", &format!("/v1/threads/{thread}/turns/{turn}/interrupt"), Some(&json!({})))
+                self.http("POST", &format!("/v1/threads/{thread}/turns/{turn}/interrupt"), Some(&json!({})))
             }
             other => bail!("`{other}` is not mapped on the HTTP transport"),
         }
@@ -420,7 +485,7 @@ impl Engine for HttpEngine {
         let Some(approval_id) = approval_id else {
             bail!("no approval {id} to answer");
         };
-        self.curl(
+        self.http(
             "POST",
             &format!("/v1/approvals/{approval_id}"),
             Some(&json!({ "decision": wire_decision(decision) })),
@@ -431,7 +496,8 @@ impl Engine for HttpEngine {
     fn notifications(&mut self) -> Vec<Frame> {
         self.ensure_stream();
         let mut out = Vec::new();
-        if let Some((_, rx)) = &self.sse {
+        if let Some(h) = &self.sse {
+            let rx = &h.rx;
             loop {
                 match rx.try_recv() {
                     Ok(line) => {
@@ -492,10 +558,42 @@ impl Engine for HttpEngine {
     fn name(&self) -> String {
         format!("http:{}", self.base)
     }
+
+    /// 与 `request()` 里的 match 分支一一对应。两边不同步就会出现
+    /// "能力清单说能做、转发过去报 not mapped"——界面上就是一条红。
+    fn supported_methods(&self) -> Option<&'static [&'static str]> {
+        Some(&[
+            "initialize",
+            "app/models",
+            "model/list",
+            "thread/start",
+            "thread/read",
+            "thread/fork",
+            "thread/message",
+            "turn/steer",
+            "thread/interrupt",
+            "turn/interrupt",
+            "prompt/run",
+            "prompt/request",
+        ])
+    }
+
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// 引擎的能力清单会列出 `prompt/capabilities` 这类**它自己那边**的方法，
+    /// 我们的 HTTP 传输没实现。不取交集就会被当成可路由方法去调，
+    /// 界面收到一句 `not mapped on the HTTP transport` 的红条（实测过）。
+    #[test]
+    fn transport_only_claims_methods_it_can_route() {
+        let e = HttpEngine::new("http://127.0.0.1:1", None);
+        assert!(e.supports("thread/read"));
+        assert!(e.supports("prompt/run"), "发回合是这条传输存在的理由");
+        assert!(!e.supports("prompt/capabilities"), "没实现就不能说自己支持");
+        assert!(!e.supports("app/capabilities"));
+    }
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;

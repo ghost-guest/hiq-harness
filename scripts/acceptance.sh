@@ -136,6 +136,23 @@ else
   skip "S3 deferred 命令" "回合中非 steer 命令不丢、顺序不乱" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
+# 界面一打开就调 get_commands。引擎没有 prompt/capabilities 端点 → 探测失败
+# → 能力集为空 → has() 把空集当"什么都能做" → 去调不存在的方法 → 界面红条。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S4 能力探测" "get_commands 成功（能力集收敛到可路由方法）" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  cp_=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" \
+       HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       CODEWHALE_HOME="$CODEWHALE_HOME" bash scripts/probe-capabilities.sh 2>&1)
+  if printf '%s' "$cp_" | grep -q "^PASS "; then
+    pass "S4 能力探测" "get_commands 成功（能力集收敛到可路由方法）" "$(printf '%s' "$cp_" | grep '^PASS ' | head -1)"
+  else
+    fail "S4 能力探测" "get_commands 成功（能力集收敛到可路由方法）" "$(printf '%s' "$cp_" | grep -E '^FAIL' | head -1)"
+  fi
+else
+  skip "S4 能力探测" "get_commands 成功（能力集收敛到可路由方法）" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
 # 用户实测：第一回合答完后追问一句，界面一直转圈。
 # 根因：回合结束只发 agent_end，界面等的 agent_settled 从来没发过。
 if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then

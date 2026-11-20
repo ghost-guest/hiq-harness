@@ -99,6 +99,66 @@ fork 探针偶发红：`HTTP 409 Workspace already has an active turn`。
 `docs/EVIDENCE.md` 时探针按设计报 SKIP——证据只写当轮真正验到的东西，
 不拿旧截图冒充本轮通过。两次结论不矛盾，是屏幕状态变了。
 
+## 传输层不再手写：curl 子进程 → reqwest + reqwest-eventsource
+
+方案里写的是"融合只发生在接缝上，不自研"。`http_engine.rs` 原来一直 spawn
+`curl` 当 HTTP 客户端——这是自研，而且它今天咬了我们一口：
+
+```
+回合 1 结束 → 引擎关掉 SSE → curl 安静退出
+             → 我们的 `sse: Some((Child, rx))` 还挂着"已连接"
+回合 2 → ensure_stream() 看见 is_some() 就返回 → POST 发给了不存在的订阅者
+       → 引擎把这一轮挂住：timebus 里只有我们自己写的 turn.start
+       → 界面「已工作 4m22s」，永远转圈
+```
+
+先按方案要求调研，而不是直接改代码：
+
+| 候选 | 下载量 | 同步 API | 结论 |
+|---|---|---|---|
+| `reqwest` | 9.37 亿 | 有（blocking） | 用它做普通请求 |
+| `reqwest-eventsource` | 1291 万 | 无（async） | **选它**：依赖的正是 reqwest 0.12，接口对得上 |
+| `eventsource-client`（LaunchDarkly） | 990 万 | 无（0.18 只有 async） | 排除 |
+| `sse-client` | 2 万 | 有 | 太旧太小，排除 |
+
+落地方式：后台线程里跑一个 current-thread tokio runtime + `reqwest-eventsource`，
+把事件行推进原来的 `mpsc`——**`Engine` trait 一个签名都没改**，
+所以 server / supervisor / 探针全部不用动。订阅的存活状态由 `SseHandle`
+（`closed: AtomicBool`）回答，那是线程真的结束了没有，不是我们还记不记得它。
+
+顺带修掉一条自己挖的坑：能力集收敛时只兜底了三个线程面方法，把 `prompt/run`
+挡在外面，第二回合直接被拒（`engine exposes none of prompt/run, prompt/request`）。
+现在 `supported_methods()` 是"这条传输能路由什么"的唯一事实来源，
+`supports()` 和 `prepare()` 都从它推——两边不会再各写一份。
+
+## 一打开界面就一条红 —— 空集被当成了"什么都能做"
+
+界面一启动就调 `get_commands`，以前必定失败：
+
+```
+Get commands 失败：'prompt/capabilities' is not mapped on the HTTP transport
+```
+
+三个坑串成一条：
+
+1. 引擎根本没有 `/v1/prompt/capabilities` 这个端点，`prepare()` 里那组能力探测**全部失败**；
+2. 整块能力收敛逻辑写在 `if !methods.is_empty()` 里面，探测失败时 `caps.methods` 保持**空**；
+3. 而 `has()` 的写法是 `is_empty() || contains()`——**空集被解释成"什么都能做"**。
+   于是 `GetCommands` 挑中 `prompt/capabilities` 去调，得到一个我们没实现的传输路由，
+   界面收到一条红。
+
+两处一起改：
+
+- `Capabilities` 的语义：空集意味着"**不知道**"，不该意味着"全都能"。现在
+  `prepare()` **无条件**把三条线程面方法填进去，再按传输层能力收敛，所以它永远非空。
+- `Engine` trait 新增 `supports(&self, method)`：引擎的清单是"它能做什么"，
+  传输层的 `supports` 是"我们这条线能不能转发"。能用的方法必须是两者的**交集**。
+  `HttpEngine` 的实现与 `request()` 的 match 分支一一对应，两边不同步就会重演这条红。
+
+**这一条是装完新二进制、真打开界面才发现的。** 内核测试全绿、验收 23 项全过的时候，
+界面上还挂着一条红——因为没有任何一条验收问过"界面启动时调的那个命令成功了吗"。
+现在 `probe-capabilities.sh` 专门问这一句，并进了验收矩阵。
+
 ## 第二回合永远转圈 —— 事件词汇表少了一个词
 
 用户实测：第一回合（用了 uname）答完，紧接着追问一句 → 界面一直转圈，没有输出。

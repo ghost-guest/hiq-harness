@@ -99,6 +99,7 @@ impl UiEvent {
 pub fn ui_kind_for(method: &str) -> String {
     match method {
         "item/agentMessage/delta" => "text_delta",
+        "item/agentReasoning/delta" => "reasoning_delta",
         "item/reasoning/textDelta" => "reasoning_delta",
         "item/started" => "item_start",
         "item/completed" => "item_end",

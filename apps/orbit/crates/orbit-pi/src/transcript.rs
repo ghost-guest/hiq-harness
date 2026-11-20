@@ -4549,6 +4549,44 @@ mod tests {
         }
     }
 
+    /// 「怎么不是流式显示呢」——界面这一半的判据：
+    /// 每来一条 text_delta，行里的字就得**当场**变长，
+    /// 不能等 message_end 才一起出现。
+    ///
+    /// 内核那半边由 `scripts/probe-streaming.sh` 用真引擎盯着时间分布验：
+    /// 增量是边生成边发的。这两半都成立，界面才可能是流式的。
+    #[test]
+    fn text_grows_on_every_delta_not_at_message_end() {
+        let mut t = Transcript::new();
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        t.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::TextDelta { delta: "先".into() }),
+        });
+        {
+            let messages = t.messages.borrow();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].text(), "先", "第一条增量就该显示出来");
+        }
+        t.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::TextDelta { delta: "再说".into() }),
+        });
+        {
+            let messages = t.messages.borrow();
+            assert_eq!(messages[0].text(), "先再说", "第二条增量必须追加到同一行");
+        }
+        // 结算之后不能再多出一行——否则界面会先流一遍再整段重放。
+        t.apply_event(&Event::MessageEnd {
+            value: json!({"role": "assistant", "content": "先再说", "stopReason": "end"}),
+        });
+        let messages = t.messages.borrow();
+        assert_eq!(messages.len(), 1, "message_end 不该再建一行");
+        assert_eq!(messages[0].text(), "先再说");
+    }
+
     #[test]
     fn live_assistant_steps_merge_into_one_row() {
         // One turn, many steps: each step is a separate assistant message

@@ -23,6 +23,29 @@ pub trait Engine {
     /// Non-blocking drain of notifications seen since the last call.
     fn notifications(&mut self) -> Vec<Frame>;
     fn name(&self) -> String;
+
+    /// 这条传输**能路由的全部方法**。`None` = 未知（stdio 引擎什么都支持）。
+    ///
+    /// 这是"我们能做什么"的唯一事实来源：`supports` 由它推出来，
+    /// `prepare()` 也用它给能力集兜底。以前两者各写一份，
+    /// 改了一边忘另一边就会出现"清单里没有 prompt/run → 拒绝发回合"。
+    fn supported_methods(&self) -> Option<&'static [&'static str]> {
+        None
+    }
+
+    /// 这个传输层**自己**能不能路由 `method`。
+    ///
+    /// 和引擎的能力清单是两回事：引擎会在 capability 里列出一堆方法名
+    /// （`prompt/capabilities` 之类），但那是**它自己那边**的接口；
+    /// 我们的传输层没实现，转发过去只会得到一句
+    /// "`x` is not mapped on the HTTP transport"，然后在界面上变成一条报错。
+    /// 所以"能用的方法"必须是两边取交集。
+    fn supports(&self, method: &str) -> bool {
+        match self.supported_methods() {
+            None => true,
+            Some(list) => list.contains(&method),
+        }
+    }
 }
 
 pub struct JsonRpcEngine {

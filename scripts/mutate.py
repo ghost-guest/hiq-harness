@@ -103,6 +103,13 @@ MUTANTS = [
      '',
      "harnessd", "steer 数组方言读不到 → 引擎 400 prompt is required"),
 
+    # 传输层声称能路由自己没实现的方法：引擎清单里的 prompt/capabilities
+    # 会被当成可路由去调，界面弹一条 not mapped 的红条。
+    ("transport-claims-unrouted-method", "crates/harnessd/src/http_engine.rs",
+     '"prompt/request",\n        ])',
+     '"prompt/request", "prompt/capabilities",\n        ])',
+     "harnessd", "传输层声称支持没实现的方法"),
+
     # 回合开始不发 agent_start：界面不认为有一轮在跑。
     ("turn-start-without-agent-start", "crates/harnessd/src/orbit_compat.rs",
      'Some("turn_start") => vec![json!({ "type": "agent_start" }), v],',
