@@ -2791,6 +2791,7 @@ dependencies = [
  "harness-orchestrate",
  "harness-persist",
  "harness-plugin",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

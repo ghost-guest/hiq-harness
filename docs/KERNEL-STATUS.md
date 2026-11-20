@@ -126,6 +126,23 @@ PASS 那轮的结果记在这里，附时间戳。
 **教训**：能力集从"空 = 全支持"改成"只有登记过的才算"之后，
 所有靠蒙过日子的分支会一次性露出来。这不是回归，是把假绿变真红。
 
+## relay 补上了端到端测试，顺手抓到两个真 bug
+
+换 `tungstenite` 之后的 WS 握手一直失败。先写测试再修，两个问题都是**换实现时引入的**：
+
+1. **`BufReader` 抢帧**：为了区分 WS / 普通 HTTP，我先把请求头读进 `BufReader`；
+   它会顺手把后面的 WS 帧一起预读进自己的缓冲区，而 tungstenite 接手的是原始
+   socket——那些字节就丢了。表现：握手成功，然后 `Protocol(ResetWithoutClosingHandshake)`。
+   修法：逐字节读到 `\r\n\r\n`，不套 `BufReader`。
+2. **非阻塞 socket**：监听器是 non-blocking 的，接手的 socket 跟着非阻塞，
+   tungstenite 读帧立刻拿到 `EAGAIN`。修法：`set_nonblocking(false)`。
+
+新增 `crates/cli/tests/relay_e2e.rs` 两条端到端：`GET /health` 回 200 JSON、
+WS 握手 → hello → 收到带 `device_id` 的 `hello_ack`。这两条以前**根本不存在**
+——所以刚才那两个 bug 没有任何东西会替我抓住。
+
+**注意**：这两条测试是"先有验收再动实现"的第一步，`tiny_http` 那半还没动。
+
 ## 已知缺口：CLI 的 HTTP 那一半还是手写的
 
 `crates/cli/src/server.rs` 里，**WebSocket 已经换成 `tungstenite`**，

@@ -124,29 +124,40 @@ where
     // 半帧超时会让 read_exact 丢弃已读字节，导致帧错位。
     // 连接生命周期由 EOF（对端关闭）或服务停止决定。
     let _ = stream.set_nodelay(true);
+    // 监听器是非阻塞的，接手的 socket 也跟着是非阻塞——tungstenite 要阻塞读，
+    // 否则读帧立刻拿到 EAGAIN（实测：Protocol(ResetWithoutClosingHandshake)）。
+    stream.set_nonblocking(false)?;
 
-    // 读请求行与头部
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line)?;
+    // 逐字节读到空行为止，**不要**套 BufReader：
+    // BufReader 会把后面的 WS 帧一起预读进自己的缓冲区，而 tungstenite
+    // 接手的是原始 socket，那些字节就丢了——握手成功、帧永远收不到
+    // （实测报 Protocol(ResetWithoutClosingHandshake)）。
+    let mut raw = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                raw.push(byte[0]);
+                if raw.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let head_text = String::from_utf8_lossy(&raw).to_string();
+    let mut lines = head_text.split("\r\n");
+    let request_line = lines.next().unwrap_or("").to_string();
     if request_line.trim().is_empty() {
         return Ok(());
     }
-
-    let mut headers = Vec::new();
-    let mut head_bytes = request_line.clone();
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            break;
-        }
-        head_bytes.push_str(&line);
-        let t = line.trim_end().to_string();
-        if t.is_empty() {
-            break;
-        }
-        headers.push(t);
-    }
+    let mut headers: Vec<String> = lines
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    let mut head_bytes = head_text.clone();
+    let _ = &mut headers;
 
     let is_ws = headers
         .iter()
@@ -174,7 +185,7 @@ where
             .unwrap_or(0);
         let mut body_bytes = vec![0u8; clen];
         if clen > 0 {
-            reader.read_exact(&mut body_bytes)?;
+            stream.read_exact(&mut body_bytes)?;
         }
         let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
