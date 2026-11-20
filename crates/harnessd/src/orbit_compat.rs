@@ -142,8 +142,8 @@ pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
                 })
             }
             "tool_output_delta" => tool_fields("tool_execution_update", &e.data),
-            "item_start" => flat("message_start", &e.data),
-            "item_end" => flat("message_end", &e.data),
+            "item_start" => message_event("message_start", &e.data),
+            "item_end" => message_event("message_end", &e.data),
             "tool_call" | "tool_start" => tool_fields("tool_execution_start", &e.data),
             "tool_end" => tool_fields("tool_execution_end", &e.data),
             "turn_start" => json!({ "type": "turn_start" }),
@@ -176,6 +176,50 @@ pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
             _ => vec![v],
         })
         .collect()
+}
+
+
+/// `message_start` / `message_end`：**必须带 `role`**。
+///
+/// 界面建消息行时先看 `role`（`ChatMessage::from_value` 里 `value.get("role")?`），
+/// 没有 role 就直接丢弃。我们以前只把引擎的 `item` 摊平，role 落在 item 里面，
+/// 顶层没有——于是运行期间一条消息行都建不出来：界面上只剩一个计时器，
+/// 思考、工具、文本全要等回合结束、从历史重载时才铺出来。
+/// 这就是"运行中没有过程"的根。
+fn message_event(ty: &str, data: &Value) -> Value {
+    let mut out = flat(ty, data);
+    let item = data.get("item").unwrap_or(data);
+    let kind = item
+        .get("kind")
+        .or_else(|| item.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let role = match kind {
+        "user_message" | "userMessage" => Some("user"),
+        "agent_message" | "agentMessage" | "agent_reasoning" | "agentReasoning" => Some("assistant"),
+        _ => None,
+    };
+    if let (Some(role), Value::Object(map)) = (role, &mut out) {
+        use serde_json::json;
+        map.entry("role".to_string()).or_insert_with(|| json!(role));
+        // 界面读正文读的是 `content` 数组（pi 的方言），我们这边成品文本在
+        // `item.detail` 里。不翻译的话：日志里有回答，界面渲染不出——因为
+        // `ChatMessage::from_value` 拿到的是一个没有 content 的 assistant 消息。
+        if role == "assistant" {
+            let detail = item
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if !detail.trim().is_empty() && !map.contains_key("content") {
+                map.insert(
+                    "content".to_string(),
+                    json!([{ "type": "text", "text": detail }]),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// orbit's reply envelope.

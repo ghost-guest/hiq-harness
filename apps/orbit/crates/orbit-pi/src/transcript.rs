@@ -4549,6 +4549,38 @@ mod tests {
         }
     }
 
+    /// 用**内核真实发出的事件流**喂一遍界面代码，看工具卡片和文本有没有生成。
+    ///
+    /// 这份 fixture 是 2026-11-21 02:29 从 `HARNESSD_ORBIT_DUMP` 抓下来的原样
+    /// 数据（一轮真实的 bash 任务，含 10 次工具调用）。它不是手写的样例——
+    /// 手写样例只能证明"我以为的形状能渲染"，证明不了"内核发的形状能渲染"。
+    #[test]
+    fn real_kernel_event_stream_renders_tools_and_text() {
+        let raw = include_str!("../tests/fixtures/kernel-events.ndjson");
+        let mut t = Transcript::new();
+        let mut parsed = 0;
+        for line in raw.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let ev = Event::parse_line(line);
+            parsed += 1;
+            t.apply_event(&ev);
+        }
+        assert!(parsed > 15, "只解析出 {parsed} 条事件，fixture 或解析器有问题");
+
+        let messages = t.messages.borrow();
+        let tools: Vec<_> = messages.iter().flat_map(|m| m.tools()).collect();
+        assert!(
+            !tools.is_empty(),
+            "内核发了 tool_execution_start，但界面一条工具行都没建出来"
+        );
+        assert!(
+            messages.iter().any(|m| !m.text().is_empty()),
+            "内核发了文本增量，但界面没有文本行"
+        );
+    }
+
     /// 「怎么不是流式显示呢」——界面这一半的判据：
     /// 每来一条 text_delta，行里的字就得**当场**变长，
     /// 不能等 message_end 才一起出现。

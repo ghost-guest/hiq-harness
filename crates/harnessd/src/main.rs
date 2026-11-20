@@ -199,6 +199,24 @@ fn is_terminal(kind: &str) -> bool {
         || kind.contains("agent_end")
 }
 
+
+/// 把发给界面的一条事件写出去。
+///
+/// `HARNESSD_ORBIT_DUMP=/path` 时**同时**写一份到文件：界面显示不出东西时，
+/// 靠"我们到底发没发"来判断是投影丢了还是渲染丢了——不用再猜。
+fn emit_orbit<W: std::io::Write>(out: &mut W, e: &Value) -> anyhow::Result<()> {
+    write!(out, "{}\n", serde_json::to_string(e)?)?;
+    if let Ok(path) = std::env::var("HARNESSD_ORBIT_DUMP") {
+        if !path.trim().is_empty() {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(f, "{}", serde_json::to_string(e).unwrap_or_default());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn starts_a_turn(method: &str) -> bool {
     matches!(method, "Prompt" | "turn/start" | "prompt/run" | "prompt/request")
 }
@@ -344,13 +362,13 @@ fn serve_orbit<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
             Ok((reply, events)) => {
                 write!(out, "{}\n", serde_json::to_string(&response_of(&id, &kind, true, reply, None))?)?;
                 for e in events_to_orbit(&events) {
-                    write!(out, "{}\n", serde_json::to_string(&e)?)?;
+                    emit_orbit(&mut out, &e)?;
                 }
                 if starts_a_turn(cmd) {
                     let (events, deferred) = drain_async_events(sup, Some(&rx))?;
                     for e in events {
                         for out_event in events_to_orbit(&[e]) {
-                            write!(out, "{}\n", serde_json::to_string(&out_event)?)?;
+                            emit_orbit(&mut out, &out_event)?;
                         }
                     }
                     // 回合中收到的非 steer 命令，放回队首下次处理。
