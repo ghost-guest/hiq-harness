@@ -286,13 +286,21 @@ where
     }
 }
 
-fn http_dispatch(
-    stream: &mut TcpStream,
+/// 一次请求该怎么回。**决定响应**和**把响应写进 socket** 分开：
+/// 前者可以单测（不需要起服务），后者是薄薄一层。
+pub enum Dispatch {
+    /// 普通 JSON 响应。
+    Json { status: u16, body: serde_json::Value },
+    /// `/run/stream`：SSE，边跑边写。
+    Sse { task: String, workdir: std::path::PathBuf },
+}
+
+fn dispatch(
     method: &str,
     path: &str,
     body: &str,
     state: &Arc<Mutex<crate::host_service::HostState>>,
-) -> anyhow::Result<()> {
+) -> Dispatch {
     use crate::rest::RestHandler;
     use crate::routes::Route;
 
@@ -307,16 +315,17 @@ fn http_dispatch(
                           "/pending", "/resolve", "/run", "/sop", "ws://.../ws"],
         })
         .to_string();
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json; charset=utf-8\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\r\n{body}",
-            body.len()
-        );
-        stream.write_all(resp.as_bytes())?;
-        stream.flush()?;
-        return Ok(());
+        return Dispatch::Json {
+            status: 200,
+            body: serde_json::json!({
+                "service": "hiq-harness host",
+                "note": "界面在 apps/ui（Next.js + assistant-ui）。在此目录跑 pnpm dev 打开。",
+                "endpoints": ["/health", "/devices", "/events", "/memory",
+                              "/pending", "/resolve", "/run", "/sop", "ws://.../ws"],
+            }),
+        };
+        #[allow(unreachable_code)]
+        return Dispatch::Json { status: 200, body: serde_json::json!({}) };
     }
 
     let devices = state.lock().unwrap().registry.count();
@@ -347,34 +356,15 @@ fn http_dispatch(
         Route::Pending => handler.pending(),
         Route::Resolve => handler.resolve(&parsed),
         Route::RunStream => {
-            // SSE 流式：直接写 socket，不走 JSON 返回值
             let task = parsed
                 .get("task")
                 .and_then(|v| v.as_str())
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .to_string();
             let workdir = std::env::var("HARNESS_WORKDIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let cfg = crate::exec::ExecConfig::from_env();
-
-            let headers = crate::sse::sse_headers();
-            let mut resp = String::from("HTTP/1.1 200 OK\r\n");
-            for (k, v) in headers {
-                resp.push_str(&format!("{k}: {v}\r\n"));
-            }
-            resp.push_str("Connection: close\r\n\r\n");
-            stream.write_all(resp.as_bytes())?;
-            stream.flush()?;
-
-            crate::sse::stream_task(
-                stream,
-                std::path::Path::new(".harness"),
-                &workdir,
-                task,
-                &[],
-                &cfg,
-            )?;
-            return Ok(());
+            return Dispatch::Sse { task, workdir };
         }
         Route::Run => {
             // 非流式：一次性返回 JSON
@@ -407,30 +397,103 @@ fn http_dispatch(
         Route::Ui => unreachable!(),
     };
 
-    let status_text = match code {
-        200 => "200 OK",
-        202 => "202 Accepted",
-        400 => "400 Bad Request",
-        404 => "404 Not Found",
-        _ => "500 Internal Server Error",
-    };
-    let body_str = json.to_string();
-    let resp = format!(
-        "HTTP/1.1 {status_text}\r\n\
-         Content-Type: application/json; charset=utf-8\r\n\
-         Content-Length: {}\r\n\
-         Access-Control-Allow-Origin: *\r\n\
-         Connection: close\r\n\r\n{body_str}",
-        body_str.len()
-    );
-    stream.write_all(resp.as_bytes())?;
-    stream.flush()?;
-    Ok(())
+    Dispatch::Json {
+        status: code,
+        body: json,
+    }
+}
+
+/// 把 `Dispatch` 写进连接。换 `tiny_http` 时只需要替换这一层。
+fn http_dispatch(
+    stream: &mut TcpStream,
+    method: &str,
+    path: &str,
+    body: &str,
+    state: &Arc<Mutex<crate::host_service::HostState>>,
+) -> anyhow::Result<()> {
+    match dispatch(method, path, body, state) {
+        Dispatch::Json { status, body: json } => {
+            let status_text = match status {
+                200 => "200 OK",
+                202 => "202 Accepted",
+                400 => "400 Bad Request",
+                404 => "404 Not Found",
+                _ => "500 Internal Server Error",
+            };
+            let body_str = json.to_string();
+            let resp = format!(
+                "HTTP/1.1 {status_text}\r\n\
+                 Content-Type: application/json; charset=utf-8\r\n\
+                 Content-Length: {}\r\n\
+                 Access-Control-Allow-Origin: *\r\n\
+                 Connection: close\r\n\r\n{body_str}",
+                body_str.len()
+            );
+            stream.write_all(resp.as_bytes())?;
+            stream.flush()?;
+            Ok(())
+        }
+        Dispatch::Sse { task, workdir } => {
+            let headers = crate::sse::sse_headers();
+            let mut resp = String::from("HTTP/1.1 200 OK\r\n");
+            for (k, v) in headers {
+                resp.push_str(&format!("{k}: {v}\r\n"));
+            }
+            resp.push_str("Connection: close\r\n\r\n");
+            stream.write_all(resp.as_bytes())?;
+            stream.flush()?;
+            let cfg = crate::exec::ExecConfig::from_env();
+            crate::sse::stream_task(
+                stream,
+                std::path::Path::new(".harness"),
+                &workdir,
+                &task,
+                &[],
+                &cfg,
+            )?;
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state() -> Arc<Mutex<crate::host_service::HostState>> {
+        Arc::new(Mutex::new(crate::host_service::HostState::default()))
+    }
+
+    /// 路由决定响应，不碰 socket——这是换 `tiny_http` 之前要先钉住的那层。
+    #[test]
+    fn health_route_is_json_200() {
+        match dispatch("GET", "/health", "", &state()) {
+            Dispatch::Json { status, body } => {
+                assert_eq!(status, 200);
+                assert!(body.to_string().contains("{"));
+            }
+            Dispatch::Sse { .. } => panic!("/health 不应该是 SSE"),
+        }
+    }
+
+    #[test]
+    fn unknown_route_is_404() {
+        match dispatch("GET", "/nope", "", &state()) {
+            Dispatch::Json { status, .. } => assert_eq!(status, 404),
+            Dispatch::Sse { .. } => panic!("未知路由不该是 SSE"),
+        }
+    }
+
+    /// `/run/stream` 必须是 SSE 分支，而且题面要被原样带下去。
+    /// 以前这条路径直接往 socket 写，没有任何东西能断言它选对了分支。
+    #[test]
+    fn run_stream_is_sse_with_the_task() {
+        let body = serde_json::json!({ "task": "说一句话" }).to_string();
+        match dispatch("POST", "/run/stream", &body, &state()) {
+            Dispatch::Sse { task, .. } => assert_eq!(task, "说一句话"),
+            Dispatch::Json { status, .. } => panic!("应该走 SSE，实际 JSON {status}"),
+        }
+    }
 
     #[test]
     fn default_binds_loopback_only() {
