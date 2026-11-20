@@ -130,7 +130,7 @@ fn tool_fields(ty: &str, data: &Value) -> Value {
 pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
     events
         .iter()
-        .flat_map(|e| -> Vec<Value> { vec![match e.kind.as_str() {
+        .map(|e| -> Value { match e.kind.as_str() {
             // orbit 读的是 `assistantMessageEvent`（types.rs:934），不是 `assistant`。
             // 键名写错不会报错，只会让界面一个字都不显示——所以这里对齐解析器的键。
             "text_delta" | "reasoning_delta" => {
@@ -162,14 +162,18 @@ pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
             "steer_sent" | "follow_up_started" => flat("queue_update", &e.data),
             "error" => flat("extension_error", &e.data),
             other => json!({ "type": "unknown", "value": { "kind": other, "data": e.data } }),
-        }] })
-        // `agent_end` 后面必须跟一条 `agent_settled`，否则界面永远不认为回合结束。
-        .flat_map(|v| {
-            if v.get("type").and_then(Value::as_str) == Some("agent_end") {
-                vec![v, json!({ "type": "agent_settled", "aborted": false })]
-            } else {
-                vec![v]
-            }
+        } })
+        // 一条内核事件可能要变成界面上的多条。界面认的是 pi 的那套词汇表
+        // （见 `orbit-pi` 测试里 FakePi 捕获的标准序列）：
+        //   agent_start → turn_start → message_start → … → agent_end → agent_settled
+        // 早先只发了 `turn_start` 和 `agent_end`，缺的两头都会让界面卡住：
+        //   - 缺 agent_start：界面不认为有一轮在跑；
+        //   - 缺 agent_settled：`agent_end` 只清流式状态、**故意不关回合**，
+        //     界面于是永远认为回合没结束，下一条消息只能排队转圈。
+        .flat_map(|v| match v.get("type").and_then(Value::as_str) {
+            Some("turn_start") => vec![json!({ "type": "agent_start" }), v],
+            Some("agent_end") => vec![v, json!({ "type": "agent_settled", "aborted": false })],
+            _ => vec![v],
         })
         .collect()
 }
@@ -255,6 +259,18 @@ mod tests {
             .collect();
         assert_eq!(types, vec!["agent_end", "agent_settled"], "回合没真正收尾");
         assert_eq!(out[1]["aborted"], json!(false));
+    }
+
+    /// 界面的标准序列是 `agent_start → turn_start → … → agent_end → agent_settled`
+    /// （`orbit-pi` 的 FakePi 就是照捕获的 pi 会话写的）。两头缺一个都会卡。
+    #[test]
+    fn turn_start_also_announces_agent_start() {
+        let out = events_to_orbit(&[UiEvent::new("turn_start", json!({}))]);
+        let types: Vec<&str> = out
+            .iter()
+            .filter_map(|v| v.get("type").and_then(Value::as_str))
+            .collect();
+        assert_eq!(types, vec!["agent_start", "turn_start"]);
     }
 
     #[test]

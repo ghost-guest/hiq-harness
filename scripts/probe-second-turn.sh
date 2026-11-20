@@ -101,7 +101,7 @@ for line in open(sys.argv[2], encoding='utf-8'):
     try: d=json.loads(line)
     except: continue
     t=d.get('type')
-    if t in ('agent_end','agent_settled','turn_start'):
+    if t in ('agent_start','agent_end','agent_settled','turn_start'):
         ui.append(t)
 print(f"界面序列：{ ' '.join(ui) }")
 ends_ui=ui.count('agent_end'); settled=ui.count('agent_settled')

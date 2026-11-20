@@ -103,6 +103,12 @@ MUTANTS = [
      '',
      "harnessd", "steer 数组方言读不到 → 引擎 400 prompt is required"),
 
+    # 回合开始不发 agent_start：界面不认为有一轮在跑。
+    ("turn-start-without-agent-start", "crates/harnessd/src/orbit_compat.rs",
+     'Some("turn_start") => vec![json!({ "type": "agent_start" }), v],',
+     'Some("turn_start") => vec![v],',
+     "harnessd", "回合开始时没有 agent_start"),
+
     # 回合结束只发 agent_end，不发 agent_settled。界面永远认为回合在跑，
     # 下一条消息一直排队转圈。
     ("turn-end-without-settle", "crates/harnessd/src/orbit_compat.rs",
