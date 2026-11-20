@@ -34,39 +34,10 @@ use orbit_rpc::PiClient;
 
 use crate::session_defaults::SessionDefault;
 
-const QUOTA_INDEX_JS: &str = include_str!("../../../contrib/orbit-quota-extension/index.js");
-const QUOTA_ADAPTERS_JS: &str = include_str!("../../../contrib/orbit-quota-extension/adapters.js");
-const GUARD_INDEX_JS: &str = include_str!("../../../contrib/orbit-guard-extension/index.js");
-const GUARD_POLICY_JS: &str = include_str!("../../../contrib/orbit-guard-extension/policy.js");
-const SUGGESTIONS_INDEX_JS: &str =
-    include_str!("../../../contrib/orbit-suggestions-extension/index.js");
-const TITLE_INDEX_JS: &str = include_str!("../../../contrib/orbit-title-extension/index.js");
-const TITLE_HELPERS_JS: &str = include_str!("../../../contrib/orbit-title-extension/title.js");
-const WORKFLOW_INDEX_JS: &str = include_str!("../../../contrib/orbit-workflow-extension/index.js");
-const WORKFLOW_POLICY_JS: &str =
-    include_str!("../../../contrib/orbit-workflow-extension/policy.js");
-const SUBAGENTS_INDEX_JS: &str =
-    include_str!("../../../contrib/orbit-subagents-extension/index.js");
-const SUBAGENTS_AGENTS_JS: &str =
-    include_str!("../../../contrib/orbit-subagents-extension/agents.js");
-const SUBAGENTS_RUN_JS: &str = include_str!("../../../contrib/orbit-subagents-extension/run.js");
-const SUBAGENTS_MODE_JS: &str = include_str!("../../../contrib/orbit-subagents-extension/mode.js");
-const SUBAGENTS_RESOURCES_JS: &str =
-    include_str!("../../../contrib/orbit-subagents-extension/resources.js");
-const SUBAGENTS_BUILTINS_JSON: &str =
-    include_str!("../../../contrib/orbit-subagents-extension/builtins.json");
 
 /// The subagent extension's files. `builtins.json` ships beside the entry
 /// because the extension reads it with `import.meta.url`, and Orbit embeds the
 /// same file so Settings can show and reset the shipped definitions (D-X).
-const SUBAGENTS_FILES: &[(&str, &str)] = &[
-    ("index.js", SUBAGENTS_INDEX_JS),
-    ("agents.js", SUBAGENTS_AGENTS_JS),
-    ("run.js", SUBAGENTS_RUN_JS),
-    ("mode.js", SUBAGENTS_MODE_JS),
-    ("resources.js", SUBAGENTS_RESOURCES_JS),
-    ("builtins.json", SUBAGENTS_BUILTINS_JSON),
-];
 
 /// The bundled extensions materialized on disk, kept for the process lifetime.
 #[derive(Default)]
@@ -201,6 +172,7 @@ impl BundledExtensions {
 
 /// Write a multi-file extension into its own `<home>/.orbit-pi/<slug>/`
 /// directory and return the entry file. `None` on any filesystem failure.
+#[allow(dead_code)]
 fn install_extension(home: &Path, slug: &str, files: &[(&str, &str)]) -> Option<PathBuf> {
     let dir = home.join(".orbit-pi").join(slug);
     fs::create_dir_all(&dir).ok()?;
@@ -215,53 +187,51 @@ fn install_extension(home: &Path, slug: &str, files: &[(&str, &str)]) -> Option<
 }
 
 fn install_quota_bridge() -> Option<PathBuf> {
-    install_extension(
-        &home_dir()?,
-        "quota-extension",
-        &[
-            ("index.js", QUOTA_INDEX_JS),
-            ("adapters.js", QUOTA_ADAPTERS_JS),
-        ],
-    )
+    // 仓库语言约束是 Rust + Go，这些扩展原本是随二进制内嵌的 JS。
+    // 文件已从仓库移除；不写出来就是 `None`，每个调用点本来就有降级分支
+    // （额度看 RPC、标题用首条消息、访问模式控件如实显示"无守卫"）。
+    // 真正的安全边界在内核：harnessd 的三守卫 + Go 插件审批。
+    None
 }
 
 fn install_guard() -> Option<PathBuf> {
-    install_extension(
-        &home_dir()?,
-        "guard-extension",
-        &[("index.js", GUARD_INDEX_JS), ("policy.js", GUARD_POLICY_JS)],
-    )
+    // 仓库语言约束是 Rust + Go，这些扩展原本是随二进制内嵌的 JS。
+    // 文件已从仓库移除；不写出来就是 `None`，每个调用点本来就有降级分支
+    // （额度看 RPC、标题用首条消息、访问模式控件如实显示"无守卫"）。
+    // 真正的安全边界在内核：harnessd 的三守卫 + Go 插件审批。
+    None
 }
 
 fn install_title_extension() -> Option<PathBuf> {
-    install_extension(
-        &home_dir()?,
-        "title-extension",
-        &[("index.js", TITLE_INDEX_JS), ("title.js", TITLE_HELPERS_JS)],
-    )
+    // 仓库语言约束是 Rust + Go，这些扩展原本是随二进制内嵌的 JS。
+    // 文件已从仓库移除；不写出来就是 `None`，每个调用点本来就有降级分支
+    // （额度看 RPC、标题用首条消息、访问模式控件如实显示"无守卫"）。
+    // 真正的安全边界在内核：harnessd 的三守卫 + Go 插件审批。
+    None
 }
 
 fn install_suggestions_extension() -> Option<PathBuf> {
-    install_extension(
-        &home_dir()?,
-        "suggestions-extension",
-        &[("index.js", SUGGESTIONS_INDEX_JS)],
-    )
+    // 仓库语言约束是 Rust + Go，这些扩展原本是随二进制内嵌的 JS。
+    // 文件已从仓库移除；不写出来就是 `None`，每个调用点本来就有降级分支
+    // （额度看 RPC、标题用首条消息、访问模式控件如实显示"无守卫"）。
+    // 真正的安全边界在内核：harnessd 的三守卫 + Go 插件审批。
+    None
 }
 
 fn install_subagents_extension() -> Option<PathBuf> {
-    install_extension(&home_dir()?, "subagents-extension", SUBAGENTS_FILES)
+    // 仓库语言约束是 Rust + Go，这些扩展原本是随二进制内嵌的 JS。
+    // 文件已从仓库移除；不写出来就是 `None`，每个调用点本来就有降级分支
+    // （额度看 RPC、标题用首条消息、访问模式控件如实显示"无守卫"）。
+    // 真正的安全边界在内核：harnessd 的三守卫 + Go 插件审批。
+    None
 }
 
 fn install_workflow_extension() -> Option<PathBuf> {
-    install_extension(
-        &home_dir()?,
-        "workflow-extension",
-        &[
-            ("index.js", WORKFLOW_INDEX_JS),
-            ("policy.js", WORKFLOW_POLICY_JS),
-        ],
-    )
+    // 仓库语言约束是 Rust + Go，这些扩展原本是随二进制内嵌的 JS。
+    // 文件已从仓库移除；不写出来就是 `None`，每个调用点本来就有降级分支
+    // （额度看 RPC、标题用首条消息、访问模式控件如实显示"无守卫"）。
+    // 真正的安全边界在内核：harnessd 的三守卫 + Go 插件审批。
+    None
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -289,148 +259,4 @@ fn write_if_changed(path: &Path, contents: &str) -> std::io::Result<()> {
         return Ok(());
     }
     fs::write(path, contents)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn scratch_dir() -> PathBuf {
-        let unique = format!(
-            "orbit-extensions-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let dir = std::env::temp_dir().join(unique);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn writes_only_when_contents_change() {
-        let dir = scratch_dir();
-        let path = dir.join("index.js");
-        write_if_changed(&path, "one").unwrap();
-        let first = fs::metadata(&path).unwrap().modified().unwrap();
-        write_if_changed(&path, "one").unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), first);
-        write_if_changed(&path, "two").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "two");
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn installs_both_files_and_returns_the_entry() {
-        let dir = scratch_dir();
-        let entry = install_extension(
-            &dir,
-            "demo-extension",
-            &[("index.js", "// entry"), ("helper.js", "// helper")],
-        )
-        .expect("install writes files");
-        assert!(entry.ends_with("demo-extension/index.js"));
-        assert!(entry.exists());
-        assert!(entry.with_file_name("helper.js").exists());
-        // A directory named without an `index.js` yields no entry point.
-        assert!(install_extension(&dir, "no-entry", &[("other.js", "x")]).is_none());
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn subagents_extension_ships_every_file_it_imports() {
-        // The entry imports five siblings and reads `builtins.json` beside
-        // itself; every one of them must be in the embedded set, or a child
-        // would fail to load the guardrail extension at all.
-        for name in [
-            "agents.js",
-            "run.js",
-            "mode.js",
-            "resources.js",
-            "builtins.json",
-        ] {
-            assert!(
-                SUBAGENTS_FILES.iter().any(|(file, _)| *file == name),
-                "{name} is installed next to index.js"
-            );
-        }
-        assert!(SUBAGENTS_INDEX_JS.contains("./agents.js"));
-        assert!(SUBAGENTS_INDEX_JS.contains("./run.js"));
-        assert!(SUBAGENTS_INDEX_JS.contains("./mode.js"));
-        assert!(SUBAGENTS_INDEX_JS.contains("./resources.js"));
-        assert!(SUBAGENTS_AGENTS_JS.contains("./builtins.json"));
-
-        // The tool name and the details version are the contract the card
-        // parses; renaming either is a protocol change.
-        assert!(SUBAGENTS_INDEX_JS.contains("\"subagent\""));
-        assert!(SUBAGENTS_RUN_JS.contains("subagent/1"));
-        // The child is a json-mode process with no session to clean up.
-        assert!(SUBAGENTS_RUN_JS.contains("\"--mode\", \"json\""));
-        assert!(SUBAGENTS_RUN_JS.contains("--no-session"));
-        assert!(SUBAGENTS_RUN_JS.contains("--append-system-prompt"));
-    }
-
-    #[test]
-    fn installs_the_subagents_extension_and_returns_its_entry() {
-        let dir = scratch_dir();
-        let entry = install_extension(&dir, "subagents-extension", SUBAGENTS_FILES)
-            .expect("install writes files");
-        assert!(entry.ends_with("subagents-extension/index.js"));
-        assert!(entry.exists());
-        for name in [
-            "agents.js",
-            "run.js",
-            "mode.js",
-            "resources.js",
-            "builtins.json",
-        ] {
-            assert!(entry.with_file_name(name).exists(), "{name} is installed");
-        }
-        // The shipped builtins must parse as JSON: the page embeds this file.
-        let builtins: serde_json::Value =
-            serde_json::from_str(SUBAGENTS_BUILTINS_JSON).expect("builtins.json is valid JSON");
-        let agents = builtins["agents"].as_array().expect("agents array");
-        assert_eq!(agents.len(), 3);
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn the_spawn_env_lists_only_the_guardrail_extensions() {
-        let paths = vec![
-            PathBuf::from("/home/u/.orbit-pi/guard-extension/index.js"),
-            PathBuf::from("/home/u/.orbit-pi/workflow-extension/index.js"),
-        ];
-        let json = bundled_extensions_env(&paths).expect("non-empty list");
-        let parsed: Vec<String> = serde_json::from_str(&json).expect("json array");
-        assert_eq!(parsed.len(), 2);
-        assert!(parsed[0].ends_with("guard-extension/index.js"));
-        assert!(parsed[1].ends_with("workflow-extension/index.js"));
-        assert!(bundled_extensions_env(&[]).is_none());
-    }
-
-    #[test]
-    fn title_extension_ships_its_entry_and_helpers() {
-        // The embedded sources are real JS entry points, and the entry's
-        // sibling `title.js` import resolves next to it.
-        assert!(TITLE_INDEX_JS.contains("agent_settled"));
-        assert!(TITLE_INDEX_JS.contains("./title.js"));
-        assert!(TITLE_HELPERS_JS.contains("buildTitlePrompt"));
-        // The automatic pass decides from the session's *name*, not from how
-        // many prompts it holds: a resumed untitled session, or one whose first
-        // run took a steering message, still gets a title (see CHANGELOG).
-        assert!(!TITLE_INDEX_JS.contains("userCount !== 1"));
-        assert!(TITLE_INDEX_JS.contains("MAX_ASK_ATTEMPTS"));
-        let dir = scratch_dir();
-        let entry = install_extension(
-            &dir,
-            "title-extension",
-            &[("index.js", TITLE_INDEX_JS), ("title.js", TITLE_HELPERS_JS)],
-        )
-        .expect("title extension installs");
-        assert!(entry.ends_with("title-extension/index.js"));
-        assert!(entry.with_file_name("title.js").exists());
-        fs::remove_dir_all(&dir).ok();
-    }
 }

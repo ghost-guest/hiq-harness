@@ -126,6 +126,30 @@ PASS 那轮的结果记在这里，附时间戳。
 **教训**：能力集从"空 = 全支持"改成"只有登记过的才算"之后，
 所有靠蒙过日子的分支会一次性露出来。这不是回归，是把假绿变真红。
 
+## 语言约束落地：仓库只剩 Rust + Go
+
+方案定的是 Rust 做内核与界面、Go 做插件层。审计命令
+`cargo run -p xtask -- lang-audit` 把这条变成会红的门禁——106 个非 Rust/Go
+源码文件，逐个处理到 **0**：
+
+| 处理 | 做法 |
+|---|---|
+| 58 个上游开发脚本（py/swift/ps1） | 删除（不参与构建） |
+| `scripts/ocr.swift` | → `xtask ocr`（objc2-vision） |
+| `scripts/mutate.py` | → `xtask mutate`（表外置成 mutants.json） |
+| `scripts/probe-approval.py` | → `xtask approve-probe`（reqwest + SSE） |
+| `bench/run.py` + `mock_provider.py` | → `xtask bench`；20 道题自测判定与 Python 版**逐题一致** |
+| 36 个 `contrib/*.js|mjs`（13k 行，被 `include_str!` 编进二进制） | 移除；`install_*()` 返回 `None` |
+
+**JS 扩展移除的代价，明说：** 额度桥、自动标题、建议、子代理、工作流这几个
+界面扩展会退化成"不可用"，对应控件本来就有降级分支（标题用首条消息、访问模式
+控件如实显示无守卫）。**安全边界没有变松**：真正的判定在内核——harnessd 的三守卫
+和 Go 插件审批（`go_plugin_can_deny_a_command` 是绿的）。这符合方案里"S4 插件层"
+的方向：审批判定属于内核侧，不属于界面里的脚本。
+
+保留的唯一白名单是 `bench/fixtures/`：那里是**被测数据**（故意用别的语言写的坏代码），
+删掉等于删掉评测集。审计输出会把它单独列出来，不假装不存在。
+
 ## 传输层不再手写：curl 子进程 → reqwest + reqwest-eventsource
 
 方案里写的是"融合只发生在接缝上，不自研"。`http_engine.rs` 原来一直 spawn

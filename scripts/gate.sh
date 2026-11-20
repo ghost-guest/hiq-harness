@@ -45,7 +45,7 @@ fi
 if [ "${1:-}" = "--run" ]; then
   shift
   if [ $# -eq 0 ]; then echo "用法: bash scripts/gate.sh --run '<solver 命令>'"; exit 2; fi
-  python3 bench/run.py --solver "$*" --out "$BASELINE" || exit 1
+  cargo run -q -p xtask -- bench --solver "$*" --out "$BASELINE" || exit 1
 fi
 
 [ -f "$BASELINE" ] || { echo "找不到基线：$BASELINE"; exit 2; }

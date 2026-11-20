@@ -11,6 +11,7 @@ use std::process::Command;
 mod ocr;
 mod mutate;
 mod approve;
+mod bench;
 
 /// 本项目的实现语言。方案定的是 Rust 做内核与界面、Go 做插件层。
 const LANGS: &[(&str, &str)] = &[
@@ -56,6 +57,16 @@ fn ext_of(path: &str) -> Option<&str> {
 
 fn main() {
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "lang-audit".into());
+    if cmd == "bench" {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        match bench::main_cmd(&args) {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("bench: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
     if cmd == "approve-probe" {
         let engine = std::env::var("HARNESS_ENGINE_BIN").unwrap_or_default();
         let home = std::env::var("CODEWHALE_HOME").unwrap_or_default();
@@ -125,8 +136,13 @@ fn main() {
     }
 
     if cmd == "lang-list" || cmd == "lang-audit" {
-        if skipped.is_empty() && bad.is_empty() {
-            println!("ok 仓库里只有 Rust 和 Go 的源码");
+        if bad.is_empty() {
+            let allowed: usize = skipped.values().sum();
+            if allowed == 0 {
+                println!("ok 仓库里只有 Rust 和 Go 的源码");
+            } else {
+                println!("ok 源码只有 Rust + Go（另有 {allowed} 个白名单文件，见下）");
+            }
         }
         for (d, n) in &skipped {
             let why = ALLOWED_DIRS.iter().find(|(p, _)| p == d).map(|(_, w)| *w).unwrap_or("");

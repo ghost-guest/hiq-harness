@@ -157,7 +157,7 @@ say
 
 say "## 2. 基准自检（不花 token，不碰网络）"
 say
-code_block python3 bench/run.py --selftest
+code_block cargo run -q -p xtask -- bench --selftest
 
 say "## 3. 真模型基线（DeepSeek V4.1 Flash，经本机 3425 代理）"
 say
