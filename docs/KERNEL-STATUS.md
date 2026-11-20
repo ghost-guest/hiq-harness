@@ -454,7 +454,7 @@ cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产�
 
 ## S0–S5 验收矩阵（现场跑，一条命令）
 
-`bash scripts/acceptance.sh` —— 23 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
+`bash scripts/acceptance.sh` —— 24 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
 下面是最近一次真跑的输出（`HARNESS_ENGINE_BIN` + `CODEWHALE_HOME` 都给了，含真引擎项）：
 
 | 验收项 | 期望 | 实际 | 判定 |
