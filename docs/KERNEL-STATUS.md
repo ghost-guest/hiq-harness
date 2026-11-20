@@ -126,6 +126,26 @@ PASS 那轮的结果记在这里，附时间戳。
 **教训**：能力集从"空 = 全支持"改成"只有登记过的才算"之后，
 所有靠蒙过日子的分支会一次性露出来。这不是回归，是把假绿变真红。
 
+## 已知缺口：CLI 的 HTTP 那一半还是手写的
+
+`crates/cli/src/server.rs` 里，**WebSocket 已经换成 `tungstenite`**，
+但同一个端口上的普通 HTTP 仍是我们自己解析的：读请求行、读头、
+按 `Content-Length` 读体，响应也是拼字符串写 `HTTP/1.1 200 OK`。
+
+为什么今晚没改：这条路径要同时服务 WS 升级和普通 HTTP，正确做法是
+`tiny_http`（它支持 `Request::upgrade()` 把原始 socket 交出来）+ tungstenite，
+但 `http_dispatch` 现在是直接往 `TcpStream` 写响应的，改成"返回 (status, body)"
+再交给库，是一次实打实的重构；而这条 relay 只有 72 条单测兜底，
+没有端到端验收覆盖。改完我无法当场证明它没坏——那就不是"补上差异"，是"赌一把"。
+
+落地方案（下一轮）：
+
+1. 依赖换成 `tiny_http`；`Server::start` 用它的 `incoming_requests()` 循环。
+2. WS 分支：`request.upgrade("websocket", response)` 拿回原始流 → `tungstenite::server::accept`。
+3. `http_dispatch` 改成返回 `(u16, String, &str /*content-type*/)`，由 tiny_http 写响应。
+4. 给 relay 补一条端到端探针（起 relay → WS 发 hello → 收 device id），
+   再删掉手写解析。**先有验收，再动实现。**
+
 ## 自研传输清完了：desktop 的 curl、CLI 的手写 WebSocket
 
 方案里"不要自研"不是只针对 harnessd。这一轮把剩下的两处也换掉了：
