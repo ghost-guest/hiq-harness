@@ -1422,7 +1422,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
                             .w_full()
                             .max_w(px(CONTENT_MAX_WIDTH))
                             .min_w_0()
-                            .child(render_working_indicator(elapsed, None, None, theme)),
+                            .child(render_working_indicator(elapsed, None, None, None, theme)),
                     )
                     .into_any_element();
             }
@@ -2625,9 +2625,11 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
 
     if paint.live {
         let activity = message.steps.last().and_then(working_activity_label);
+        let thought = message.steps.last().map(|s| s.thinking.clone());
         content = content.child(render_working_indicator(
             paint.live_elapsed.unwrap_or(Duration::ZERO),
             activity,
+            thought,
             paint.live_tps,
             theme,
         ));
@@ -6615,6 +6617,7 @@ fn render_stopped_marker(theme: Theme) -> impl IntoElement {
 fn render_working_indicator(
     elapsed: Duration,
     activity: Option<String>,
+    thought: Option<String>,
     tps: Option<f64>,
     theme: Theme,
 ) -> impl IntoElement {
@@ -6662,7 +6665,7 @@ fn render_working_indicator(
             )
             .into_any_element()
     };
-    div()
+    let head = div()
         // The row needs a definite width: the shimmer paints at `width: 100%`
         // of its wrapper, so an indefinite (shrink-to-fit) row would collapse
         // the label — timer and all — to nothing.
@@ -6681,10 +6684,70 @@ fn render_working_indicator(
                 .line_height(label_line)
                 .font_weight(FontWeight::MEDIUM)
                 .child(label_el),
+        );
+
+    // 第二行：`|` 后面一句话。
+    //   有思考 → 显示思考的最后一句（模型正在想什么）
+    //   还没开口 → 显示一言（轮换），让人知道它没死
+    let detail = thought
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| {
+            let line = t.lines().last().unwrap_or_default().trim().to_string();
+            line.chars().take(96).collect::<String>()
+        })
+        .unwrap_or_else(|| live_quote(elapsed).to_string());
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .child(head)
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .pl(px(10.))
+                .border_l(px(1.))
+                .border_color(theme.border)
+                .text_size(theme.ui_px(12.5))
+                .line_height(theme.ui_px(18.))
+                .text_color(theme.text_muted)
+                .truncate()
+                .child(detail),
         )
 }
 
 /// Compact working-elapsed form: `12s` / `5m 41s` / `1h 2m`.
+/// 运行中显示的一言（`|` 后面那句）。
+///
+/// 等模型开口的那几秒，界面上只有计时器，人会觉得"卡住了"。放一句话在那儿，
+/// 至少证明它还活着。**确定性轮换**：按经过秒数每 6 秒换一句，不用随机数——
+/// 随机会让重绘时文字乱跳。
+const LIVE_QUOTES: &[&str] = &[
+    "慢就是快，少就是多。",
+    "先把事情做对，再把它做快。",
+    "不会就去学，学了就用。",
+    "复杂是懒惰的借口。",
+    "想清楚再动手，胜过做完再返工。",
+    "把问题写下来，它就已经解决一半。",
+    "一次只做一件事，做到收尾。",
+    "能跑起来的丑东西，胜过完美的草图。",
+    "不懂就说不懂，这是能力的开始。",
+    "判断力来自次数，不来自天赋。",
+    "先让它对，再让它快，最后让它好看。",
+    "稳定的系统不是没故障，是故障可见。",
+    "写下的东西才算数，记住的不算。",
+    "与其猜，不如量。",
+    "把边界画清楚，剩下的自然简单。",
+    "今天的笨办法，胜过明天的巧办法。",
+];
+
+fn live_quote(elapsed: Duration) -> &'static str {
+    let step = (elapsed.as_secs() / 6) as usize;
+    LIVE_QUOTES[step % LIVE_QUOTES.len()]
+}
+
 fn format_working_elapsed(duration: Duration) -> String {
     let secs = duration.as_secs();
     if secs < 60 {
