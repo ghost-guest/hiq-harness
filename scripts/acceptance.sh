@@ -136,6 +136,23 @@ else
   skip "S3 deferred 命令" "回合中非 steer 命令不丢、顺序不乱" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
+# 用户实测：第一回合答完后追问一句，界面一直转圈。
+# 根因：回合结束只发 agent_end，界面等的 agent_settled 从来没发过。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S3 第二回合" "同线程追问能闭合、能答、且发 agent_settled" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  st=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" \
+       HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       CODEWHALE_HOME="$CODEWHALE_HOME" bash scripts/probe-second-turn.sh 2>&1)
+  if printf '%s' "$st" | grep -q "^PASS "; then
+    pass "S3 第二回合" "同线程追问能闭合、能答、且发 agent_settled" "$(printf '%s' "$st" | grep '^PASS ' | head -1)"
+  else
+    fail "S3 第二回合" "同线程追问能闭合、能答、且发 agent_settled" "$(printf '%s' "$st" | grep -E '^FAIL|界面序列' | head -2 | tr '\n' ' ')"
+  fi
+else
+  skip "S3 第二回合" "同线程追问能闭合、能答、且发 agent_settled" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
 # 用户实测：问一句"你的内核是什么"，跑了一个命令，然后没有下文。
 # 根因是日志只认 item.type，HTTP/SSE 用的是 item.kind —— 每条 assistant 回答
 # 都没进日志；不流式的 provider 更是界面一个字都没有。

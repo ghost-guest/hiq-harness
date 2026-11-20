@@ -103,6 +103,13 @@ MUTANTS = [
      '',
      "harnessd", "steer 数组方言读不到 → 引擎 400 prompt is required"),
 
+    # 回合结束只发 agent_end，不发 agent_settled。界面永远认为回合在跑，
+    # 下一条消息一直排队转圈。
+    ("turn-end-without-settle", "crates/harnessd/src/orbit_compat.rs",
+     'vec![v, json!({ "type": "agent_settled", "aborted": false })]',
+     'vec![v]',
+     "harnessd", "回合结束时没有 agent_settled"),
+
     # HTTP/SSE 的 item 把种类放 `kind`，stdio 放 `type`。只认 type，
     # 每条 assistant 回答都不进日志——回放/分叉/压缩全都没有内容。
     ("http-item-kind-not-a-message", "crates/harnessd/src/server.rs",

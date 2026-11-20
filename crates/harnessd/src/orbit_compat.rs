@@ -130,7 +130,7 @@ fn tool_fields(ty: &str, data: &Value) -> Value {
 pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
     events
         .iter()
-        .map(|e| match e.kind.as_str() {
+        .flat_map(|e| -> Vec<Value> { vec![match e.kind.as_str() {
             // orbit 读的是 `assistantMessageEvent`（types.rs:934），不是 `assistant`。
             // 键名写错不会报错，只会让界面一个字都不显示——所以这里对齐解析器的键。
             "text_delta" | "reasoning_delta" => {
@@ -147,6 +147,14 @@ pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
             "tool_call" | "tool_start" => tool_fields("tool_execution_start", &e.data),
             "tool_end" => tool_fields("tool_execution_end", &e.data),
             "turn_start" => json!({ "type": "turn_start" }),
+            // 回合结束要发**两**条：`agent_end` 只是"这一轮循环结束了"，
+            // 界面据此清掉流式状态但**故意把回合留着不关**（agent 循环可能还要
+            // 再来一轮）。真正关回合的是 `agent_settled`——界面的
+            // `end_live_run()` 只挂在它上面。
+            //
+            // 以前只发 `agent_end`。表现：第一回合答完，界面仍认为回合在跑，
+            // 于是下一条消息一直排队转圈，永远等不到输出。
+            // 这条只能接真界面才看得出来——内核侧事件一条不少、回执也对。
             "turn_end" => json!({ "type": "agent_end", "willRetry": false }),
             "usage" => json!({ "type": "message_update", "usage": e.data }),
             "compacted" | "compact_requested" => flat("compaction_end", &e.data),
@@ -154,6 +162,14 @@ pub fn events_to_orbit(events: &[UiEvent]) -> Vec<Value> {
             "steer_sent" | "follow_up_started" => flat("queue_update", &e.data),
             "error" => flat("extension_error", &e.data),
             other => json!({ "type": "unknown", "value": { "kind": other, "data": e.data } }),
+        }] })
+        // `agent_end` 后面必须跟一条 `agent_settled`，否则界面永远不认为回合结束。
+        .flat_map(|v| {
+            if v.get("type").and_then(Value::as_str) == Some("agent_end") {
+                vec![v, json!({ "type": "agent_settled", "aborted": false })]
+            } else {
+                vec![v]
+            }
         })
         .collect()
 }
@@ -222,6 +238,23 @@ mod tests {
         let clash = flat("real", &json!({ "type": "fake", "a": 1 }));
         assert_eq!(clash["type"], "real", "data 里的 type 不能盖掉 kind");
         assert_eq!(clash["a"], 1);
+    }
+
+    /// 回合结束必须发**两条**：`agent_end` 只清流式状态，界面故意把回合留着
+    /// 不关（agent 循环可能还要再来一轮）。真正关回合的是 `agent_settled`。
+    ///
+    /// 只发 `agent_end` 的表现：第一回合答完，界面仍认为回合在跑，
+    /// 下一条消息永远排队转圈。内核侧事件一条不少、回执也对——只有接真界面
+    /// 才看得出来，所以这条单测钉的是"两条都要有、顺序对"。
+    #[test]
+    fn turn_end_emits_agent_end_then_agent_settled() {
+        let out = events_to_orbit(&[UiEvent::new("turn_end", json!({}))]);
+        let types: Vec<&str> = out
+            .iter()
+            .filter_map(|v| v.get("type").and_then(Value::as_str))
+            .collect();
+        assert_eq!(types, vec!["agent_end", "agent_settled"], "回合没真正收尾");
+        assert_eq!(out[1]["aborted"], json!(false));
     }
 
     #[test]
