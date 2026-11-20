@@ -198,5 +198,13 @@
     "new": "\"Prompt-DISABLED\" => {",
     "crate": "harnessd",
     "desc": "Prompt 命令掉进兜底"
+  },
+  {
+    "name": "dead-subscription-reused",
+    "file": "crates/harnessd/src/http_engine.rs",
+    "old": "let same_thread = Some(h.thread.as_str()) == self.thread_id.as_deref();\n            if same_thread && !h.is_closed() {",
+    "new": "let same_thread = Some(h.thread.as_str()) == self.thread_id.as_deref();\n            if same_thread {",
+    "crate": "harnessd",
+    "desc": "死订阅被当成活的（不检查 is_closed）"
   }
 ]

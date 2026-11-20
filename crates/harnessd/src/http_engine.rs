@@ -636,6 +636,56 @@ mod tests {
     /// 引擎的能力清单会列出 `prompt/capabilities` 这类**它自己那边**的方法，
     /// 我们的 HTTP 传输没实现。不取交集就会被当成可路由方法去调，
     /// 界面收到一句 `not mapped on the HTTP transport` 的红条（实测过）。
+    /// 订阅对端静默断开时，下一次 `ensure_stream()` 必须重订。
+    ///
+    /// 这一类问题咬过我们：引擎关流、curl 悄悄退出，而我们只看
+    /// `sse.is_some()`，把死订阅当成活的，回合就永远等不到事件。
+    /// 换库之后"活着吗"由线程状态回答，但**必须有人盯着它真的会自愈**。
+    #[test]
+    fn dead_subscription_is_replaced_on_next_ensure_stream() {
+        use std::io::Write as _;
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let seen = connections.clone();
+        std::thread::spawn(move || {
+            for _ in 0..4 {
+                let Ok((mut sock, _)) = listener.accept() else { break };
+                seen.fetch_add(1, Ordering::SeqCst);
+                // 回一个 SSE 响应头，然后立刻断开——模拟"对端静默关流"。
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n");
+            }
+        });
+
+        let mut e = HttpEngine::new(format!("http://127.0.0.1:{port}"), None);
+        e.thread_id = Some("thr_dead".into());
+        e.ensure_stream();
+
+        // 等订阅线程发现 EOF
+        let mut closed = false;
+        for _ in 0..200 {
+            if e.sse.as_ref().map(|h| h.is_closed()).unwrap_or(false) {
+                closed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(closed, "对端断开后订阅应被标记为已关闭（否则死订阅会被当成活的）");
+
+        e.ensure_stream();
+        let mut again = false;
+        for _ in 0..200 {
+            if connections.load(Ordering::SeqCst) >= 2 {
+                again = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(again, "死订阅之后必须重订（服务端应看到第二条连接）");
+    }
+
     /// 建线程时必须带工作目录。不带的话引擎用它自己进程的 cwd——
     /// 实测让模型写两个语言的文件，全落进了启动引擎的那个仓库里。
     #[test]
