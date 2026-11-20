@@ -49,6 +49,11 @@ if ! curl -sf -m 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
   [ "$up" = 1 ] || { echo "引擎没起来，看 $STATE_DIR/engine.log"; exit 1; }
 fi
 
+# 默认把"发给界面的事件"落一份盘：界面显示不出东西时，
+# 靠它判断是内核没发、还是界面没画——不用再猜。
+: "${HARNESSD_ORBIT_DUMP:=$HOME/.hiq/orbit-events.ndjson}"
+export HARNESSD_ORBIT_DUMP
+
 echo "启动界面（内核走 harnessd，不是进程序内执行器）…"
 cd "$ROOT"
 exec env \
