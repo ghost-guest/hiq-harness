@@ -586,7 +586,7 @@ cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产�
 
 ## S0–S5 验收矩阵（现场跑，一条命令）
 
-`bash scripts/acceptance.sh` —— 26 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
+`bash scripts/acceptance.sh` —— 27 条，每条打印「期望 / 实际 / 判定」，有红就退出码 1。
 下面是最近一次真跑的输出（`HARNESS_ENGINE_BIN` + `CODEWHALE_HOME` 都给了，含真引擎项）：
 
 | 验收项 | 期望 | 实际 | 判定 |
@@ -594,26 +594,27 @@ cargo 一比时间戳，认为源文件没变，继续用**变异版**的旧产�
 | S0 进程依赖 | 没有任何 crate 依赖引擎 | ok 没有任何 crate 依赖引擎（进程依赖成立）；path 依赖都在仓库内 | PASS |
 | S0 检查会红 | 越界的 path 依赖必须被判红 | 注入 ../../../acc-outside 后确实报错 | PASS |
 | S1 接缝① | 流式文本 + 工具调用 + 收尾 | PASS 接缝① 真引擎：orbit 客户端 → harnessd → 引擎，流式文本 + 工具调用 + 收尾都在 | PASS |
-| S1 多回合 | 同一线程连续回合，每轮闭合、前缀复用 | PASS 多回合：3 个回合都闭合 ｜ 前缀复用：94 95 98 | PASS |
-| S2 会话历史 | GetEntries 在真引擎上读回非空历史 | PASS GetEntries：entries 非空（2 条），历史里找到标记 HISTORY_MARK_14035 | PASS |
+| S1 多回合 | 同一线程连续回合，每轮闭合、前缀复用 | PASS 多回合：3 个回合都闭合 ｜ 前缀复用：96 88 97 | PASS |
+| S2 会话历史 | GetEntries 在真引擎上读回非空历史 | PASS GetEntries：entries 非空（2 条），历史里找到标记 HISTORY_MARK_18593 | PASS |
 | S2 steer | 引擎接受插话 + body 方言翻译正确 | 引擎 steer API：200 —— 回合进行中插话被接受 PASS steer：引擎侧接受 + harnessd body 翻译正确  | PASS |
 | S3 deferred 命令 | 回合中非 steer 命令不丢、顺序不乱 | PASS 回合中发的两条非 steer 命令都回来了，顺序 ['g1', 'g2'] | PASS |
 | S1 跨语言任务 | Rust 与 Go 各写一份快排，都跑通、有结论 | 工具调用 5 次 ｜ .rs 1 个 ｜ .go 1 个 | PASS |
-| S1 跨语言（界面客户端） | orbit 客户端跑跨语言题，流式+工具+收尾都在 | 文本长度: 293 工具调用: ["bash"] PASS 接缝① 真引擎：orbit 客户端 → harnessd → 引擎，流式文本 + 工具调用 + 收尾都在  | PASS |
+| S2 切会话 | 开新会话后回合闭合；切回去只看到各自的消息 | PASS 切会话：A 只看到 A 的消息，B 只看到 B 的消息 | PASS |
+| S1 跨语言（界面客户端） | orbit 客户端跑跨语言题，流式+工具+收尾都在 | 文本长度: 483 工具调用: ["bash"] PASS 接缝① 真引擎：orbit 客户端 → harnessd → 引擎，流式文本 + 工具调用 + 收尾都在  | PASS |
 | S4 能力探测 | get_commands 成功（能力集收敛到可路由方法） | PASS get_commands 正常返回（能力清单已按传输层能力收敛） | PASS |
-| S3 第二回合 | 同线程追问能闭合、能答、且发 agent_settled | PASS 两回合都闭合且都有回答 ｜ 第二回合：`uname -s` 的输出原样是： | PASS |
-| S1 工具后收尾 | 工具跑完模型必须给出最终回答（进日志） | PASS 工具 1 次，之后模型给出了最终回答：`ls -a` 列出了 4 个条目：`README.md`、`main.rs`、`timebus.ndjson` 和 ` | PASS |
+| S3 第二回合 | 同线程追问能闭合、能答、且发 agent_settled | PASS 两回合都闭合且都有回答 ｜ 第二回合：`Darwin` | PASS |
+| S1 工具后收尾 | 工具跑完模型必须给出最终回答（进日志） | PASS 工具 1 次，之后模型给出了最终回答：这个目录里有 4 个条目：README.md、in.fifo、main.rs、timebus.ndjson；其中 in. | PASS |
 | S2 fork 真分叉 | 新线程的消息不漏进原线程历史 | PASS 分叉成立：新线程有自己的消息 MB，原线程历史干净（不含 MB） | PASS |
 | S3 中途插话 | 回合进行中插话，模型输出含插话标记 | PASS 中途插话：回合进行中注入 steer → 模型输出含插话标记（5 处） | PASS |
 | S2 fork 后回合 | fork 出新线程，新线程上回合闭合 | PASS fork：原线程跑完 → fork 出新线程 → 新线程上回合也闭合 | PASS |
-| S3 守卫跨回合 | auto_approve=false 下每轮工具真跑、回合闭合 | PASS 守卫跨回合：2 轮都闭合，每轮工具数一致（2 2），审批通道 2/2 都通 | PASS |
+| S3 守卫跨回合 | auto_approve=false 下每轮工具真跑、回合闭合 | PASS 守卫跨回合：2 轮都闭合，每轮工具数一致（1 1），审批通道 2/2 都通 | PASS |
 | S1 命令覆盖 | orbit 声明的命令与事件都有映射 | every_orbit_command_maps_to_something + every_orbit_type_we_claim_is_mapped 都通过 | PASS |
 | S2 档位 | effort 以 reasoning_effort 送到引擎 | effort_is_sent_as_reasoning_effort 通过 | PASS |
 | S2 fork | fork 后会话切到新线程 | fork_switches_to_the_new_thread 通过 | PASS |
 | S3 守卫 | 三件守卫语义正确 | 17 条守卫测试通过 | PASS |
 | S3 缓存守卫 | 命中率与压力两条线都判对 | 5 条缓存测试通过 | PASS |
 | S3 回合闭合 | 压缩失败也要写 turn.end | a_failed_compaction_does_not_swallow_turn_end 通过 | PASS |
-| S4 插件 | 真 Go 插件能 deny 一条命令 | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.47s；test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s | PASS |
+| S4 插件 | 真 Go 插件能 deny 一条命令 | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.47s；test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s | PASS |
 | S4 不空转 | 没有 go 时必须红，不能静默跳过 | 插件测试 ignored=0 | PASS |
 | S5 基线 | 通过率/返工率/误杀率有基线数字 | pass 1.0 / rework 0.01 / false-kill 0.0 / solver_fail 0 / cache 0.901 | PASS |
 | S5 门禁 | 四条门禁同时成立 | 门禁通过 | PASS |
