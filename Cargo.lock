@@ -2796,6 +2796,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "tungstenite",
 ]
 
 [[package]]
@@ -2826,10 +2827,14 @@ name = "harness-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
  "gpui",
  "harness-core",
+ "reqwest",
+ "reqwest-eventsource",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

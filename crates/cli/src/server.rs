@@ -134,11 +134,13 @@ where
     }
 
     let mut headers = Vec::new();
+    let mut head_bytes = request_line.clone();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
             break;
         }
+        head_bytes.push_str(&line);
         let t = line.trim_end().to_string();
         if t.is_empty() {
             break;
@@ -151,11 +153,13 @@ where
         .any(|h| h.to_lowercase().starts_with("upgrade: websocket"));
 
     if is_ws {
-        // 关键：必须复用同一个 BufReader。
-        // BufReader 可能已把 WS 帧的字节预读进缓冲区，
-        // 若改用原始 stream 读，这些字节就丢了 —— 握手成功但收不到帧。
-        ws_handshake(&mut stream, &headers)?;
-        ws_loop(&mut reader, &mut stream, on_envelope)?;
+        // 已经读过的请求行 + 头部按原字节重放给 tungstenite：
+        // 握手、SHA-1、base64、帧编解码都由库负责，我们不再自己实现协议。
+        let head = head_bytes.into_bytes();
+        let replay = Replay { head, pos: 0, inner: stream };
+        let ws = tungstenite::accept(replay)
+            .map_err(|e| anyhow::anyhow!("WS 握手失败：{e}"))?;
+        ws_loop(ws, on_envelope)?;
     } else {
         let parts: Vec<&str> = request_line.split_whitespace().collect();
         let method = parts.first().copied().unwrap_or("GET");
@@ -179,167 +183,58 @@ where
     Ok(())
 }
 
-/// WebSocket 握手。返回 101。
-fn ws_handshake(stream: &mut TcpStream, headers: &[String]) -> anyhow::Result<()> {
-    let key = headers
-        .iter()
-        .find(|h| h.to_lowercase().starts_with("sec-websocket-key:"))
-        .and_then(|h| h.split(':').nth(1))
-        .map(|s| s.trim().to_string())
-        .ok_or_else(|| anyhow::anyhow!("缺少 Sec-WebSocket-Key"))?;
-
-    let accept = ws_accept_key(&key);
-    let resp = format!(
-        "HTTP/1.1 101 Switching Protocols\r\n\
-         Upgrade: websocket\r\n\
-         Connection: Upgrade\r\n\
-         Sec-WebSocket-Accept: {accept}\r\n\r\n"
-    );
-    stream.write_all(resp.as_bytes())?;
-    stream.flush()?;
-    Ok(())
+/// 已解析的字节流 + 剩余 socket：把读过的头部原样"倒带"给 tungstenite。
+///
+/// tungstenite 的 `accept` 要自己读 HTTP 升级请求，而我们为了区分
+/// WS / 普通 HTTP 已经先读了一遍头部。这里把读到的字节重放一遍，
+/// 就不需要自己实现握手、SHA-1、base64 和帧编解码了。
+struct Replay {
+    head: Vec<u8>,
+    pos: usize,
+    inner: TcpStream,
 }
 
-/// 按 RFC 6455 计算 accept key：base64(sha1(key + GUID))。
-fn ws_accept_key(key: &str) -> String {
-    let mut input = key.as_bytes().to_vec();
-    input.extend_from_slice(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-    base64(&sha1(&input))
-}
-
-fn sha1(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
-    let ml = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while (msg.len() % 64) != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&ml.to_be_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 80];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
+impl std::io::Read for Replay {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos < self.head.len() {
+            let n = (self.head.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&self.head[self.pos..self.pos + n]);
+            self.pos += n;
+            return Ok(n);
         }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-        for i in 0..80 {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A827999),
-                20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
-                _ => (b ^ c ^ d, 0xCA62C1D6),
-            };
-            let tmp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(w[i]);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = tmp;
-        }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
+        self.inner.read(buf)
     }
-
-    let mut out = [0u8; 20];
-    for i in 0..5 {
-        out[i * 4..i * 4 + 4].copy_from_slice(&h[i].to_be_bytes());
-    }
-    out
 }
 
-fn base64(data: &[u8]) -> String {
-    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
-        out.push(T[((n >> 18) & 63) as usize] as char);
-        out.push(T[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            T[((n >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            T[(n & 63) as usize] as char
-        } else {
-            '='
-        });
+impl std::io::Write for Replay {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
     }
-    out
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
-/// WS 主循环：读帧 → 处理 → 回帧。
-fn ws_loop<F>(
-    reader: &mut BufReader<TcpStream>,
-    stream: &mut TcpStream,
-    on_envelope: Arc<F>,
-) -> anyhow::Result<()>
+/// WS 会话：收发都交给 tungstenite。
+fn ws_loop<F>(mut ws: tungstenite::WebSocket<Replay>, on_envelope: Arc<F>) -> anyhow::Result<()>
 where
     F: Fn(Envelope, &str) -> Option<Envelope> + Send + Sync,
 {
+    use tungstenite::Message;
     let mut device_id = String::from("anon");
     loop {
-        let (opcode, payload) = match read_frame(reader) {
-            Ok((op, payload)) => {
-                eprintln!("[ws] 收到帧 opcode={op} len={}", payload.len());
-                (op, payload)
-            }
+        let msg = match ws.read() {
+            Ok(m) => m,
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::Protocol(_)) => return Ok(()),
             Err(e) => {
-                // WouldBlock/TimedOut 表示这一轮没数据，继续等；
-                // 其他错误（对端关闭）才退出。
-                // 注意：set_read_timeout 会让 socket 在无数据时返回 WouldBlock。
-                let kind = e.downcast_ref::<std::io::Error>().map(|io| io.kind());
-                match kind {
-                    Some(std::io::ErrorKind::WouldBlock) | Some(std::io::ErrorKind::TimedOut) => {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        continue;
-                    }
-                    _ => {
-                        eprintln!("[ws] 连接结束：{e}");
-                        return Ok(());
-                    }
-                }
+                eprintln!("[ws] 连接结束：{e}");
+                return Ok(());
             }
         };
-
-        // 只处理文本帧与 close
-        if opcode == 0x8 {
-            return Ok(());
-        }
-        if opcode == 0x9 {
-            // ping → pong
-            write_frame(stream, 0xA, &payload)?;
-            continue;
-        }
-        if opcode != 0x1 {
-            continue;
-        }
-
-        let text = match String::from_utf8(payload) {
-            Ok(t) => t,
-            Err(_) => continue,
+        let text = match msg {
+            Message::Text(t) => t.to_string(),
+            Message::Close(_) => return Ok(()),
+            Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => continue,
         };
 
         let env = match Envelope::decode(&text) {
@@ -351,14 +246,13 @@ where
                 let err = Envelope::new(harness_core::wire::EnvelopeKind::RelayError)
                     .with_payload(serde_json::json!({"error": "protocol"}));
                 if let Ok(s) = err.encode() {
-                    write_frame(stream, 0x1, s.as_bytes())?;
+                    ws.send(Message::Text(s.into()))?;
                 }
                 continue;
             }
             Err(_) => continue,
         };
 
-        // hello 时分配 device id
         if env.kind == harness_core::wire::EnvelopeKind::Hello {
             if let Some(reply) = on_envelope(env, &device_id) {
                 if let Some(p) = &reply.payload {
@@ -367,7 +261,7 @@ where
                     }
                 }
                 if let Ok(s) = reply.encode() {
-                    write_frame(stream, 0x1, s.as_bytes())?;
+                    ws.send(Message::Text(s.into()))?;
                 }
             }
             continue;
@@ -375,68 +269,12 @@ where
 
         if let Some(reply) = on_envelope(env, &device_id) {
             if let Ok(s) = reply.encode() {
-                write_frame(stream, 0x1, s.as_bytes())?;
+                ws.send(Message::Text(s.into()))?;
             }
         }
     }
 }
 
-/// 读一个 WS 帧（客户端帧带掩码）。
-fn read_frame<R: Read>(stream: &mut R) -> anyhow::Result<(u8, Vec<u8>)> {
-    let mut hdr = [0u8; 2];
-    stream.read_exact(&mut hdr)?;
-    let opcode = hdr[0] & 0x0F;
-    let masked = (hdr[1] & 0x80) != 0;
-    let mut len = (hdr[1] & 0x7F) as usize;
-
-    if len == 126 {
-        let mut b = [0u8; 2];
-        stream.read_exact(&mut b)?;
-        len = u16::from_be_bytes(b) as usize;
-    } else if len == 127 {
-        let mut b = [0u8; 8];
-        stream.read_exact(&mut b)?;
-        len = u64::from_be_bytes(b) as usize;
-    }
-
-    if len > harness_core::wire::MAX_FRAME_BYTES {
-        anyhow::bail!("帧过大");
-    }
-
-    let mut mask = [0u8; 4];
-    if masked {
-        stream.read_exact(&mut mask)?;
-    }
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload)?;
-    if masked {
-        for (i, b) in payload.iter_mut().enumerate() {
-            *b ^= mask[i % 4];
-        }
-    }
-    Ok((opcode, payload))
-}
-
-/// 写一个 WS 帧（服务端帧不带掩码）。
-fn write_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> anyhow::Result<()> {
-    let mut frame = vec![0x80 | opcode];
-    let len = payload.len();
-    if len < 126 {
-        frame.push(len as u8);
-    } else if len <= u16::MAX as usize {
-        frame.push(126);
-        frame.extend_from_slice(&(len as u16).to_be_bytes());
-    } else {
-        frame.push(127);
-        frame.extend_from_slice(&(len as u64).to_be_bytes());
-    }
-    frame.extend_from_slice(payload);
-    stream.write_all(&frame)?;
-    stream.flush()?;
-    Ok(())
-}
-
-/// HTTP 分发：路由 → 处理器 → 响应。
 fn http_dispatch(
     stream: &mut TcpStream,
     method: &str,
@@ -582,38 +420,6 @@ fn http_dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sha1_known_vector() {
-        // "abc" 的 SHA-1 是公开测试向量
-        let d = sha1(b"abc");
-        let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(hex, "a9993e364706816aba3e25717850c26c9cd0d89d");
-    }
-
-    #[test]
-    fn sha1_empty() {
-        let d = sha1(b"");
-        let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(hex, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-    }
-
-    #[test]
-    fn base64_known_vectors() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-    }
-
-    #[test]
-    fn ws_accept_key_matches_rfc_example() {
-        // RFC 6455 的示例：key 为 "dGhlIHNhbXBsZSBub25jZQ=="
-        // 期望 accept "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-        let k = ws_accept_key("dGhlIHNhbXBsZSBub25jZQ==");
-        assert_eq!(k, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", "WS 握手必须符合 RFC");
-    }
 
     #[test]
     fn default_binds_loopback_only() {

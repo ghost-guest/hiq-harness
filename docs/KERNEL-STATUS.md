@@ -126,6 +126,24 @@ PASS 那轮的结果记在这里，附时间戳。
 **教训**：能力集从"空 = 全支持"改成"只有登记过的才算"之后，
 所有靠蒙过日子的分支会一次性露出来。这不是回归，是把假绿变真红。
 
+## 自研传输清完了：desktop 的 curl、CLI 的手写 WebSocket
+
+方案里"不要自研"不是只针对 harnessd。这一轮把剩下的两处也换掉了：
+
+| 位置 | 原来 | 现在 |
+|---|---|---|
+| `crates/desktop/src/sse_client.rs` | spawn `curl`，自己按行解 `event:`/`data:` | `reqwest` + `reqwest-eventsource` |
+| `crates/cli/src/server.rs` WS | 手写握手 + **自己实现 SHA-1 和 base64** + 帧编解码 | `tungstenite`（握手/帧/ping-pong 全交给库） |
+
+CLI 那套最刺眼：`sha1()`、`base64()`、`ws_accept_key()`、`read_frame()`、`write_frame()`
+全是自己写的，连 RFC 里的示例向量都得手工对一遍。删掉两百多行，行为不变
+（文本帧 → `on_envelope`，hello 分配 device id，协议错回错误帧但不断连）。
+
+删掉的 4 条测试（`sha1_known_vector` 等）是**自研 crypto 的自测**，随实现一起退场；
+真正要保的行为由 `tungstenite` 负责，不再需要我们用测试去守别人的协议正确性。
+
+`grep -rn 'Command::new("curl")'` 在整个仓库（排除 target/vendor）现在**为空**。
+
 ## 探针必须先构建：一次假红换来的规矩
 
 验收跑到一半失败过一条：`unknown command `Prompt``——看着像内核不认识 Prompt 了，

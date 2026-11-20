@@ -1,12 +1,11 @@
 //! SSE 客户端：连 harness 后端的 `/run/stream`。
 //!
-//! 用标准 Server-Sent Events 解析（`event:` / `data:` / 空行分隔）。
-//! 不引入 HTTP 库 —— 用 curl 子进程逐行读，与 `llm.rs` 的取向一致。
-//!
-//! 这样桌面端只有 gpui 一个额外依赖。
+//! 传输用开源库：`reqwest` 发请求、`reqwest-eventsource` 解 SSE。
+//! 以前是 spawn `curl` 子进程 + 自己按行解帧——那既违反"不自研"的约定，
+//! 也让"连接还活着吗"没有答案（子进程悄悄退出，我们当成还连着）。
+//! 同一课在 harnessd 上已经上过一次：界面一直转圈，查到最后是死连接被当成活的。
 
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use futures::StreamExt as _;
 
 /// 一条 SSE 事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,49 +85,34 @@ impl Default for SseParser {
 
 /// 发起一次流式任务，每个事件回调一次。
 ///
-/// 阻塞调用，应在后台线程里跑。
+/// 阻塞调用，应在后台线程里跑。内部起一个 current-thread runtime 跑
+/// `reqwest-eventsource`——断线、keep-alive、`last-event-id` 由库负责。
 pub fn stream_task<F>(base_url: &str, task: &str, mut on_event: F) -> anyhow::Result<()>
 where
     F: FnMut(SseEvent),
 {
     let url = format!("{}/run/stream", base_url.trim_end_matches('/'));
-    let payload = serde_json::json!({ "task": task }).to_string();
+    let payload = serde_json::json!({ "task": task });
 
-    let mut child = Command::new("curl")
-        .args([
-            "-sS",
-            "-N", // 不平滑输出
-            "--max-time",
-            "600",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &payload,
-            &url,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("无法读取 stdout"))?;
-    let reader = BufReader::new(stdout);
-    let mut parser = SseParser::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        if let Some(ev) = parser.push(&line) {
-            on_event(ev);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let client = reqwest::Client::new();
+        let mut es = reqwest_eventsource::EventSource::new(client.post(&url).json(&payload))
+            .map_err(|e| anyhow::anyhow!("SSE 建立失败：{e}"))?;
+        while let Some(item) = es.next().await {
+            match item {
+                Ok(reqwest_eventsource::Event::Message(m)) => on_event(SseEvent {
+                    event: if m.event.is_empty() { "message".into() } else { m.event },
+                    data: m.data,
+                }),
+                Ok(reqwest_eventsource::Event::Open) => {}
+                Err(_) => break,
+            }
         }
-    }
-
-    let status = child.wait()?;
-    if !status.success() {
-        anyhow::bail!("curl 退出码 {:?}", status.code());
-    }
-    Ok(())
+        Ok::<(), anyhow::Error>(())
+    })
 }
 
 #[cfg(test)]

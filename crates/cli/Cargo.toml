@@ -26,6 +26,9 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
+# WebSocket 用开源实现：握手 / 帧 / ping-pong 都交给它。
+# 原来这套是手写的，连 SHA-1 和 base64 都是自己实现的——那是明确的自研。
+tungstenite = "0.24"
 clap.workspace = true
 # LLM 传输层：aimux（MIT，已发布 crates.io）。
 #

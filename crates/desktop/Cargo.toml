@@ -14,3 +14,8 @@ gpui = { path = "../../vendor/gpui" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+# 传输层用开源库，不 spawn curl、不自写 SSE 解帧。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest-eventsource = "0.6"
+futures = "0.3"
+tokio = { version = "1", features = ["rt"] }
