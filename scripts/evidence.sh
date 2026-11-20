@@ -237,7 +237,7 @@ say
 say '> 这条通道曾经整条是坏的（id 硬编码 0 / 命令没摊平 / 词表抄错 / 重复投递），'
 say '> 而所有基线都跑在 `auto_approve:true` 上，所以没人发现。探针会自己起一个引擎去验。'
 # 审批探针现在是 Rust（xtask approve-probe）。以前是 Python——仓库只允许 Rust + Go。
-probe=$(env CODEWHALE_HOME="$HOME_DIR" HARNESS_ENGINE_BIN="$ENGINE" \
+probe=$(env CODEWHALE_HOME="$HOME_DIR" HARNESS_ENGINE_BIN="$ENGINE_BIN" \
         cargo run -q -p xtask -- approve-probe 2>&1)
 code_block printf '%s\n' "$probe"
 need "审批通道探针" "$probe" '^PASS '

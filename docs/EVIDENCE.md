@@ -1,7 +1,7 @@
 # S0–S5 验收证据
 
-- 生成时间：2026-11-20 20:36:59 CST
-- 提交：`8f2d6e5` (fix(workspace): 建线程必须带工作目录——跨语言验证抓到的真 bug)
+- 生成时间：2026-11-20 23:15:16 CST
+- 提交：`168227c` (fix(mutate): 变异扫描用独立 target 目录，别再污染正常构建)
 - 引擎：`/tmp/kh/codewhale/target/debug/codewhale`（外部二进制，D1 进程依赖）
 
 ## 1. 测试
@@ -11,7 +11,7 @@
 
 | `cargo test --workspace`（内核 9 个 crate） | 423 passed / 0 failed |
 | `cargo test -p orbit-rpc`（接缝① 客户端） | 94 passed / 0 failed |
-| `cargo test -p orbit-pi`（GPUI 界面，无头） | 1939 passed; 1 failed; 0 filtered out; finished in 32.66s |
+| `cargo test -p orbit-pi`（GPUI 界面，无头） | 1933 passed; 1 failed; 0 filtered out; finished in 28.77s |
 
 orbit-pi 的红点（每一条都在 `bench/known-red.txt` 里登记了原因）：`app::session_park_tests::parked_session_cancels_custom_ui_with_a_top_level_flag `
 orbit-pi 偶发红：本次没有（每条未登记失败都单跑确认过，见上）
@@ -19,6 +19,52 @@ orbit-pi 偶发红：本次没有（每条未登记失败都单跑确认过，�
 ## 2. 基准自检（不花 token，不碰网络）
 
 ```
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:26:19
+   |
+26 |     let request = unsafe { VNRecognizeTextRequest::new() };
+   |                   ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:27:5
+   |
+27 |     unsafe {
+   |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:40:5
+   |
+40 |     unsafe { handler.performRequests_error(&reqs) }.map_err(|e| format!("performRequests: {e}"))?;
+   |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:43:28
+   |
+43 |     if let Some(results) = unsafe { request.results() } {
+   |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:45:32
+   |
+45 |             if let Some(top) = unsafe { obs.topCandidates(1) }.iter().next() {
+   |                                ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:46:26
+   |
+46 |                 out.push(unsafe { top.string() }.to_string());
+   |                          ^^^^^^ unnecessary `unsafe` block
+
+warning: function `mutants_path` is never used
+   --> crates/xtask/src/mutate.rs:157:8
+    |
+157 | pub fn mutants_path(root: &Path) -> PathBuf {
+    |        ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
 b01_off_by_one         brownfield  before=fail after=PASS  valid
 b02_empty_input        brownfield  before=fail after=PASS  valid
 b03_float_compare      brownfield  before=fail after=PASS  valid
@@ -63,7 +109,7 @@ selftest ok: 20 tasks, every check fails before the fix and passes after
 ```
 ### 4.2 建会话
 ```
-{"schema_version":2,"id":"thr_4143b467f42d44edb3e1512c9527c6ea","created_at":"2026-11-20T12:43:00.762928Z","updated_at":"2026-11-20T12:43:00.762928Z","model":"auto/deepseek-v4.1-flash","model_provider":"custom","model_provider_id":"magipe","workspace":"/private/tmp/evidence-ws.CTbAZS","mode":"agent"```
+{"schema_version":2,"id":"thr_99212f312bc54d5ea3466135a142ec21","created_at":"2026-11-20T15:16:51.257773Z","updated_at":"2026-11-20T15:16:51.257773Z","model":"auto/deepseek-v4.1-flash","model_provider":"custom","model_provider_id":"magipe","workspace":"/private/tmp/evidence-ws.gTjav8","mode":"agent"```
 ### 4.3 档位（合法值被接受，非法值被拒绝并列出**全部**取值）
 ```
 reasoning_effort=low   -> 201
@@ -73,13 +119,13 @@ Unrecognized reasoning effort "bogus". Expected one of: auto, off, minimal, low,
 ```
 ### 4.4 事件流里真的有工具调用和用量
 ```
-事件种类: {'thread.started': 1, 'turn.started': 1, 'item.started': 3, 'item.completed': 4, 'turn.lifecycle': 1, 'turn.workspace_snapshot': 4, 'model.tools.snapshot': 3, 'turn.provider_request': 2, 'turn.usage': 2, 'operation.activity_started': 1, 'operation.activity_completed': 1, 'item.delta': 1, 'turn.completed': 1, 'turn.artifacts': 1}
+事件种类: {'thread.started': 1, 'turn.started': 1, 'item.started': 3, 'item.completed': 4, 'turn.lifecycle': 1, 'turn.workspace_snapshot': 4, 'model.tools.snapshot': 3, 'turn.provider_request': 2, 'turn.usage': 2, 'operation.activity_started': 1, 'operation.activity_completed': 1, 'item.delta': 2, 'turn.completed': 1, 'turn.artifacts': 1}
 工具调用: ['bash', 'bash']
-用量: {"input_tokens": 9293, "output_tokens": 6, "prompt_cache_hit_tokens": 8704, "prompt_cache_miss_tokens": 589, "reasoning_tokens": 1, "reasoning_replay_tokens": 4}
+用量: {"input_tokens": 8608, "output_tokens": 23, "prompt_cache_hit_tokens": 8448, "prompt_cache_miss_tokens": 160, "reasoning_tokens": 0, "reasoning_replay_tokens": 4}
 ```
 ### 4.5 fork 出新会话（接在一个已完成轮次的会话上——空会话没有可分的枝）
 ```
-n_observation":{"sessions_dir":"/tmp/evidence-home.Fvq8Lq/sessions","session_id":"ab73d65b-abf1-42da-a528-c31d1c705c42","document_sha256":"bfef15e03c7c660c735c36b9c456cfdd50ac4bc205c4701e966ac454cf640463","checkpoint_sha256":null},"covered_turn_id":"turn_44e673be5c004f6a9dfa6025262af7a2","messages_sha256":"769cfdb40197899ed3a8549471825cea818c88ec85daf08cb04d2e4f6f8b5226","messages_len":4}}
+n_observation":{"sessions_dir":"/tmp/evidence-home.LePbAY/sessions","session_id":"e076621e-e534-451a-afcc-264c3eae130f","document_sha256":"51f871ce772f37963b299613b226f4a8906ceca0ae1276c19f12419afff2b3ac","checkpoint_sha256":null},"covered_turn_id":"turn_be60e9866446428eabccad8b3f215b04","messages_sha256":"6ce2a24ac718c8ab245dc3537928267abe4a5ca7c4827739dc23f99747fd340e","messages_len":4}}
 -> 201
 ```
 ### 5. 审批通道：真引擎里 deny 一条命令，这一轮还能正常收尾
@@ -87,8 +133,54 @@ n_observation":{"sessions_dir":"/tmp/evidence-home.Fvq8Lq/sessions","session_id"
 > 这条通道曾经整条是坏的（id 硬编码 0 / 命令没摊平 / 词表抄错 / 重复投递），
 > 而所有基线都跑在 `auto_approve:true` 上，所以没人发现。探针会自己起一个引擎去验。
 ```
-approval: id=approval_2e64faaa5ce34abb9cb75278fbe057f0 tool=bash command='echo hi'
-POST /v1/approvals/approval_2e64faaa5ce34abb9cb75278fbe057f0 {'decision':'deny'} → 200 ok
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:26:19
+   |
+26 |     let request = unsafe { VNRecognizeTextRequest::new() };
+   |                   ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:27:5
+   |
+27 |     unsafe {
+   |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:40:5
+   |
+40 |     unsafe { handler.performRequests_error(&reqs) }.map_err(|e| format!("performRequests: {e}"))?;
+   |     ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:43:28
+   |
+43 |     if let Some(results) = unsafe { request.results() } {
+   |                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:45:32
+   |
+45 |             if let Some(top) = unsafe { obs.topCandidates(1) }.iter().next() {
+   |                                ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+  --> crates/xtask/src/ocr.rs:46:26
+   |
+46 |                 out.push(unsafe { top.string() }.to_string());
+   |                          ^^^^^^ unnecessary `unsafe` block
+
+warning: function `mutants_path` is never used
+   --> crates/xtask/src/mutate.rs:157:8
+    |
+157 | pub fn mutants_path(root: &Path) -> PathBuf {
+    |        ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+approval: id=approval_70a2414787454c52b6a8372b91a4b6a3 tool=bash command="echo hi"
+POST /v1/approvals/approval_70a2414787454c52b6a8372b91a4b6a3 {'decision':'deny'} → 200
 turn end: turn.completed
 PASS 审批通道：id 对、命令对、deny 被接受、这一轮正常收尾
 ```
@@ -134,8 +226,8 @@ PASS 常驻 4 事件（turn.start / tool.pre / tool.post / turn.end）在真回�
 ```
 …第 2 回合就触发了压缩，提前结束（还剩 2 回合没跑）
 收到的事件：compact.pre turn.end turn.start 
-用量（cached_tokens 尾两条）："cached_tokens":13312 "cached_tokens":13568 
-scripts/probe-compact.sh: line 96: 77662 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
+用量（cached_tokens 尾两条）："cached_tokens":12288 "cached_tokens":13312 
+scripts/probe-compact.sh: line 96: 59084 Terminated: 15          python3 - "$PORT"  > /tmp/compact-approver.log 2>&1 <<'APPROVER'
 import json, sys, time, urllib.request
 port = sys.argv[1]; base = f"http://127.0.0.1:{port}"
 answered = set(); deadline = time.time() + 600
