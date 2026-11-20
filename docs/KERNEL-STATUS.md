@@ -186,6 +186,38 @@ WS 握手 → hello → 收到带 `device_id` 的 `hello_ack`。这两条以前*
 的模型还是错的。凌晨 1:35、fatigue 30 的状态下继续改内核是在赌，
 所以回退了这次尝试（`server.rs` 回到 `7b98430`），把测量结果和证据留下。
 
+### 判据查清了（2026-11-21 01:45，只读调研）
+
+**权威信号是引擎自己发出的 `turn.completed`**（HTTP/SSE 上 `turn.failed` /
+`turn.cancelled` 在 `http_engine.rs:264` 归一后同义）。内核在
+`server.rs:461` 收到它的那一刻，才同时落下日志的 `turn.end`（`:462`）和界面的
+`turn_end`——这是**唯一同时被日志和界面承认**的回合结束。其余全是它的投影或副产品：
+
+| 东西 | 位置 | 它其实是什么 |
+|---|---|---|
+| 日志 `turn.end` | `server.rs:462` | `turn.completed` 的投影，**唯一写入点** |
+| `SafePoint::TurnDone` | `server.rs:467` | `turn.end` 的**下游副作用**（放行排队插话），不是判据 |
+| `guards.begin_turn()` | `guards/src/lib.rs:410` | 只是 `nudges_this_turn = 0` 的限流计数重置 |
+| drain 的 idle/超时退出 | `main.rs:171` / `main.rs:175` | **一条日志都不写** |
+| `is_terminal()` 里的 `agent_end`/`error` | `main.rs:196-199` | 也不写 turn.end |
+| 引擎侧 409 active turn | `http_engine.rs:410` | 引擎自己的状态，与我们无关 |
+
+**为什么我上次观测到"矛盾"**：`NewSession` 是纯本地动作（`mapping.rs:186-189`
+只把 `thread_id` 置 None，`server.rs:122` 直接返回、连 `pump()` 都不调），
+它读到的 `false` 是**别人留下的**；而 drain 的三条退出里只有 `terminal`
+会写 `turn.end`，另外两类退出（idle≥20 且零事件、600s 超时）以及
+`is_terminal` 认的 `agent_end`/`error` **一个字都不写日志**。
+所以"active=false + 零条 turn.end"不是矛盾——是两套东西本来就没同步过。
+
+**结论**：我加的 `turn_active` 是手写的**第二份真相**，没有任何一行代码保证它与
+日志同步，所以必然分歧。要做"当前有回合在跑"的判断，只有一种有事实支撑的实现：
+读 `self.log.project().turn_open`（`timebus.rs:130-131` 定义，纯函数、可从磁盘重建）。
+
+**但它有"假开"**：`turn.start` 在 `engine.request()` **之前**写（`server.rs:131-137`），
+引擎随后拒单（`server.rs:213-222` 直接 bail）时那条 `turn.start` 已落账、
+永远等不到 `turn.end`。所以它只能用作**守卫的保守近似**（宁可少切一次），
+不能当作"回合真的结束了"。
+
 下次接着做需要先回答一个问题：**内核认为"一轮结束"的判据是什么**——
 `turn/completed` 通知？日志里的 `turn.end`？还是守卫的 `at_safe_point`？
 这个问题没有清楚答案之前，`turn_active` 的置位/清位必然是错的。
