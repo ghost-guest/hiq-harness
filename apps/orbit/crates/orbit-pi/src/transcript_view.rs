@@ -6552,7 +6552,34 @@ fn working_activity_label(step: &Step) -> Option<String> {
                 )),
             };
         }
-        return None;
+        // 普通工具：把**正在跑什么**说出来。
+        //
+        // 以前这里直接 `None`，于是活动条只剩一个计时器（"已工作 12s"），
+        // 用户看不出它到底在干什么。WorkBuddy 那种展示的核心就是这个：
+        // 一行灰掉的当前命令。命令取 args.command（bash/shell），
+        // 没有就退到 args.path / summary，再退回工具名。
+        let detail = tool
+            .args
+            .as_ref()
+            .and_then(|a| {
+                a.get("command")
+                    .or_else(|| a.get("path"))
+                    .or_else(|| a.get("file_path"))
+                    .or_else(|| a.get("query"))
+            })
+            .and_then(|v| v.as_str())
+            .or({
+                let summary = tool.summary.as_str();
+                if summary.is_empty() { None } else { Some(summary) }
+            })
+            .unwrap_or_default();
+        let first = detail.lines().next().unwrap_or_default().trim();
+        let shown: String = first.chars().take(72).collect();
+        return Some(if shown.is_empty() {
+            tool.name.clone()
+        } else {
+            format!("{} {}", tool.name, shown)
+        });
     }
     // Reasoning is only the current activity while the step has no answer
     // text yet; once the model is writing, the thinking phase is over.
