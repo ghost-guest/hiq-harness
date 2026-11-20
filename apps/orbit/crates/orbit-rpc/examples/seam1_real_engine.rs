@@ -87,7 +87,12 @@ fn main() {
     );
 
     let client = PiClient::spawn_with_bin(&ws, None).expect("spawn harnessd client");
-    let prompt = "用 bash 工具执行 echo seam1，把输出原样贴出来，然后结束。";
+    // 默认是这条链的最小验收题；`SEAM1_PROMPT` 可以换成任何题面，
+    // 用来在同一链路上验更重的任务（比如"Rust 和 Go 各写一份快排"）。
+    let prompt_owned = std::env::var("SEAM1_PROMPT").unwrap_or_else(|_| {
+        "用 bash 工具执行 echo seam1，把输出原样贴出来，然后结束。".to_string()
+    });
+    let prompt = prompt_owned.as_str();
     client
         .send(CommandBody::Prompt { message: prompt.to_string(), images: None, streaming_behavior: None })
         .expect("send prompt");

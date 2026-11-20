@@ -153,6 +153,24 @@ else
   skip "S1 跨语言任务" "Rust 与 Go 各写一份快排，都跑通、有结论" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
+# 同一条跨语言题面，但走**界面自己的客户端**（orbit-rpc 的 PiClient），
+# 不是我的探针直连 harnessd。这条证明"桌面版这条路"能跑重任务。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S1 跨语言（界面客户端）" "orbit 客户端跑跨语言题，流式+工具+收尾都在" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  se=$(cd apps/orbit && env HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       HARNESSD_BIN="$ROOT/target/debug/harnessd" CODEWHALE_HOME="$CODEWHALE_HOME" \
+       SEAM1_PROMPT='用 Rust 和 Go 各写一个快速排序放到同一目录，各跑一遍，确认两边对同一组输入输出一致，然后一句话给结论。' \
+       cargo run -q -p orbit-rpc --example seam1_real_engine 2>&1 | tail -6)
+  if printf '%s' "$se" | grep -q "^PASS "; then
+    pass "S1 跨语言（界面客户端）" "orbit 客户端跑跨语言题，流式+工具+收尾都在" "$(printf '%s' "$se" | grep -E '文本长度|工具调用' | tr '\n' ' ' | cut -c1-90)"
+  else
+    fail "S1 跨语言（界面客户端）" "orbit 客户端跑跨语言题，流式+工具+收尾都在" "$(printf '%s' "$se" | tail -2 | tr '\n' ' ' | cut -c1-140)"
+  fi
+else
+  skip "S1 跨语言（界面客户端）" "orbit 客户端跑跨语言题，流式+工具+收尾都在" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
 # 界面一打开就调 get_commands。引擎没有 prompt/capabilities 端点 → 探测失败
 # → 能力集为空 → has() 把空集当"什么都能做" → 去调不存在的方法 → 界面红条。
 if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
