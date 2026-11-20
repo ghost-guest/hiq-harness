@@ -458,6 +458,12 @@ impl<E: Engine> Supervisor<E> {
                     }
                 }
             }
+            // 上下文用量：取最近一轮的输入 token 数（那是模型真正看到的大小）。
+            "usage" => {
+                if let Some(n) = params.get("input_tokens").and_then(Value::as_u64) {
+                    self.state.context_tokens = Some(n);
+                }
+            }
             "turn/completed" => {
                 self.log.append("turn.end", json!({}))?;
                 self.plugins.broadcast("turn.end", json!({}));

@@ -86,6 +86,12 @@ pub struct SessionState {
     pub caps: Capabilities,
     /// A prompt waiting for its thread: `prompt/run` keys off a thread id.
     pub pending_prompt: Option<String>,
+    /// 最近一轮的上下文占用（tokens）。由 usage 事件更新。
+    /// 界面用它算"上下文用量"，没有这个就只能显示"等待"。
+    pub context_tokens: Option<u64>,
+    /// 上下文窗口大小。来自 provider 配置，默认取 256k（和 config.toml 一致）。
+    pub context_window: u64,
+
 }
 
 impl Default for SessionState {
@@ -100,6 +106,8 @@ impl Default for SessionState {
             follow_up_mode: "after_turn".into(),
             caps: Capabilities::assume_native(),
             pending_prompt: None,
+            context_tokens: None,
+            context_window: 256_000,
         }
     }
 }
@@ -252,9 +260,29 @@ pub fn map(cmd: &str, p: &Value, st: &mut SessionState) -> Action {
             None => Action::Local { reply: json!({ "commands": [] }) },
         },
 
-        "GetSessionStats" => Action::Local {
-            reply: json!({ "thread": st.thread_id, "model": st.model, "effort": st.effort }),
-        },
+        "GetSessionStats" => {
+            let used = st.context_tokens.unwrap_or(0);
+            let window = if st.context_window > 0 { st.context_window } else { 256_000 };
+            let percent = if window > 0 {
+                ((used as f64 / window as f64) * 100.0).round() as u64
+            } else {
+                0
+            };
+            Action::Local {
+                reply: json!({
+                    "thread": st.thread_id,
+                    "model": st.model,
+                    "effort": st.effort,
+                    // 界面读的是这个形状（见 orbit-pi 的 context_meter_tests）：
+                    //   {"contextUsage": {"tokens":…, "contextWindow":…, "percent":…}}
+                    "contextUsage": {
+                        "tokens": used,
+                        "contextWindow": window,
+                        "percent": percent,
+                    },
+                }),
+            }
+        }
 
         "SetSteeringMode" => {
             st.steering_mode = s(p, "mode").unwrap_or_else(|| "immediate".into());

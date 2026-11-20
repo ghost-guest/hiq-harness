@@ -366,10 +366,43 @@ impl Engine for HttpEngine {
                 let models = self
                     .http("GET", &format!("/v1/providers/{current}/models"), None)
                     .unwrap_or(Value::Null);
+                // 界面每条模型要 `id` + `name` + `provider` 三个都有（缺一个就被
+                // `filter_map` 丢掉），而引擎只给 `id`。以前这里原样透传，
+                // 结果选择器里永远是"0 个模型"。
+                let provider_name = entry
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(current.as_str())
+                    .to_string();
+                let enriched: Vec<Value> = models
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| {
+                                let id = m.get("id").and_then(Value::as_str)?;
+                                let mut out = m.clone();
+                                if let Value::Object(map) = &mut out {
+                                    map.entry("name".to_string()).or_insert(json!(id));
+                                    map.entry("provider".to_string())
+                                        .or_insert(json!(provider_name));
+                                    // 上下文窗口：引擎的模型条目里没有就退到 provider 上的。
+                                    if !map.contains_key("contextWindow") {
+                                        if let Some(cw) = entry.get("context_window") {
+                                            map.insert("contextWindow".to_string(), cw.clone());
+                                        }
+                                    }
+                                }
+                                Some(out)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 Ok(json!({
                     "provider": current,
+                    "providerName": provider_name,
                     "credential": entry.get("credentialState").cloned().unwrap_or(Value::Null),
-                    "models": models.get("models").cloned().unwrap_or(json!([])),
+                    "models": enriched,
                 }))
             }
             "thread/start" => {
