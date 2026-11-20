@@ -136,6 +136,23 @@ else
   skip "S3 deferred 命令" "回合中非 steer 命令不丢、顺序不乱" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
+# 跨语言任务：让模型用 Rust 和 Go 各写一份快排并各跑一遍。
+# 这条同时也验"建线程带 workspace"——没带的话文件会落到启动引擎的目录里。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S1 跨语言任务" "Rust 与 Go 各写一份快排，都跑通、有结论" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  ml=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" \
+       HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       CODEWHALE_HOME="$CODEWHALE_HOME" bash scripts/probe-multilang.sh 2>&1)
+  if printf '%s' "$ml" | grep -q "^PASS "; then
+    pass "S1 跨语言任务" "Rust 与 Go 各写一份快排，都跑通、有结论" "$(printf '%s' "$ml" | grep -E '工具调用' | head -1)"
+  else
+    fail "S1 跨语言任务" "Rust 与 Go 各写一份快排，都跑通、有结论" "$(printf '%s' "$ml" | grep -E '^FAIL|工具调用' | tail -1)"
+  fi
+else
+  skip "S1 跨语言任务" "Rust 与 Go 各写一份快排，都跑通、有结论" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
 # 界面一打开就调 get_commands。引擎没有 prompt/capabilities 端点 → 探测失败
 # → 能力集为空 → has() 把空集当"什么都能做" → 去调不存在的方法 → 界面红条。
 if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then

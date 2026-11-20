@@ -113,11 +113,31 @@ impl HttpEngine {
             .with_context(|| format!("{method} {path} returned non-JSON: {}", truncate(&body_text)))
     }
 
+    /// 建线程的请求体：`HARNESSD_THREAD_BODY` + 兜底的工作目录。
+    ///
+    /// 工作目录必须显式给。不给的话引擎用它**自己进程的 cwd**——跟用户当前
+    /// 项目毫无关系。实测：让模型写 Rust/Go 两份快排，文件全落进了我们仓库的
+    /// `scratch/` 下（引擎是从仓库启动的），而探针的临时工作区里只有一个日志。
+    /// 症状极具误导性：模型说"写好了、跑通了"，东西却不在项目目录里。
+    fn thread_body(&self) -> Value {
+        let mut body = self.thread_body.clone();
+        if body.get("workspace").is_none() {
+            if let Ok(cwd) = std::env::current_dir() {
+                body["workspace"] = json!(cwd.to_string_lossy());
+            }
+        }
+        body
+    }
+
     fn ensure_thread(&mut self) -> Result<String> {
         if let Some(t) = &self.thread_id {
             return Ok(t.clone());
         }
-        let v = self.http("POST", "/v1/threads", Some(&self.thread_body))?;
+        // 建线程时必须把工作目录带上。不传的话引擎用它**自己进程的 cwd**——
+        // 那个目录跟用户当前项目毫无关系。实测：在一个临时工作区里让它写
+        // Rust/Go 两份快排，文件全写进了我们仓库的 tmp/ 下（引擎是从仓库启动的）。
+        // 症状极具误导性：模型说"写好了"，跑也跑过了，但东西不在项目的目录里。
+        let v = self.http("POST", "/v1/threads", Some(&self.thread_body()))?;
         let id = v
             .get("id")
             .or_else(|| v.pointer("/thread/id"))
@@ -343,7 +363,7 @@ impl Engine for HttpEngine {
                 }))
             }
             "thread/start" => {
-                let v = self.http("POST", "/v1/threads", Some(&self.thread_body))?;
+                let v = self.http("POST", "/v1/threads", Some(&self.thread_body()))?;
                 if let Some(id) = v.get("id").and_then(Value::as_str) {
                     self.thread_id = Some(id.to_string());
                 }
@@ -605,6 +625,27 @@ mod tests {
     /// 引擎的能力清单会列出 `prompt/capabilities` 这类**它自己那边**的方法，
     /// 我们的 HTTP 传输没实现。不取交集就会被当成可路由方法去调，
     /// 界面收到一句 `not mapped on the HTTP transport` 的红条（实测过）。
+    /// 建线程时必须带工作目录。不带的话引擎用它自己进程的 cwd——
+    /// 实测让模型写两个语言的文件，全落进了启动引擎的那个仓库里。
+    #[test]
+    fn thread_body_carries_a_workspace() {
+        let e = HttpEngine::new("http://127.0.0.1:1", None);
+        let body = e.thread_body();
+        let ws = body.get("workspace").and_then(Value::as_str).unwrap_or_default();
+        assert!(!ws.is_empty(), "建线程没带 workspace，引擎会用自己的 cwd");
+        assert!(std::path::Path::new(ws).is_absolute(), "workspace 必须是绝对路径：{ws}");
+    }
+
+    /// 外部显式给了 workspace 就不覆盖——探针/桌面版各自指定自己的项目目录。
+    #[test]
+    fn explicit_workspace_wins() {
+        let e = HttpEngine {
+            thread_body: json!({ "workspace": "/tmp/explicit" }),
+            ..HttpEngine::new("http://127.0.0.1:1", None)
+        };
+        assert_eq!(e.thread_body()["workspace"], json!("/tmp/explicit"));
+    }
+
     #[test]
     fn transport_only_claims_methods_it_can_route() {
         let e = HttpEngine::new("http://127.0.0.1:1", None);
