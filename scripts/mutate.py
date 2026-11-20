@@ -103,6 +103,13 @@ MUTANTS = [
      '',
      "harnessd", "steer 数组方言读不到 → 引擎 400 prompt is required"),
 
+    # 切会话在 HTTP 上是本地动作，但必须登记在能力清单里；不登记就等于没实现，
+    # mapping 直接回 na，状态不换，历史继续读上一个线程。
+    ("thread-resume-not-registered", "crates/harnessd/src/http_engine.rs",
+     '"thread/message",\n            "thread/resume",',
+     '"thread/message",',
+     "harnessd", "切会话没登记在能力清单里"),
+
     # 传输层声称能路由自己没实现的方法：引擎清单里的 prompt/capabilities
     # 会被当成可路由去调，界面弹一条 not mapped 的红条。
     ("transport-claims-unrouted-method", "crates/harnessd/src/http_engine.rs",

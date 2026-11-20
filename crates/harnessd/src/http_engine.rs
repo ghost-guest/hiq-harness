@@ -398,6 +398,24 @@ impl Engine for HttpEngine {
                     .map(str::to_string);
                 Ok(json!({ "thread": { "id": id }, "turn": v, "turn_id": turn_id }))
             }
+            // 切会话。HTTP 上"恢复"不是一个引擎动作，而是**我们自己换目标**：
+            // 指向另一个 thread，并把 SSE 订阅换过去。
+            //
+            // 以前这里没有分支，靠能力集"空 = 全支持"蒙过去：状态先赋值、
+            // 调用再报 not mapped，于是看着能用。能力集一收敛就露馅——
+            // 切回原会话失败，GetEntries 继续读新线程，历史里冒出别的会话的消息。
+            "thread/resume" => {
+                let id = params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .context("thread/resume needs a threadId")?
+                    .to_string();
+                self.thread_id = Some(id.clone());
+                // 换线程 = 换订阅。旧流留着只会把上一个会话的事件混进来。
+                self.sse = None;
+                self.ensure_stream();
+                Ok(json!({ "thread": { "id": id } }))
+            }
             // 分叉：`Fork`（回到某条消息之前）与 `CloneSession`（原样复制）都走这一条。
             "thread/fork" => {
                 let id = self
@@ -570,6 +588,7 @@ impl Engine for HttpEngine {
             "thread/read",
             "thread/fork",
             "thread/message",
+            "thread/resume",
             "turn/steer",
             "thread/interrupt",
             "turn/interrupt",
@@ -591,6 +610,14 @@ mod tests {
         let e = HttpEngine::new("http://127.0.0.1:1", None);
         assert!(e.supports("thread/read"));
         assert!(e.supports("prompt/run"), "发回合是这条传输存在的理由");
+        // 切会话在 HTTP 上是本地动作（换目标 + 换订阅），但它必须**登记**在
+        // 清单里——否则 mapping 认为引擎不支持，直接回 na，状态都不换，
+        // GetEntries 继续读上一个线程（真实翻车："别的会话的消息跑进这个会话"）。
+        assert!(e.supports("thread/resume"), "切会话没登记就等于没实现");
+        // 切会话在 HTTP 上是本地动作（换目标 + 换订阅），但它必须**登记**在
+        // 清单里——否则 mapping 认为引擎不支持，直接回 na，状态都不换，
+        // GetEntries 继续读上一个线程（真实翻车："别的会话的消息跑进这个会话"）。
+        assert!(e.supports("thread/resume"), "切会话没登记就等于没实现");
         assert!(!e.supports("prompt/capabilities"), "没实现就不能说自己支持");
         assert!(!e.supports("app/capabilities"));
     }

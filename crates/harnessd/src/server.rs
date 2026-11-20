@@ -1012,6 +1012,40 @@ for line in sys.stdin:
     /// "引擎接没接这一轮"的证据就是这个 id。
     /// （真引擎实测：201 返回 `{"thread":…,"turn":{"id":"turn_…"}}`，
     ///   handle 手工包装时把 turn 整个丢了。）
+    /// 切会话必须真的把"当前线程"换过去，否则 GetEntries 读的还是上一个线程——
+    /// 界面上就是"另一个会话的消息跑进了这个会话的历史"。
+    ///
+    /// 真实翻车记录：HTTP 传输没有 `thread/resume` 分支，靠"能力集空 = 全支持"
+    /// 蒙过去（状态先赋值、调用再报错）。能力集一收敛，切回原会话就失效了。
+    #[test]
+    fn switch_session_moves_reads_to_the_other_thread() {
+        let mut engine = MockEngine::new(Box::new(|m: &str, p: &Value| match m {
+            "thread/start" => json!({ "thread": { "id": "thr_a" } }),
+            "thread/resume" => json!({ "thread": { "id": p.get("threadId").cloned().unwrap_or(Value::Null) } }),
+            "thread/read" => {
+                let id = p.get("threadId").and_then(Value::as_str).unwrap_or("?");
+                json!({ "items": [{ "kind": "agent_message", "id": format!("item_{id}"), "detail": format!("msg-in-{id}") }] })
+            }
+            _ => json!({ "output": "ok" }),
+        }));
+        let mut sup = Supervisor::new(engine, tmp_log("switch"), 128_000);
+        sup.handle("Prompt", json!({ "text": "hi" })).unwrap();
+
+        let (before, _e) = sup.handle("GetEntries", json!({})).unwrap();
+        assert!(
+            before.to_string().contains("msg-in-thr_a"),
+            "第一回合后读的应该是 thr_a，实际：{before}"
+        );
+
+        sup.handle("SwitchSession", json!({ "sessionId": "thr_b" })).unwrap();
+        assert_eq!(sup.state.thread_id.as_deref(), Some("thr_b"), "切会话没换状态");
+
+        let (after, _e) = sup.handle("GetEntries", json!({})).unwrap();
+        let shown = after.to_string();
+        assert!(shown.contains("msg-in-thr_b"), "切过去之后还读旧线程：{shown}");
+        assert!(!shown.contains("msg-in-thr_a"), "旧线程的消息漏进了新会话：{shown}");
+    }
+
     /// 「怎么不是流式显示呢」——判据是增量**什么时候**出去，不是有没有。
     /// 以前只攒不发，item 结束才补一条成品：事件条数看着对，界面是整段蹦出来。
     #[test]

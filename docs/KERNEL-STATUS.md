@@ -99,6 +99,23 @@ fork 探针偶发红：`HTTP 409 Workspace already has an active turn`。
 `docs/EVIDENCE.md` 时探针按设计报 SKIP——证据只写当轮真正验到的东西，
 不拿旧截图冒充本轮通过。两次结论不矛盾，是屏幕状态变了。
 
+## 切会话：能力集收敛后暴露的第三个洞
+
+`SwitchSession` 走 `thread/resume`。HTTP 传输里**从来没有这个分支**，
+以前靠"能力集是空 = 什么都能做"蒙过去：`st.thread_id` 先被赋值，
+调用随后报 `not mapped`——错在明处，状态却已经换对了，所以看着能用。
+
+能力集按传输层能力收敛之后，这条捷径没了：mapping 见 `has("thread/resume")`
+为假，直接回 `na("session switching")`，**状态根本不换**。结果是切回原会话失败，
+`GetEntries` 继续读上一个线程——界面上就是"另一个会话的消息跑进了这个会话的历史"。
+
+修法不是把它绕过，而是**真的实现**：HTTP 上"恢复会话"是本地动作——
+换目标线程 + 换 SSE 订阅。于是 `thread/resume` 进了 `supported_methods()`，
+`request()` 里有对应分支。
+
+**教训**：能力集从"空 = 全支持"改成"只有登记过的才算"之后，
+所有靠蒙过日子的分支会一次性露出来。这不是回归，是把假绿变真红。
+
 ## 传输层不再手写：curl 子进程 → reqwest + reqwest-eventsource
 
 方案里写的是"融合只发生在接缝上，不自研"。`http_engine.rs` 原来一直 spawn
@@ -1219,3 +1236,17 @@ HARNESS_ENGINE_BIN=… CODEWHALE_HOME=… bash scripts/gate.sh
    没接对，而是新内核按设计拒绝 Raw 直通，所以"取消一个扩展自定义 UI"没有对应语义。
    要不要补这套协议，取决于以后插件要不要弹原生对话框（Go 插件目前只走 `tool.pre`）。
 
+
+---
+
+## 附录：方案 vs 现状的对账（2026-11-20）
+
+| 方案里的约定 | 现状 | 判据 |
+|---|---|---|
+| 禁止 D4，引擎源码零改动 | 成立 | `scripts/check-engine.sh`：工作区没有任何 crate 依赖引擎 |
+| orbit 的 35 条命令全部映射 | 成立 | `CommandBody` 35 个变体，mapping 覆盖 35，未覆盖 0 |
+| effort 以 `reasoning_effort` 送引擎 | 成立 | `http_engine` 里有翻译分支 |
+| 四接缝：orbit⇄harnessd / harnessd⇄engine / ⇄插件 / ⇄守卫·time-bus·缓存 | 成立 | `crates/guards`、`crates/plugin`、`crates/context`、`harnessd/src/timebus.rs` |
+| D1 进程依赖 | 成立 | 引擎是外部二进制，`HARNESS_ENGINE_BIN` 指定 |
+| **HTTP/SSE 传输不得自研** | 本次修好 | curl 子进程 → `reqwest` + `reqwest-eventsource` |
+| 能力集 = 引擎说支持 ∩ 传输能路由 | 本次修好 | `supported_methods()` 是唯一事实来源 |
