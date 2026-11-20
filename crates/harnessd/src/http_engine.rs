@@ -157,8 +157,16 @@ impl HttpEngine {
         // 死掉的订阅要认出来。以前这里只看 `is_some()`：引擎在回合结束时
         // 关流，curl 安静退出，而 `Some(...)` 还挂着——下一回合就发给空气了。
         // 库方案下用 `is_closed()` 判断，是库自己维护的真实状态，不是猜的。
+        // 不变式：**订阅的线程 == 当前线程**。
+        //
+        // 引擎的 SSE 是单订阅者，订错线程的事件我们一条也收不到——表现是
+        // 回合起了、turn_id 也有，但 turn.completed 永远不来，界面一直转。
+        // 这个坑踩过两次（thread/resume、thread/start），两次都是"某条换线程
+        // 的路径忘了重订"。所以判据放在这里，而不是指望每个调用点都记得：
+        // 谁换了 self.thread_id，下一次 ensure_stream 就会自动重订。
         if let Some(h) = self.sse.as_ref() {
-            if !h.is_closed() {
+            let same_thread = Some(h.thread.as_str()) == self.thread_id.as_deref();
+            if same_thread && !h.is_closed() {
                 return;
             }
             self.sse = None;
@@ -218,7 +226,7 @@ impl HttpEngine {
                 });
             })
             .ok();
-        self.sse = Some(SseHandle { rx, stop: stop_tx, closed });
+        self.sse = Some(SseHandle { rx, stop: stop_tx, closed, thread: thread.clone() });
     }
 }
 
@@ -230,6 +238,8 @@ struct SseHandle {
     rx: Receiver<String>,
     stop: mpsc::Sender<()>,
     closed: Arc<AtomicBool>,
+    /// 这条流订的是哪个线程。引擎是**单订阅者**，订错线程就等于没订。
+    thread: String,
 }
 
 impl SseHandle {
@@ -367,12 +377,8 @@ impl Engine for HttpEngine {
                 if let Some(id) = v.get("id").and_then(Value::as_str) {
                     self.thread_id = Some(id.to_string());
                 }
-                // 换线程必须换订阅。引擎的 SSE 是**单订阅者**：旧的（上一个
-                // 会话的）流还挂着，它就不会把新线程的事件发给任何人。
-                // 表现：新会话里发一句，engine 侧确实起了回合、回了 turn_id，
-                // 但turn.completed 永远到不了，回合不闭合、界面一直转。
-                // 实测抓到的：probe-switch-session 的第二个会话。
-                self.sse = None;
+                // 换线程后订阅要跟着换——这件事由 `ensure_stream()` 的不变式
+                // 负责（订阅线程 != 当前线程就重订），这里不用手写重置。
                 self.ensure_stream();
                 Ok(v)
             }
@@ -438,8 +444,6 @@ impl Engine for HttpEngine {
                     .context("thread/resume needs a threadId")?
                     .to_string();
                 self.thread_id = Some(id.clone());
-                // 换线程 = 换订阅。旧流留着只会把上一个会话的事件混进来。
-                self.sse = None;
                 self.ensure_stream();
                 Ok(json!({ "thread": { "id": id } }))
             }

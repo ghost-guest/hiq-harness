@@ -86,7 +86,9 @@ echo "结论：${msg}"
 problems=""
 [ "${rs_files:-0}" -ge 1 ] || problems="$problems 没有 .rs 文件；"
 [ "${go_files:-0}" -ge 1 ] || problems="$problems 没有 .go 文件；"
-[ "${tools:-0}" -ge 3 ] || problems="$problems 工具调用只有 ${tools} 次；"
+# 不卡"至少 3 次"：模型可以把两个文件写到一次 bash 调用里，那反映的是策略
+# 不是能力。真正的证据是**两个语言的文件真的存在**，而且确实动过手。
+[ "${tools:-0}" -ge 1 ] || problems="$problems 一次工具都没调用；"
 [ -n "$msg" ] || problems="$problems 没有最终回答；"
 if [ -n "$problems" ]; then
   echo "FAIL $problems"
