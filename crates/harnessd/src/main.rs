@@ -136,6 +136,7 @@ fn serve(args: &[String]) -> Result<()> {
 fn drain_async_events<E: harnessd::engine::Engine>(
     sup: &mut Supervisor<E>,
     steer_rx: Option<&Receiver<String>>,
+    mut on_batch: impl FnMut(&[harnessd::protocol::UiEvent]) -> Result<()>,
 ) -> Result<(Vec<harnessd::protocol::UiEvent>, Vec<String>)> {
     let timeout: u64 = std::env::var("HARNESSD_TURN_TIMEOUT")
         .ok()
@@ -184,6 +185,10 @@ fn drain_async_events<E: harnessd::engine::Engine>(
                     terminal = true;
                 }
             }
+            // **边产生边交出去**。以前是攒进 `all`、等回合结束由调用方一次性
+            // 写出并 flush——界面因此在整轮运行期间什么都收不到，等结束才
+            // "啪"地一下全出现。这就是"只用结束才显示过程"的根因。
+            on_batch(&batch)?;
             all.extend(batch);
         }
     }
@@ -267,7 +272,7 @@ fn serve_stdio<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
                     write!(out, "{}", encode(&Frame::notification("event", serde_json::to_value(e)?)))?;
                 }
                 if starts_a_turn(&method) {
-                    let (events, _deferred) = drain_async_events(sup, None)?;
+                    let (events, _deferred) = drain_async_events(sup, None, |_| Ok(()))?;
                     for e in events {
                         write!(out, "{}", encode(&Frame::notification("event", serde_json::to_value(e)?)))?;
                     }
@@ -365,12 +370,15 @@ fn serve_orbit<E: harnessd::engine::Engine>(sup: &mut Supervisor<E>) -> Result<(
                     emit_orbit(&mut out, &e)?;
                 }
                 if starts_a_turn(cmd) {
-                    let (events, deferred) = drain_async_events(sup, Some(&rx))?;
-                    for e in events {
-                        for out_event in events_to_orbit(&[e]) {
-                            emit_orbit(&mut out, &out_event)?;
+                    let (_events, deferred) = drain_async_events(sup, Some(&rx), |batch| {
+                        for e in batch {
+                            for out_event in events_to_orbit(std::slice::from_ref(e)) {
+                                emit_orbit(&mut out, &out_event)?;
+                            }
                         }
-                    }
+                        out.flush()?;
+                        Ok(())
+                    })?;
                     // 回合中收到的非 steer 命令，放回队首下次处理。
                     for line in deferred.into_iter().rev() {
                         pending.insert(0, line);
