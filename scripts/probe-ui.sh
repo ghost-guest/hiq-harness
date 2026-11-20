@@ -11,7 +11,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HARNESSD_BIN="${HARNESSD_BIN:-$ROOT/target/debug/harnessd}"
 ORBIT_BIN="${ORBIT_BIN:-$ROOT/apps/orbit/target/debug/orbit-pi}"
 SHOT="${SHOT:-/tmp/orbit-ui-probe.png}"
-OCR="${OCR:-/tmp/orbit-ocr-probe}"
+# OCR 用 `xtask ocr`（Rust，基于 objc2-vision）。以前是 swiftc 编译一个
+# 20 行的 Swift 脚本——仓库只允许 Rust + Go，所以收编进 xtask。
+OCR_CMD=(cargo run -q -p xtask -- ocr)
 
 for f in "$HARNESSD_BIN" "$ORBIT_BIN" "$HARNESS_ENGINE_BIN"; do
   [ -x "$f" ] || { echo "FAIL 缺少可执行文件：$f"; exit 1; }
@@ -30,8 +32,8 @@ sys.exit(0 if Quartz.CGSessionCopyCurrentDictionary().get('CGSSessionScreenIsLoc
   exit 2
 fi
 
-[ -x "$OCR" ] || swiftc -O "$ROOT/scripts/ocr.swift" -o "$OCR" >/dev/null 2>&1 \
-  || { echo "FAIL 编译 OCR helper 失败"; exit 1; }
+# 先确认 OCR 工具能编译（xtask 是 Rust，不需要额外编译器）。
+cargo build -q -p xtask || { echo "FAIL 编译 OCR helper 失败"; exit 1; }
 
 # 屏幕上只要有别的 orbit 窗口，OCR 就会读到它的内容，探针就会假绿——
 # 上一轮残留的窗口曾经让 `/bin/sleep` 冒充 orbit 也能通过。先清场。
@@ -75,7 +77,7 @@ if [ -n "${SHOT_OVERRIDE:-}" ]; then
 else
   screencapture -x "$SHOT" || { echo "FAIL 截图失败"; exit 1; }
 fi
-TEXT="$("$OCR" "$SHOT")"
+TEXT="$("${OCR_CMD[@]}" "$SHOT" 2>/dev/null)"
 echo "--- OCR 读到 $(( $(printf '%s' "$TEXT" | wc -l) )) 行 ---"
 printf '%s\n' "$TEXT"
 

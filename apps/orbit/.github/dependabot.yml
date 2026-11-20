@@ -16,13 +16,6 @@ updates:
         applies-to: version-updates
 
   - package-ecosystem: npm
-    directory: "/marketing"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      marketing:
-        patterns: ["*"]
         applies-to: version-updates
 
   # Keeps the SHA pins in .github/workflows/ current.

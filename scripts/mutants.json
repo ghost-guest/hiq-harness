@@ -1,0 +1,202 @@
+[
+  {
+    "name": "guards-stop-to-note",
+    "file": "crates/guards/src/lib.rs",
+    "old": "NoProgressDecision::Stop { reason } => PostCallVerdict::Stop { reason },",
+    "new": "NoProgressDecision::Stop { reason } => PostCallVerdict::Note { note: reason },",
+    "crate": "harness-guards",
+    "desc": "守卫最后一档 Stop 降级成 Note"
+  },
+  {
+    "name": "guards-refuse-to-note",
+    "file": "crates/guards/src/lib.rs",
+    "old": "NoProgressDecision::Refuse { reason } => PostCallVerdict::ReplaceResult { reason },",
+    "new": "NoProgressDecision::Refuse { reason } => PostCallVerdict::Note { note: reason },",
+    "crate": "harness-guards",
+    "desc": "拒跑降级成提示"
+  },
+  {
+    "name": "guards-nudge-to-ok",
+    "file": "crates/guards/src/lib.rs",
+    "old": "NoProgressDecision::Nudge { note } => PostCallVerdict::Note { note },",
+    "new": "NoProgressDecision::Nudge { note } => PostCallVerdict::Note { note: format!(\"\") },",
+    "crate": "harness-guards",
+    "desc": "提示的理由被清空（UI 看到空提示）"
+  },
+  {
+    "name": "guards-failure-gate-threshold",
+    "file": "crates/guards/src/lib.rs",
+    "old": "if self.streak >= self.threshold {",
+    "new": "if self.streak >= 9999 {",
+    "crate": "harness-guards",
+    "desc": "相同失败永远到不了阈值"
+  },
+  {
+    "name": "cache-hit-floor",
+    "file": "crates/harnessd/src/cacheguard.rs",
+    "old": "pub const HIT_FLOOR: f64 = 0.90;",
+    "new": "pub const HIT_FLOOR: f64 = 0.00;",
+    "crate": "harnessd",
+    "desc": "命中率下限归零（冷前缀也压缩）"
+  },
+  {
+    "name": "cache-pressure",
+    "file": "crates/harnessd/src/cacheguard.rs",
+    "old": "pub const PRESSURE: f64 = 0.85;",
+    "new": "pub const PRESSURE: f64 = 0.00;",
+    "crate": "harnessd",
+    "desc": "压力线归零（永远觉得窗口满）"
+  },
+  {
+    "name": "approval-allow-word",
+    "file": "crates/harnessd/src/http_engine.rs",
+    "old": "\"accept\" | \"allow\" | \"acceptForSession\" | \"acceptWithExecpolicyAmendment\" => \"allow\",",
+    "new": "\"accept\" | \"acceptForSession\" | \"acceptWithExecpolicyAmendment\" => \"allow\",",
+    "crate": "harnessd",
+    "desc": "裸 \"allow\" 不再被认（引擎会 400）"
+  },
+  {
+    "name": "turn-completed-dropped",
+    "file": "crates/harnessd/src/http_engine.rs",
+    "old": "\"turn.completed\" | \"turn.failed\" | \"turn.cancelled\" => \"turn/completed\".into(),",
+    "new": "\"turn.failed\" | \"turn.cancelled\" => \"turn/completed\".into(),",
+    "crate": "harnessd",
+    "desc": "正常完成的回合不再被认作完成"
+  },
+  {
+    "name": "silent-drop-guard",
+    "file": "crates/harnessd/src/server.rs",
+    "old": "\"engine rejected this turn: no turn id, no output (prompt dropped)\"",
+    "new": "\"engine accepted this turn (downgraded)\"",
+    "crate": "harnessd",
+    "desc": "被拒的回合又被当成正常（错误文案都被改了）"
+  },
+  {
+    "name": "compact-failure-silent",
+    "file": "crates/harnessd/src/server.rs",
+    "old": "out.push(UiEvent::new(\n                                        \"compact_failed\",",
+    "new": "out.push(UiEvent::new(\n                                        \"compact_ok\",",
+    "crate": "harnessd",
+    "desc": "压缩失败被记成成功（坏消息翻译成好消息）"
+  },
+  {
+    "name": "protocol-turn-end",
+    "file": "crates/harnessd/src/protocol.rs",
+    "old": "\"turn/completed\" => \"turn_end\",",
+    "new": "\"turn/completed\" => \"turn_end_DISABLED\",",
+    "crate": "harnessd",
+    "desc": "protocol 层不认 turn.completed"
+  },
+  {
+    "name": "orbit-flat-nesting",
+    "file": "crates/harnessd/src/orbit_compat.rs",
+    "old": "        other => {\n            out.insert(\"value\".into(), other.clone());\n        }",
+    "new": "        other => {\n            out.insert(\"value\".into(), json!({ \"value\": other.clone() }));\n        }",
+    "crate": "harnessd",
+    "desc": "扁平化变成嵌套（界面会读不到）"
+  },
+  {
+    "name": "cache-observed-values",
+    "file": "crates/harnessd/src/server.rs",
+    "old": "self.cache.observe(input, cached);",
+    "new": "self.cache.observe(0, 0);",
+    "crate": "harnessd",
+    "desc": "缓存守卫永远拿到 0/0（永远\"没问题\"）"
+  },
+  {
+    "name": "history-items-entries",
+    "file": "crates/harnessd/src/http_engine.rs",
+    "old": "obj.insert(\"entries\".into(), entries);",
+    "new": "let _ = entries;",
+    "crate": "harnessd",
+    "desc": "items 不翻译成 entries（界面看到空历史）"
+  },
+  {
+    "name": "steer-array-dialect",
+    "file": "crates/harnessd/src/http_engine.rs",
+    "old": "        .or_else(|| {\n            params.get(\"input\").and_then(Value::as_array).and_then(|a| {\n                a.iter()\n                    .filter_map(|i| i.get(\"text\").and_then(Value::as_str))\n                    .next()\n            })\n        })\n",
+    "new": "",
+    "crate": "harnessd",
+    "desc": "steer 数组方言读不到 → 引擎 400 prompt is required"
+  },
+  {
+    "name": "thread-resume-not-registered",
+    "file": "crates/harnessd/src/http_engine.rs",
+    "old": "\"thread/message\",\n            \"thread/resume\",",
+    "new": "\"thread/message\",",
+    "crate": "harnessd",
+    "desc": "切会话没登记在能力清单里"
+  },
+  {
+    "name": "transport-claims-unrouted-method",
+    "file": "crates/harnessd/src/http_engine.rs",
+    "old": "\"prompt/request\",\n        ])",
+    "new": "\"prompt/request\", \"prompt/capabilities\",\n        ])",
+    "crate": "harnessd",
+    "desc": "传输层声称支持没实现的方法"
+  },
+  {
+    "name": "turn-start-without-agent-start",
+    "file": "crates/harnessd/src/orbit_compat.rs",
+    "old": "Some(\"turn_start\") => vec![json!({ \"type\": \"agent_start\" }), v],",
+    "new": "Some(\"turn_start\") => vec![v],",
+    "crate": "harnessd",
+    "desc": "回合开始时没有 agent_start"
+  },
+  {
+    "name": "turn-end-without-settle",
+    "file": "crates/harnessd/src/orbit_compat.rs",
+    "old": "vec![v, json!({ \"type\": \"agent_settled\", \"aborted\": false })]",
+    "new": "vec![v]",
+    "crate": "harnessd",
+    "desc": "回合结束时没有 agent_settled"
+  },
+  {
+    "name": "http-item-kind-not-a-message",
+    "file": "crates/harnessd/src/server.rs",
+    "old": "kind_field == \"agent_message\"",
+    "new": "false",
+    "crate": "harnessd",
+    "desc": "HTTP 方言的 agent_message 不再被认成回答"
+  },
+  {
+    "name": "nonstreaming-answer-never-reaches-ui",
+    "file": "crates/harnessd/src/server.rs",
+    "old": "if !detail.trim().is_empty() {\n                            out.insert(0, UiEvent::new(\"text_delta\", json!({ \"delta\": detail })));",
+    "new": "if false {\n                            out.insert(0, UiEvent::new(\"text_delta\", json!({ \"delta\": detail })));",
+    "crate": "harnessd",
+    "desc": "非流式回答不再发给界面"
+  },
+  {
+    "name": "fork-thread-state-stale",
+    "file": "crates/harnessd/src/server.rs",
+    "old": "\"thread/start\" | \"thread/fork\" | \"thread/resume\"",
+    "new": "\"thread/start\"",
+    "crate": "harnessd",
+    "desc": "fork 之后 Supervisor 的当前线程没跟着换"
+  },
+  {
+    "name": "mock-engine-drops-params",
+    "file": "crates/harnessd/src/engine.rs",
+    "old": "self.requests.push((method.to_string(), params.clone()));",
+    "new": "self.requests.push((method.to_string(), Value::Null));",
+    "crate": "harnessd",
+    "desc": "测试替身不再记录参数"
+  },
+  {
+    "name": "turn-id-dropped-in-wrap",
+    "file": "crates/harnessd/src/server.rs",
+    "old": "\"turn_id\": out.get(\"turn_id\"),",
+    "new": "\"turn_id\": Value::Null,",
+    "crate": "harnessd",
+    "desc": "包装时丢掉回合 id（多回合被误判成被拒）"
+  },
+  {
+    "name": "mapping-unknown-command",
+    "file": "crates/harnessd/src/mapping.rs",
+    "old": "\"Prompt\" => {",
+    "new": "\"Prompt-DISABLED\" => {",
+    "crate": "harnessd",
+    "desc": "Prompt 命令掉进兜底"
+  }
+]

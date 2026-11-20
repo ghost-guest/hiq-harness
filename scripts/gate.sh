@@ -32,7 +32,7 @@ fi
 # 默认**跳过**（一轮约 100 秒，不适合每次提交都跑），
 # 但跳过要说出来——静默跳过就是又一个"永远绿"。
 if [ "${MUTATE:-0}" = "1" ]; then
-  if ! python3 scripts/mutate.py >/tmp/mutate.out 2>&1; then
+  if ! cargo run -q -p xtask -- mutate >/tmp/mutate.out 2>&1; then
     echo "门禁未通过：有变异体存活（测试抓不住那些改动）"
     grep -E "^## !!|^- " /tmp/mutate.out | head -6
     exit 1
