@@ -155,13 +155,23 @@ WS 握手 → hello → 收到带 `device_id` 的 `hello_ack`。这两条以前*
 再交给库，是一次实打实的重构；而这条 relay 只有 72 条单测兜底，
 没有端到端验收覆盖。改完我无法当场证明它没坏——那就不是"补上差异"，是"赌一把"。
 
-落地方案（下一轮）：
+落地方案（下一轮，已核对过 `tiny_http` 的能力）：
 
-1. 依赖换成 `tiny_http`；`Server::start` 用它的 `incoming_requests()` 循环。
-2. WS 分支：`request.upgrade("websocket", response)` 拿回原始流 → `tungstenite::server::accept`。
-3. `http_dispatch` 改成返回 `(u16, String, &str /*content-type*/)`，由 tiny_http 写响应。
-4. 给 relay 补一条端到端探针（起 relay → WS 发 hello → 收 device id），
-   再删掉手写解析。**先有验收，再动实现。**
+1. 依赖换成 `tiny_http`；`Server::server()` 起服务，`recv_timeout` 循环。
+2. WS 分支：`request.upgrade("websocket", Response::empty(101))` 拿回原始流
+   → `tungstenite::server::accept`（`upgrade` 正是为此设计的）。
+3. 普通路由：`http_dispatch` 改成返回 `(u16, serde_json::Value)`，由库写响应。
+4. **`/run/stream` 是最麻烦的一个**：现在它拿 `&mut TcpStream` 直接写
+   SSE 头和事件。换成库要么让 `stream_task` 写进一个 `mpsc`，再实现一个
+   从 channel 拉字节的 `Read`（`tiny_http` 在 `data_length: None` 时用
+   chunked，正好吃这种按需产出的 body），要么把执行器改成回调式。
+   前者约 40 行，后者动 `exec`/`sse` 两个模块。
+5. 验收：`tests/relay_e2e.rs` 已经有 HTTP + WS 两条；**要再加一条
+   `/run/stream` 的 SSE 断言**，否则第 4 步没有护栏。**先补这条，再动实现。**
+
+> 现状盘点（2026-11-21 00:05）：第 1–3 步是纯机械替换，第 4 步需要一个
+> 流式 body 适配器，第 5 步的 SSE 端到端还没有。所以这一项**不能**用
+> "改完编译过"来结案。
 
 ## 自研传输清完了：desktop 的 curl、CLI 的手写 WebSocket
 
