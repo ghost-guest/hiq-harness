@@ -6689,13 +6689,39 @@ fn render_working_indicator(
     // 第二行：`|` 后面一句话。
     //   有思考 → 显示思考的最后一句（模型正在想什么）
     //   还没开口 → 显示一言（轮换），让人知道它没死
-    let detail = thought
+    let from_thought = thought
         .filter(|t| !t.trim().is_empty())
         .map(|t| {
             let line = t.lines().last().unwrap_or_default().trim().to_string();
             line.chars().take(96).collect::<String>()
-        })
-        .unwrap_or_else(|| live_quote(elapsed).to_string());
+        });
+    let is_quote = from_thought.is_none();
+    let detail = from_thought.unwrap_or_else(|| live_quote(elapsed).to_string());
+
+    // 一言用**彩色流动**的文字：慢速扫过一遍渐变。
+    // 思考原文保持中性灰——那是内容，不该抢戏；一言是点缀，可以亮一点。
+    let detail_el: AnyElement = if is_quote && !theme.reduce_motion() {
+        ShimmerText::new(
+            detail,
+            theme.accent.opacity(0.55),
+            theme.accent,
+        )
+        .with_animation(
+            ElementId::NamedInteger("live-quote-shimmer".into(), 2),
+            Animation::new(looping::SHIMMER).repeat(),
+            |mut text, delta| {
+                text.phase = delta;
+                text
+            },
+        )
+        .into_any_element()
+    } else {
+        div()
+            .truncate()
+            .text_color(if is_quote { theme.accent } else { theme.text_muted })
+            .child(detail)
+            .into_any_element()
+    };
 
     div()
         .w_full()
@@ -6709,12 +6735,10 @@ fn render_working_indicator(
                 .min_w_0()
                 .pl(px(10.))
                 .border_l(px(1.))
-                .border_color(theme.border)
+                .border_color(if is_quote { theme.accent.opacity(0.5) } else { theme.border })
                 .text_size(theme.ui_px(12.5))
                 .line_height(theme.ui_px(18.))
-                .text_color(theme.text_muted)
-                .truncate()
-                .child(detail),
+                .child(detail_el),
         )
 }
 
