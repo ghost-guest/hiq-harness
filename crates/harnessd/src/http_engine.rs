@@ -367,6 +367,13 @@ impl Engine for HttpEngine {
                 if let Some(id) = v.get("id").and_then(Value::as_str) {
                     self.thread_id = Some(id.to_string());
                 }
+                // 换线程必须换订阅。引擎的 SSE 是**单订阅者**：旧的（上一个
+                // 会话的）流还挂着，它就不会把新线程的事件发给任何人。
+                // 表现：新会话里发一句，engine 侧确实起了回合、回了 turn_id，
+                // 但turn.completed 永远到不了，回合不闭合、界面一直转。
+                // 实测抓到的：probe-switch-session 的第二个会话。
+                self.sse = None;
+                self.ensure_stream();
                 Ok(v)
             }
             "thread/read" => {

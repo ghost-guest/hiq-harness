@@ -153,6 +153,22 @@ else
   skip "S1 跨语言任务" "Rust 与 Go 各写一份快排，都跑通、有结论" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
 fi
 
+# 切会话：开新会话不能沿用旧订阅（引擎单订阅者），否则新会话的回合永远不闭合。
+if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
+  skip "S2 切会话" "开新会话后回合闭合；切回去只看到各自的消息" "ACCEPTANCE_FAST=1：真引擎项这一轮没跑"
+elif [ -n "${HARNESS_ENGINE_BIN:-}" ] && [ -n "${CODEWHALE_HOME:-}" ]; then
+  sw=$(env HARNESSD_BIN="$ROOT/target/debug/harnessd" \
+       HARNESS_ENGINE_BIN="$HARNESS_ENGINE_BIN" \
+       CODEWHALE_HOME="$CODEWHALE_HOME" SKIP_BUILD=1 bash scripts/probe-switch-session.sh 2>&1)
+  if printf '%s' "$sw" | grep -q "^PASS "; then
+    pass "S2 切会话" "开新会话后回合闭合；切回去只看到各自的消息" "$(printf '%s' "$sw" | grep '^PASS ' | head -1)"
+  else
+    fail "S2 切会话" "开新会话后回合闭合；切回去只看到各自的消息" "$(printf '%s' "$sw" | grep -E '^FAIL' | head -1)"
+  fi
+else
+  skip "S2 切会话" "开新会话后回合闭合；切回去只看到各自的消息" "缺 HARNESS_ENGINE_BIN 或 CODEWHALE_HOME"
+fi
+
 # 同一条跨语言题面，但走**界面自己的客户端**（orbit-rpc 的 PiClient），
 # 不是我的探针直连 harnessd。这条证明"桌面版这条路"能跑重任务。
 if [ "${ACCEPTANCE_FAST:-0}" = "1" ]; then
