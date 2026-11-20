@@ -458,12 +458,6 @@ impl<E: Engine> Supervisor<E> {
                     }
                 }
             }
-            // 上下文用量：取最近一轮的输入 token 数（那是模型真正看到的大小）。
-            "usage" => {
-                if let Some(n) = params.get("input_tokens").and_then(Value::as_u64) {
-                    self.state.context_tokens = Some(n);
-                }
-            }
             "turn/completed" => {
                 self.log.append("turn.end", json!({}))?;
                 self.plugins.broadcast("turn.end", json!({}));
@@ -500,6 +494,11 @@ impl<E: Engine> Supervisor<E> {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
                 if input > 0 {
+                    // 上下文用量：模型这一轮真正看到的 token 数。
+                    // 界面读 GetSessionStats 的 contextUsage，没有这个值就只能显示
+                    // "此会话尚未报告用量"。**必须放在这里**——按 UiEvent 的 kind
+                    // 匹配是匹配不到的，收到的 method 是 `thread/tokenUsage/updated`。
+                    self.state.context_tokens = Some(input as u64);
                     self.log.append(
                         "usage",
                         json!({ "input_tokens": input, "cached_tokens": cached }),

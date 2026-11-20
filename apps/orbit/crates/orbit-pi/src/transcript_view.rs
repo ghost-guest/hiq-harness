@@ -6634,10 +6634,9 @@ fn render_working_indicator(
             duration = format_working_elapsed(elapsed)
         ),
     };
-    let label = match activity {
-        Some(activity) => format!("{activity} · {timing}"),
-        None => timing,
-    };
+    // 第一行只放"在干什么"；计时和 tok/s 挪到第二行，和一言并排——
+    // 否则命令行一长，时间就被挤到看不见。
+    let label = activity.unwrap_or_default();
     let label_size = theme.ui_px(13.5);
     let label_line = theme.ui_px(18.);
     // The live label carries the sidebar's running-session shimmer — the same
@@ -6733,12 +6732,21 @@ fn render_working_indicator(
             div()
                 .w_full()
                 .min_w_0()
+                .flex()
+                .items_center()
+                .gap(DynamicSpacing::Base08.px(&theme))
                 .pl(px(10.))
                 .border_l(px(1.))
                 .border_color(if is_quote { theme.accent.opacity(0.5) } else { theme.border })
                 .text_size(theme.ui_px(12.5))
                 .line_height(theme.ui_px(18.))
-                .child(detail_el),
+                .child(div().flex_1().min_w_0().child(detail_el))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(theme.text_muted)
+                        .child(timing),
+                ),
         )
 }
 
