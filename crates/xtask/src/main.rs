@@ -10,6 +10,7 @@ use std::process::Command;
 #[cfg(target_os = "macos")]
 mod ocr;
 mod mutate;
+mod approve;
 
 /// 本项目的实现语言。方案定的是 Rust 做内核与界面、Go 做插件层。
 const LANGS: &[(&str, &str)] = &[
@@ -55,6 +56,21 @@ fn ext_of(path: &str) -> Option<&str> {
 
 fn main() {
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "lang-audit".into());
+    if cmd == "approve-probe" {
+        let engine = std::env::var("HARNESS_ENGINE_BIN").unwrap_or_default();
+        let home = std::env::var("CODEWHALE_HOME").unwrap_or_default();
+        if engine.is_empty() || home.is_empty() {
+            eprintln!("need HARNESS_ENGINE_BIN and CODEWHALE_HOME");
+            std::process::exit(2);
+        }
+        match approve::run(&engine, &home) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("FAIL {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if cmd == "mutate" {
         let root = std::env::current_dir().expect("cwd");
         let only = std::env::args().nth(2);

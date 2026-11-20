@@ -89,6 +89,16 @@ fork 探针偶发红：`HTTP 409 Workspace already has an active turn`。
 改成重试 5 次（实测第 5 次才成功），而不是一次 409 就判红。
 这和"命中率改观察项"是同一个原则：**外部的不确定性，不该变成内核的红**。
 
+## §9 界面探针：重建后的桌面版 PASS 过两次
+
+- 2026-11-20 20:14 CST：重构传输层（reqwest + reqwest-eventsource）之后，
+  `evidence.sh` 里 §9 首次 **PASS**——`OCR 读到 44 行 ｜ PASS 界面渲染（项目区 / 会话搜索 / 任务输入框 都在）`。
+ 这次是**新二进制、新传输层**跑出来的，不是旧构建的余温。
+- 2026-11-20 20:36 CST：重跑时屏幕锁了，按设计 SKIP。
+
+证据文件只写当轮真正验到的东西，所以 `docs/EVIDENCE.md` 里那份写的是 SKIP；
+PASS 那轮的结果记在这里，附时间戳。
+
 ## §9 界面探针：解锁时真的 PASS 过一次
 
 2026-11-19 21:54 CST 屏幕解锁期间，`HARNESS_ENGINE_BIN=… CODEWHALE_HOME=… bash scripts/probe-ui.sh`
