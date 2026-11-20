@@ -7,6 +7,11 @@
 #   2. 第一条 text_delta 比 turn.end 早至少 0.5 秒（说明是边生成边发）
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# 探针跑的是**当前源码**，不是上次留下的二进制。
+# 踩过：gate 和我自己的构建并发，探针拿到一个旧二进制，报\`unknown command Prompt\`——
+# 看起来像内核坏了，其实只是二进制和源码不同步。
+[ "${SKIP_BUILD:-0}" = "1" ] || cargo build -q -p harnessd || { echo "FAIL 编译 harnessd 失败"; exit 1; }
 : "${HARNESSD_BIN:?}" "${HARNESS_ENGINE_BIN:?}" "${CODEWHALE_HOME:?}"
 export CODEWHALE_HOME
 
