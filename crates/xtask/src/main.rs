@@ -12,6 +12,7 @@ mod ocr;
 mod mutate;
 mod approve;
 mod bench;
+mod lint;
 
 /// 本项目的实现语言。方案定的是 Rust 做内核与界面、Go 做插件层。
 const LANGS: &[(&str, &str)] = &[
@@ -57,6 +58,10 @@ fn ext_of(path: &str) -> Option<&str> {
 
 fn main() {
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "lang-audit".into());
+    if cmd == "lint" {
+        let root = std::env::current_dir().expect("cwd");
+        std::process::exit(lint::run(&root));
+    }
     if cmd == "bench" {
         let args: Vec<String> = std::env::args().skip(2).collect();
         match bench::main_cmd(&args) {

@@ -54,6 +54,13 @@ fi
 : "${HARNESSD_ORBIT_DUMP:=$HOME/.hiq/orbit-events.ndjson}"
 export HARNESSD_ORBIT_DUMP
 
+# 界面上的权限档位是"完全访问"，引擎就必须按"完全访问"建线程。
+# 不显式给的话引擎默认 auto_approve=false：模型一调工具就发 approval.required，
+# 然后**一直等**（实测：回合卡在 in_progress，只剩 keepalive），
+# 界面显示"已工作 0s"、后续消息排队，看起来就是"一直没反应"。
+: "${HARNESSD_THREAD_BODY:={"auto_approve":true}}"
+export HARNESSD_THREAD_BODY
+
 echo "启动界面（内核走 harnessd，不是进程序内执行器）…"
 cd "$ROOT"
 exec env \

@@ -121,6 +121,18 @@ impl HttpEngine {
     /// 症状极具误导性：模型说"写好了、跑通了"，东西却不在项目目录里。
     fn thread_body(&self) -> Value {
         let mut body = self.thread_body.clone();
+        // **默认必须显式声明 auto_approve。**
+        //
+        // 不给的话引擎默认 false：模型一调工具就发 `approval.required` 然后
+        // 一直等（实测：回合卡在 in_progress，SSE 只剩 keepalive，一个事件都
+        // 不再产生）。界面那边显示"已工作 0s"、后续消息排队——用户看到的就是
+        // "一直没反应"，而内核日志里连一条错误都没有。
+        //
+        // 我们的桌面端权限档位是"完全访问"，所以默认 true；
+        // 探针要验审批通道时会显式传 false。
+        if body.get("auto_approve").is_none() {
+            body["auto_approve"] = json!(true);
+        }
         if body.get("workspace").is_none() {
             if let Ok(cwd) = std::env::current_dir() {
                 body["workspace"] = json!(cwd.to_string_lossy());

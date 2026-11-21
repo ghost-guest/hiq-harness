@@ -11,6 +11,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 BASELINE="${BASELINE:-bench/baseline-deepseek.json}"
 
+# 事故规则 lint：每条规则对应一次真实事故（自研传输、订阅不复位、
+# 回合结束才吐事件、auto_approve 默认 false 卡死）。红了就说明老毛病回来了。
+if ! cargo run -q -p xtask -- lint; then
+  echo "门禁未通过：事故规则 lint 红了"
+  exit 1
+fi
+
 # D4 红线：任何 crate 依赖引擎、或 path 依赖逃出仓库 → 直接挡。
 if [ -x scripts/check-engine.sh ]; then
   bash scripts/check-engine.sh || { echo "门禁未通过：D4 检查红了"; exit 1; }
