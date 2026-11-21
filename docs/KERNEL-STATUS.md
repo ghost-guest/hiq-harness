@@ -1481,3 +1481,34 @@ HARNESS_ENGINE_BIN=… CODEWHALE_HOME=… bash scripts/gate.sh
 `Theme`，怀疑与共享的字体/图集缓存有关。**没有证据就不动它**——
 `evidence.sh` 里本来就有"未登记的失败先单跑复核，只有单跑 PASS 才降级为观察项"
 的机制，这条会被如实标成 flake，而不是悄悄洗白。
+
+---
+
+## 界面"一阵一阵"的定位与两次被否掉的改法（2026-11-21）
+
+用户反馈：思考和工具调用不连续，思考完停一下才出工具调用，工具出来又停一下。
+
+**机制定位**（不是时序问题，事件已经是实时的）：运行中活动组是展开的
+（`transcript_view.rs` 的 `show_work = paint.live || paint.fold_open || !before_answer`），
+组内每张工具卡片又按 `agent_calls.open_by_default(false)` 自动展开，
+于是每来一个工具，组就长高一大块 —— 视觉上就是"一阵一阵"。
+
+**改法 A（已回滚）**：运行中不渲染活动组，只留活动条。
+→ 破 4 条测试，其中 `agent_call_display_sets_the_untouched_default` 明确断言
+"follow_run opens a live group"，属上游产品意图，不能单方面改。
+
+**改法 B（已回滚）**：运行中卡片不自动展开（`!live && open_by_default(false)`）。
+→ `agent_call_display_sets_the_untouched_default` 转绿，但
+`repeated_tools_with_short_thoughts_do_not_accumulate_bottom_space` 红：
+指示器贴底距离 24px → 46px。**多画一帧仍 46px，不收敛**，
+说明不是单帧测量残差，而是折叠后行高真的少算进了贴底算法。
+
+**最终定位（同日）**：这两次失败都不是产品意图冲突，而是一个真 bug ——
+`debug_selector("working-indicator")` 挂在了三行结构的**第一行**头上，
+"指示器底部"因此落在第二行上方，贴底距离凭空多一行（24px → 46px）。
+把标记挪到整个容器后，改法 B 直接通过。
+
+**已修**：`tool_open = explicit_open || (!live && agent_calls.open_by_default(false))`
+—— 运行中卡片只有一行标题（当前命令在活动条里），用户点开的照旧展开，回合结束按偏好显示。
+`cargo test -p orbit-pi`：1933 passed / 1 failed（唯一红的是已知设计差异
+`session_park_cancels_custom_ui_with_a_top_level_flag`）。

@@ -7,7 +7,7 @@
 //! 只绑 127.0.0.1：不对外暴露。跨设备走隧道（协议已预留）。
 
 use harness_core::wire::{Envelope, FrameError};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -306,20 +306,14 @@ fn dispatch(
 
     let route = Route::parse(method, path);
 
-    // UI 由 apps/ui（Next.js + assistant-ui）提供，这里只返回指引
+    // 界面只有 apps/orbit（Rust + GPUI）。此前的 apps/ui（Next.js）已删除，
+    // 这里只返回指引，别再让人去找一个不存在的目录。
     if route == Route::Ui {
-        let body = serde_json::json!({
-            "service": "hiq-harness host",
-            "note": "界面在 apps/ui（Next.js + assistant-ui）。在此目录跑 pnpm dev 打开。",
-            "endpoints": ["/health", "/devices", "/events", "/memory",
-                          "/pending", "/resolve", "/run", "/sop", "ws://.../ws"],
-        })
-        .to_string();
         return Dispatch::Json {
             status: 200,
             body: serde_json::json!({
                 "service": "hiq-harness host",
-                "note": "界面在 apps/ui（Next.js + assistant-ui）。在此目录跑 pnpm dev 打开。",
+                "note": "界面在 apps/orbit（Rust + GPUI）。用 scripts/run-hiq.sh 启动。",
                 "endpoints": ["/health", "/devices", "/events", "/memory",
                               "/pending", "/resolve", "/run", "/sop", "ws://.../ws"],
             }),

@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use harness_cli::durable::{self, DurableSession};
+use harness_cli::durable;
 use harness_cli::{
     exec, host, host_service, llm, memory as memory, rest, routes, runner, server, sop, sse, tools,
 };

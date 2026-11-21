@@ -3040,7 +3040,11 @@ fn render_activity_group(
                 // decides (a tool card has no run state of its own, so
                 // `follow_run` means closed — the pre-#80 behavior).
                 let explicit_open = expanded_tools.borrow().contains(&(ix, flat));
-                let tool_open = explicit_open || agent_calls.open_by_default(false);
+                // 运行中不自动展开卡片：展开会把参数和输出一起摊开，每来一个
+                // 工具就长高一大块，视觉上"思考完停一下、工具出来又停一下"。
+                // 跑的时候只留一行标题（当前命令已经在活动条里了），
+                // 用户自己点开的照旧展开；回合结束后再按偏好显示。
+                let tool_open = explicit_open || (!live && agent_calls.open_by_default(false));
                 render_activity_card(
                     tool,
                     pulse,
@@ -6668,7 +6672,6 @@ fn render_working_indicator(
         // The row needs a definite width: the shimmer paints at `width: 100%`
         // of its wrapper, so an indefinite (shrink-to-fit) row would collapse
         // the label — timer and all — to nothing.
-        .debug_selector(|| "working-indicator".to_string())
         .w_full()
         .h(px(22.))
         .flex()
@@ -6723,6 +6726,10 @@ fn render_working_indicator(
     };
 
     div()
+        // 标记挂在整个指示器上，不是只挂第一行。三行结构之后，挂在头行会让
+        // "指示器底部"落在第二行上方，测出来的贴底距离凭空多一行（24px→46px），
+        // 也会让滚动/贴底的判断偏移。
+        .debug_selector(|| "working-indicator".to_string())
         .w_full()
         .flex()
         .flex_col()
@@ -11461,7 +11468,10 @@ mod tests {
     }
 
     #[test]
-    fn working_indicator_does_not_repeat_tool_details() {
+    fn working_indicator_shows_a_one_line_tool_summary() {
+        // 契约：指示器只给**一行摘要**（工具名 + 命令/路径前 72 字），
+        // 不复述整段参数 JSON。这条契约是被用户需求的：他要在运行中看到
+        // "正在跑什么命令"，否则只有计时器，看起来像卡死。
         let bash = ToolCall {
             name: "bash".into(),
             summary: r#"{"command":"cargo test"}"#.into(),
@@ -11479,7 +11489,12 @@ mod tests {
             tools: vec![bash],
             ..Step::default()
         };
-        assert_eq!(working_activity_label(&step), None);
+        let label = working_activity_label(&step).expect("bash 必须给出可读摘要");
+        assert_eq!(label, "bash cargo test");
+        assert!(
+            !label.contains('{') && !label.contains('"'),
+            "摘要不能回显参数 JSON：{label}"
+        );
 
         let read = ToolCall {
             name: "read".into(),
@@ -11498,7 +11513,10 @@ mod tests {
             tools: vec![read],
             ..Step::default()
         };
-        assert_eq!(working_activity_label(&step), None);
+        assert_eq!(
+            working_activity_label(&step).as_deref(),
+            Some("read src/auth.rs")
+        );
 
         // Thinking-only work reads as thinking; an empty step yields no
         // label so the caller falls back to the generic working form.
@@ -11521,7 +11539,6 @@ mod tests {
         assert_eq!(working_activity_label(&Step::default()), None);
     }
 
-    #[test]
     fn thinking_card_settles_when_the_step_moves_on() {
         let thinking = Step {
             thinking: "reasoning".into(),
